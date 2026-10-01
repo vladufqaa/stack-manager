@@ -2509,6 +2509,7 @@ db, i, proto, dom, cert, key = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.a
 con = sqlite3.connect(db)
 def one(sql, *a):
     return con.execute(sql, a).fetchone()
+changed = False
 if proto == "hysteria":
     st = json.loads((one("SELECT stream_settings FROM inbounds WHERE id=?", i)[0] or "{}"))
     st["network"] = st.get("network") or "udp"
@@ -2518,23 +2519,31 @@ if proto == "hysteria":
     tls["certificates"] = [{"certificateFile": cert, "keyFile": key}]
     st["tlsSettings"] = tls
     con.execute("UPDATE inbounds SET stream_settings=? WHERE id=?", (json.dumps(st), i))
+    changed = True
 else:
     try:
         s = json.loads((one("SELECT settings FROM inbounds WHERE id=?", i)[0] or "{}"))
     except Exception:
         s = {}
-    if "certFile" in s:
-        s["certFile"] = cert; s["keyFile"] = key
-        con.execute("UPDATE inbounds SET settings=? WHERE id=?", (json.dumps(s), i))
+    # БЕЗУСЛОВНО: ключа certFile может не быть (панель перегенерила settings) —
+    # создаём. Иначе самолечение зацикливается: sync «вписал», проверка не видит.
+    s["certFile"] = cert; s["keyFile"] = key
+    con.execute("UPDATE inbounds SET settings=? WHERE id=?", (json.dumps(s), i))
+    changed = True
     if proto in ("anytls", "trusttunnel", "trust-tunnel", "vless"):
         st2 = json.loads((one("SELECT stream_settings FROM inbounds WHERE id=?", i)[0] or "{}"))
         if st2.get("security") not in (None, "", "tls"):
-            con.commit(); sys.exit(0)   # reality и прочие — stream не трогаем
-        st2["network"] = "tcp"; st2["security"] = "tls"
-        st2["tlsSettings"] = {"serverName": dom, "certificates": [{"certificateFile": cert, "keyFile": key}]}
-        con.execute("UPDATE inbounds SET stream_settings=? WHERE id=?", (json.dumps(st2), i))
+            pass   # reality и прочие — stream не трогаем
+        else:
+            st2["network"] = "tcp"; st2["security"] = "tls"
+            st2["tlsSettings"] = {"serverName": dom, "certificates": [{"certificateFile": cert, "keyFile": key}]}
+            con.execute("UPDATE inbounds SET stream_settings=? WHERE id=?", (json.dumps(st2), i))
 con.commit()
-print(f"  #{i} ({proto}): cert вписан ({dom} → {cert})")
+if changed:
+    print(f"  #{i} ({proto}): cert вписан ({dom} → {cert})")
+    sys.exit(0)
+print(f"  #{i} ({proto}): ПРЕДУПРЕЖДЕНИЕ: серт никуда не вписан — структура не распознана")
+sys.exit(4)
 PY
   done < <(python3 - "$XUI_DB" <<'PYROWS' 2>/dev/null
 import sqlite3, json, sys
@@ -2668,6 +2677,14 @@ for iid, proto, setts_s, stream_s in rows:
         continue                          # серт вписан в stream (xray-класс)
     if se.get("certFile"):
         continue                          # серт вписан в settings (caddy-класс)
+    # сервис жив и слушает свой порт → серт фактически работает; панель-менеджер
+    # туннелей мог перегенерить settings — не считаем это поломкой (иначе цикл)
+    try:
+        _p = int(se.get("port") or 0)
+    except Exception:
+        _p = 0
+    if _p and port_listens(_p):
+        continue
     sys.exit(0)                           # серт не вписан
 sys.exit(1)
 PYNEEDHEAL
