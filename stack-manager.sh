@@ -4553,16 +4553,27 @@ sni_cleanup_stale() {
   # 1) SNI-записи (map), за которыми нет живого инбаунда
   while IFS='|' read -r dom be iid; do
     [[ -z "$dom" ]] && continue
-    # инбаунда нет ВООБЩЕ (выключенный — есть, его запись сохраняем!)
-    if [[ ! "$iid" =~ ^[0-9]+$ ]]; then
-      continue   # не смогли разобрать id — не трогаем (перестраховка)
+    # Разбор id не удался — перестраховка: запись не трогаем
+    [[ ! "$iid" =~ ^[0-9]+$ ]] && continue
+    # Читаем БД с таймаутом: x-ui периодически держит блокировку (трафик-статы),
+    # без .timeout чтение падает с «database is locked» и даёт ПУСТОЙ ответ,
+    # который раньше трактовался как «инбаунда нет» → ложное удаление.
+    local cnt=""
+    cnt=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+          "SELECT COUNT(*) FROM inbounds WHERE id=$iid;" 2>/dev/null | tr -d '[:space:]') || true
+    if [[ -z "$cnt" ]]; then
+      warn "  #$iid: БД не ответила (блокировка?) — SNI-запись «$dom» сохраняю (перестраховка)"
+      continue
     fi
-    local en=""
-    en=$(sqlite3 "$XUI_DB" "SELECT COALESCE(enable,'') FROM inbounds WHERE id=$iid;" 2>/dev/null || true)
-    if [[ -z "$en" ]]; then
+    if [[ "$cnt" == "0" ]]; then
+      warn "  #$iid: в $XUI_DB инбаунда нет — SNI-запись «$dom» на удаление"
       dead_map+=("$dom|$be|$iid")
       continue
     fi
+    # инбаунд есть; выключенный (enable=0) — тоже «есть»: запись сохраняем
+    local en=""
+    en=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+         "SELECT COALESCE(enable,'1') FROM inbounds WHERE id=$iid;" 2>/dev/null | tr -d '[:space:]') || true
     if [[ "$en" == "0" ]]; then
       log "  #$iid: инбаунд выключен (enable=0) — SNI-запись «$dom» сохраняю (включишь — заработает сразу)"
       continue
@@ -4573,9 +4584,14 @@ sni_cleanup_stale() {
     local t tgt="" dst=""
     for t in "${REALITY_TARGETS[@]}"; do [[ "$dom" == "$t" ]] && { tgt=1; break; }; done
     if [[ -n "$tgt" ]]; then
-      dst=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$iid;" 2>/dev/null || true)
+      dst=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$iid;" 2>/dev/null || true)
       dst="${dst%%:*}"
-      [[ "$dst" != "$dom" ]] && dead_map+=("$dom|$be|$iid")
+      dst="$(printf '%s' "$dst" | tr -d '[:space:]')"
+      if [[ -z "$dst" ]]; then
+        warn "  #$iid: не смог сверить dest из БД — SNI-запись «$dom» сохраняю (перестраховка)"
+      elif [[ "$dst" != "$dom" ]]; then
+        dead_map+=("$dom|$be|$iid")
+      fi
     fi
   done < <(sni_map_domains)
 
