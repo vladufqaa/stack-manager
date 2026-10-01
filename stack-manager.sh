@@ -5073,7 +5073,7 @@ uninstall_panel_lucx() {
 
 # --- Обновление скрипта с GitHub ---------------------------------------------
 # URL берётся из /root/.stack-src (сохраняется после первого обновления).
-STACK_SRC_URL="$(cat /root/.stack-src 2>/dev/null || echo 'https://raw.githubusercontent.com/ВАШ_НИК/stack-manager/main/stack-manager.sh')"
+STACK_SRC_URL="$(cat /root/.stack-src 2>/dev/null || echo 'https://raw.githubusercontent.com/vladufqaa/stack-manager/main/stack-manager.sh')"
 
 update_self() {
   line; echo -e "${B}   ОБНОВЛЕНИЕ СКРИПТА С GITHUB${N}"; line

@@ -1,0 +1,14 @@
+# приватные/служебные файлы — в репо НЕ попадают
+stack-debug-key
+stack-debug-key.pub
+*.key
+*.pem
+
+# резервные копии
+stack-manager.orig.sh
+*.bak
+*.bak.*
+
+# мусор
+~$*
+Thumbs.db

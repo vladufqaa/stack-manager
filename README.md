@@ -39,9 +39,9 @@
 flowchart LR
     C(("🌍 Клиент")) -->|" :443 "| NGINX["nginx · SNI-роутер<br>(единственный открытый порт)"]
 
-    NGINX -->|"SNI: panel.com"| PANEL["🖥️ x-ui панель<br/>127.0.0.1"]
-    NGINX -->|"SNI: panel.com/sub"| SUBS["📨 Подписки<br/>127.0.0.1"]
-    NGINX -->|"SNI: panel.com"| AGH["🛡️ AdGuard Home + DoH"]
+    NGINX -->|"SNI: panel.dom"| PANEL["🖥️ x-ui панель<br/>127.0.0.1"]
+    NGINX -->|"SNI: panel.dom/sub"| SUBS["📨 Подписки<br/>127.0.0.1"]
+    NGINX -->|"SNI: panel.dom"| AGH["🛡️ AdGuard Home + DoH"]
     NGINX -->|"SNI: цель (reality)"| INB1["⚡ VLESS Reality<br/>127.0.0.1"]
     NGINX -->|"SNI: r. / rx. / nn. …"| INB2["🔌 naive · anytls · trusttunnel<br/>127.0.0.1"]
     NGINX -->|"прочие SNI"| DECOY["🃏 Decoy-заглушка"]
@@ -103,7 +103,7 @@ bash /root/stack-manager.sh
 ## 📦 Установка на сервер одной строкой
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ТВОЙ_НИК/stack-manager/main/stack-manager.sh -o /root/stack-manager.sh && bash /root/stack-manager.sh
+curl -fsSL https://raw.githubusercontent.com/vladufqaa/stack-manager/main/stack-manager.sh -o /root/stack-manager.sh && bash /root/stack-manager.sh
 ```
 
 ---
