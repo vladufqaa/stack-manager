@@ -4553,9 +4553,18 @@ sni_cleanup_stale() {
   # 1) SNI-записи (map), за которыми нет живого инбаунда
   while IFS='|' read -r dom be iid; do
     [[ -z "$dom" ]] && continue
-    cnt=$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE id=$iid AND enable=1;" 2>/dev/null || echo 0)
-    if [[ "$cnt" == "0" ]]; then
+    # инбаунда нет ВООБЩЕ (выключенный — есть, его запись сохраняем!)
+    if [[ ! "$iid" =~ ^[0-9]+$ ]]; then
+      continue   # не смогли разобрать id — не трогаем (перестраховка)
+    fi
+    local en=""
+    en=$(sqlite3 "$XUI_DB" "SELECT COALESCE(enable,'') FROM inbounds WHERE id=$iid;" 2>/dev/null || true)
+    if [[ -z "$en" ]]; then
       dead_map+=("$dom|$be|$iid")
+      continue
+    fi
+    if [[ "$en" == "0" ]]; then
+      log "  #$iid: инбаунд выключен (enable=0) — SNI-запись «$dom» сохраняю (включишь — заработает сразу)"
       continue
     fi
     # Чужой таргет reality, который инбаунд УЖЕ не использует → лишний SNI:
