@@ -2704,6 +2704,17 @@ cert_issue() {
   # невидимый хвост (пробел/CR из БД или ans-файла) ломает пути live/<домен> —
   # certbot нормализует имя, скрипт ищет файлы по «грязному» пути и не находит
   d="$(printf '%s' "$d" | tr -d '[:space:]')"
+  # ЖЁСТКИЙ ЗАПРЕТ: цели чужого reality — НЕ наши домены. Let's Encrypt серт
+  # на них не выдаст (HTTP-01/DNS-01 недоступны), а спрашивать пользователя
+  # «какой сертификат для www.samsung.com» — баг, какими бы путями домен
+  # сюда ни приехал (утёкший serverNames из старой БД и т.п.).
+  local _rt_x
+  for _rt_x in "${REALITY_TARGETS[@]}"; do
+    if [[ "$d" == "$_rt_x" ]]; then
+      warn "cert_issue: «$d» — цель чужого reality, серт не нужен и невозможен (пропускаю)"
+      return 1
+    fi
+  done
   local dir="/etc/letsencrypt/live/$d" arch="/etc/letsencrypt/archive/$d"
 
   # self-heal: флаг wildcard мог не загрузиться (source без точки входа)
@@ -3488,6 +3499,17 @@ configure_sni_for_inbound() {
       ask_sni_domain domain "$id" "$def"
     fi
   fi
+
+  # Мусор из старой установки: «свой» домен оказался целью чужого reality —
+  # SNI-маршрут/серт/decoy на чужой домен строить нельзя
+  local _rt_y
+  for _rt_y in "${REALITY_TARGETS[@]}"; do
+    if [[ "$domain" == "$_rt_y" ]]; then
+      warn "  «$domain» — цель чужого reality, а не твой домен (артефакт старой установки)."
+      warn "  Инбаунд #$id пересоздай: панель → удалить → создать заново с нормальным доменом."
+      return 1
+    fi
+  done
 
   # Внешний таргет «найти цели» — доктрина «всё за 443»: чужой реалити прячем
   # по SNI цели, слушаем 127.0.0.1, tcp-порт инбаунда НЕ открываем.
