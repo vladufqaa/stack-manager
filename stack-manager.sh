@@ -1497,7 +1497,7 @@ create_inbound_db() {
   case "$proto" in
     vless)
       settings_json=$(cat <<EOF
-{"clients":[{"id":"$uuid","flow":"$flow","email":"${cemail:-user@$port}","limitIp":0,"totalGB":0,"expiryTime":0,"enable":true,"tgId":0,"subId":"$sub_id","reset":0,"fingerprint":"firefox"}],"decryption":"none","fallbacks":[]}
+{"clients":[],"decryption":"none","fallbacks":[]}
 EOF
 )
       ;;
@@ -1512,7 +1512,7 @@ EOF
       # tunnel-инбаунд LucX (trusttunnel_inbound.go): hostname+cert обязательны,
       # клиенты → HMAC-креды из authSeed (панель покажет их и в share-ссылках)
       settings_json=$(cat <<EOF
-{"remark":"trusttunnel-$port","hostname":"$sn","listen":"","ipv6":false,"certFile":"$cert","keyFile":"$key","clientDns":"1.1.1.1","upstreamProtocol":"http2","routeThroughXray":false,"routeXrayPort":0,"outboundTag":"","metricsPort":0,"listenPreset":"fast","clientRandomPrefix":"$(gen_hex 4)/ffffffff","authSeed":"$(gen_hex 32)","clients":[{"email":"${cemail:-user}","enable":true}]}
+{"remark":"trusttunnel-$port","hostname":"$sn","listen":"","ipv6":false,"certFile":"$cert","keyFile":"$key","clientDns":"1.1.1.1","upstreamProtocol":"http2","routeThroughXray":false,"routeXrayPort":0,"outboundTag":"","metricsPort":0,"listenPreset":"fast","clientRandomPrefix":"$(gen_hex 4)/ffffffff","authSeed":"$(gen_hex 32)","clients":[]}
 EOF
 ) ;;
     naive|naiveproxy)
@@ -1888,19 +1888,15 @@ create_inbounds_menu() {
     used_ports+=("$port")
 
     echo
-    # Имя клиента (email) — вместо безликого «user@порт»
-    local cemail=""
-    if [[ "$proto" == "vless" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" ]]; then
-      ask cemail "Имя клиента (email) для $name (Enter — user)" "user" '^[A-Za-z0-9._@-]{1,64}$'
-    fi
+    # Клиентов НЕ создаём (по решению пользователя) — добавляй сам в панели.
     # VK call hashes — только для qwdtt/csqtt; пусто → поле остаётся пустым
     local vk=""
     if [[ "$proto" == "qwdtt" || "$proto" == "csqtt" ]]; then
       ask vk "VK call hashes (через запятую, БЕЗ пробелов; Enter — пропустить)" "" '^[a-zA-Z0-9,_-]*$'
     fi
-    log "Создаю: $name (proto=$proto, transport=$transport, sec=$security, port=$port)"
+    log "Создаю: $name (proto=$proto, transport=$transport, sec=$security, port=$port, клиентов: 0)"
     local new_id
-    new_id=$(create_inbound_db "$proto" "$transport" "$security" "$flow" "$port" "$remark" "$net" "$sni_domain" "$vk" "$cemail") || continue
+    new_id=$(create_inbound_db "$proto" "$transport" "$security" "$flow" "$port" "$remark" "$net" "$sni_domain" "$vk") || continue
     if [[ -n "$new_id" ]]; then
       case "$proto" in
         qwdtt|csqtt)
