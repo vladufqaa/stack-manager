@@ -2503,9 +2503,9 @@ sync_inbound_certs() {
     # ВАЖНО: sidecar-инбаунды (naive) берут серт из settings.certFile,
     # xray-инбаунды (trusttunnel/anytls/hysteria) — из stream_settings.
     # Пишем ОБА места, иначе x-ui пропускает инбаунд и он не слушает порт.
-    python3 - "$XUI_DB" "$id" "$proto" "$dom" "$cert" "$key" <<'PY' && cnt=$((cnt+1))
-import sqlite3, json, sys
-db, i, proto, dom, cert, key = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+    python3 - "$XUI_DB" "$id" "$proto" "$dom" "$cert" "$key" "$SNI_CONF" <<'PY' && cnt=$((cnt+1))
+import sqlite3, json, sys, re
+db, i, proto, dom, cert, key, sni_conf = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
 con = sqlite3.connect(db)
 def one(sql, *a):
     return con.execute(sql, a).fetchone()
@@ -2530,6 +2530,18 @@ else:
     s["certFile"] = cert; s["keyFile"] = key
     con.execute("UPDATE inbounds SET settings=? WHERE id=?", (json.dumps(s), i))
     changed = True
+    # Tunnel-класс LucX читает порт из settings.port; если панель его потеряла —
+    # сервис не биндится. Восстанавливаем из SNI-маршрута (upstream inb_<id>_backend).
+    if proto in ("naive", "naiveproxy", "anytls", "trusttunnel", "trust-tunnel", "tproxy") and not s.get("port"):
+        try:
+            m = re.search(r"inb_%d_backend\s*\{[^}]*?server[^\d]*127\.0\.0\.1:(\d+)" % i,
+                          open(sni_conf, encoding="utf-8", errors="ignore").read(), re.S)
+            if m:
+                s["port"] = int(m.group(1))
+                con.execute("UPDATE inbounds SET settings=? WHERE id=?", (json.dumps(s), i))
+                print(f"  #{i} ({proto}): порт восстановлен из SNI-маршрута → {s['port']}")
+        except Exception:
+            pass
     if proto in ("anytls", "trusttunnel", "trust-tunnel", "vless"):
         st2 = json.loads((one("SELECT stream_settings FROM inbounds WHERE id=?", i)[0] or "{}"))
         if st2.get("security") not in (None, "", "tls"):
