@@ -3356,28 +3356,38 @@ reality_set_dest() {
 # Вставить/обновить запись hosts в панели для TCP-инбаунда (адрес=домен, порт 443).
 # Нужна ВСЕМ TCP-инбаундам (vless, naive, anytls, trusttunnel, tproxy…) — иначе
 # в подписках панели нет ссылок через 443. Таблицы может не быть — пропускаем.
-#   $1 = inbound_id, $2 = адрес (домен панели/IP), $3 = SNI (по умолчанию = адрес;
-#        для чужого реалити это serverNames ЦЕЛИ, а не домен панели!)
+#   $1 = inbound_id, $2 = адрес (домен панели/IP), $3 = SNI (СТАРЫЙ смысл).
+# ПОЛЕ SNI («безопасность» в hosts) БОЛЬШЕ НЕ ЗАПОЛНЯЕМ — панель на него ругается.
+# Исключение: чужой reality (dest = внешняя цель ≠ 127.0.0.1) — там SNI=цель
+# обязателен, иначе подписочная ссылка теряет нужный serverName.
 hosts_upsert() {   # <inbound_id> <address> [sni]
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
-  local id="$1" dom="$2" sni="${3:-$2}"
+  local id="$1" dom="$2" sni="${3:-}"
   [[ -z "$id" || -z "$dom" || "$dom" == "null" ]] && return 0
-  [[ -z "$sni" ]] && sni="$dom"
+  if [[ -n "$sni" ]]; then
+    local _dest=""
+    _dest=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+            "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$id;" 2>/dev/null | tr -d '[:space:]') || true
+    if [[ -z "$_dest" || "$_dest" == 127.0.0.1:* ]]; then
+      sni=""   # своё reality (decoy) или не-reality — поле SNI оставляем пустым
+    fi
+    # чужой reality: sni = переданная цель — оставляем как есть
+  fi
   local has_hosts
-  has_hosts=$(sqlite3 "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
+  has_hosts=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
   [[ -z "$has_hosts" ]] && return 0
   local cols
-  cols=$(sqlite3 "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ')
+  cols=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ')
   local remark
-  remark=$(sqlite3 "$XUI_DB" "SELECT remark FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-  sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
+  remark=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT remark FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
   local fields="inbound_id,address,port" vals="$id,'$dom',443"
   grep -qw remark       <<<"$cols" && { fields+=",remark";       vals+=",'$(printf '%s' "$remark" | sed "s/'/''/g")'"; }
   grep -qw sni          <<<"$cols" && { fields+=",sni";          vals+=",'$sni'"; }
   grep -qw fingerprint  <<<"$cols" && { fields+=",fingerprint";  vals+=",'firefox'"; }
   grep -qw is_disabled  <<<"$cols" && { fields+=",is_disabled";  vals+=",0"; }
   grep -qw enable       <<<"$cols" && { fields+=",enable";       vals+=",1"; }
-  if sqlite3 "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null; then
+  if sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null; then
     log "  hosts: #$id → $dom:443 ✓"
   else
     warn "  hosts: вставка для #$id не прошла — проверь схему таблицы hosts"
@@ -4035,7 +4045,8 @@ EOF
       sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
       local fields="inbound_id,address,port" vals="$id,'$PANEL_DOMAIN',443"
       grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'$remark'"; }
-      grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",'$dom'"; }
+      # SNI («безопасность») не заполняем — панель на заполненное поле ругается
+      grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",''"; }
       grep -qw fingerprint <<<"$cols" && { fields+=",fingerprint"; vals+=",'firefox'"; }
       grep -qw is_disabled <<<"$cols" && { fields+=",is_disabled"; vals+=",0"; }
       grep -qw enable      <<<"$cols" && { fields+=",enable";      vals+=",1"; }
@@ -4347,7 +4358,8 @@ fix_inbound() {
     sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
     fields="inbound_id,address,port"; vals="$id,'$panel_domain',443"
     grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'$remark'"; }
-    grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",'$domain'"; }
+    # SNI («безопасность») не заполняем — панель на заполненное поле ругается
+    grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",''"; }
     grep -qw fingerprint <<<"$cols" && { fields+=",fingerprint"; vals+=",'firefox'"; }
     grep -qw is_disabled <<<"$cols" && { fields+=",is_disabled"; vals+=",0"; }
     grep -qw enable      <<<"$cols" && { fields+=",enable";      vals+=",1"; }
