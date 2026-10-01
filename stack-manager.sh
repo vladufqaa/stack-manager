@@ -1794,6 +1794,17 @@ create_inbounds_menu() {
     esac
     local remark="${proto}-${transport}"
 
+    # Домен панели для hosts-записи — резолвим ДО создания для ЛЮБОГО типа
+    # (иначе reality/tproxy уходят с адресом-фолбэком, вплоть до IP сервера).
+    if [[ -z "$panel_domain" ]]; then
+      panel_domain="${PANEL_DOMAIN:-}"
+      [[ -z "$panel_domain" ]] && panel_domain=$(xui_get subDomain 2>/dev/null || true)
+      if [[ -z "$panel_domain" && -t 0 ]]; then
+        ask panel_domain "Домен панели (адрес для hosts-записи инбаунда)" "panel.example.com" '^[a-zA-Z0-9.-]+$'
+      fi
+      [[ -n "$panel_domain" ]] && SNI_USED["$panel_domain"]="${SNI_USED[$panel_domain]:-panel_backend}"
+    fi
+
     # --- Reality: свой/чужой — тот же вопрос, что и в авто-установке ---
     local rmode=""
     if [[ "$proto" == "vless" && "$security" == "reality" ]]; then
@@ -3400,8 +3411,16 @@ reality_ext_hide() {
   printf '%s' "$tdom" > /tmp/.reality-found-target 2>/dev/null || true
   sqlite3 "$XUI_DB" "UPDATE inbounds SET listen='127.0.0.1' WHERE id=$id;" 2>/dev/null || true
   # подписки: адрес = домен панели (валидный серт), SNI = serverNames ЦЕЛИ
-  # (иначе в hosts прописывается SNI панели → подключение не стартует)
-  hosts_upsert "$id" "${PANEL_DOMAIN:-$(curl -4 -s --max-time 6 ifconfig.me 2>/dev/null || echo "$tdom")}" "$tdom"
+  # (иначе в hosts прописывается SNI панели → подключение не стартует).
+  # Домен панели: глобал → subDomain панели → вопрос; IP — последний рубеж.
+  local _hp="${PANEL_DOMAIN:-}"
+  [[ -z "$_hp" ]] && _hp=$(xui_get subDomain 2>/dev/null || true)
+  if [[ -z "$_hp" && -t 0 ]]; then
+    ask _hp "Домен панели (адрес для hosts-записи #$id)" "" '^[a-zA-Z0-9.-]+$'
+  fi
+  [[ -z "$_hp" ]] && _hp=$(curl -4 -s --max-time 6 ifconfig.me 2>/dev/null || true)
+  [[ -z "$_hp" ]] && _hp="$tdom"
+  hosts_upsert "$id" "$_hp" "$tdom"
   if [[ -n "$xui_was" ]]; then
     systemctl start x-ui >/dev/null 2>&1 || true
     sleep 2
