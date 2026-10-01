@@ -3638,6 +3638,13 @@ initial_setup() {
       warn "#$id $proto (UDP/$port) — пропускаем"
       HIDE[$id]=false; continue
     fi
+    if [[ "$proto" == "tproxy" ]]; then
+      # tg web proxy прячется СВОИМ механизмом (hosts: address=панель, sni=tg-домен;
+      # маршрут в SNI_CONF ведёт setup_tproxy_web с бэкендом tg_backend) —
+      # вопросы «Скрыть/SNI-домен» к нему не относятся
+      log "#$id tproxy ($port) — прячется своим механизмом (tg web proxy за 443), повторно не спрашиваю"
+      HIDE[$id]=false; continue
+    fi
 
     # уже привязан к SNI (создан в п.2/п.16 или ранее) — НЕ спрашиваем второй раз
     local existing_dom=""
@@ -3967,6 +3974,7 @@ EOF
     # SNI не занят инбаундом (не скрываем за 443) — hosts-запись («SNI включён») не нужна
     for id in "${INB_IDS[@]}"; do
       [[ "${HIDE[$id]}" == true ]] && continue
+      [[ "${INB_PROTO[$id]}" == "tproxy" ]] && continue   # tg web proxy: hosts ведёт setup_tproxy_web
       # спрятан за 443 (свой домен ИЛИ чужой реалити по SNI цели) — hosts не трогаем
       grep -qE "^upstream inb_${id}_backend" "$SNI_CONF" 2>/dev/null && continue
       sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
