@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🛰️ stack-manager.sh
+# 🛰️ stack-manager
 
 ### SNI-стек «всё за 443» в одном файле
 
