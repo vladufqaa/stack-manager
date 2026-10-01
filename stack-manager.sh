@@ -4240,7 +4240,21 @@ fix_inbound() {
   while IFS='|' read -r p po st; do proto="$p"; port="$po"; stream="$st"; done \
     < <(sqlite3 "$XUI_DB" "SELECT protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
   [[ -z "$proto" ]] && { err "Инбаунд #$id не найден"; return 1; }
-  is_udp_proto "$proto" && { warn "UDP ($proto) — SNI не нужен"; return 0; }
+  # --- типы, с которыми скрипт не работает / которые не нужно трогать ---
+  if is_udp_proto "$proto"; then
+    warn "С данным типом подключения скрипт не работает: #$id — $proto (UDP). SNI-скрытие за 443 применимо только к TCP (TLS/Reality)."
+    return 0
+  fi
+  if [[ "$proto" == "tproxy" ]]; then
+    warn "#$id tproxy — это tg web proxy: за 443 ведёт свой маршрут (setup_tproxy_web), отдельная настройка не нужна."
+    return 0
+  fi
+  # SNI-скрытие требует TLS или Reality: голый tcp/ws без TLS за SNI не спрятать
+  if ! grep -Eqi '"security": ?"tls"|"security":"tls"|reality' <<<"$stream" \
+     && [[ "$proto" != naive* && "$proto" != "anytls" && "$proto" != trust* ]]; then
+    warn "С данным типом подключения скрипт не работает: #$id ($proto, TLS/Reality не найдены в stream_settings)."
+    return 0
+  fi
 
   # tunnel-инбаунды LucX: заполняем settings (домен, ключи, креды), не stream
   case "$proto" in
@@ -4256,6 +4270,34 @@ fix_inbound() {
   [[ -z "$panel_domain" ]] && ask panel_domain "Домен панели" "panel.example.com" '^[a-zA-Z0-9.-]+$'
   [[ -n "$panel_domain" ]] && SNI_USED["$panel_domain"]="panel_backend"
 
+  # --- vless reality: выбираем режим КАК при создании (свой/чужой) ---
+  local is_reality=false
+  if [[ "$proto" == "vless" ]] && { grep -qi '"security": *"reality"' <<<"$stream" || grep -qi '"security":"reality"' <<<"$stream"; }; then
+    is_reality=true
+  fi
+  if [[ "$is_reality" == true ]]; then
+    local cur_dest="" cur_sni=""
+    cur_dest=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    cur_sni=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.serverNames[0]'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    echo
+    echo "  #$id vless reality — текущая цель: ${cur_sni:-не задана}, dest: ${cur_dest:-нет}"
+    echo "   1) Чужой реалити «найти цели» — за 443 по SNI цели, серт НЕ нужен"
+    echo "   2) Свой SNI-домен — нужен серт + decoy"
+    local rmode=""
+    local def_mode="2"
+    [[ -n "$cur_dest" && "$cur_dest" != 127.0.0.1:* ]] && def_mode="1"
+    ask rmode "Выбор [1/2]" "$def_mode" '^[12]$'
+    if [[ "$rmode" == "1" ]]; then
+      local tgt=""
+      reality_target_menu tgt "#$id"
+      REALITY_EXT_TARGET="$tgt"
+      reality_ext_hide "$id" "$tgt" "$port" || warn "  не удалось спрятать #$id за 443 по цели"
+      systemctl restart x-ui >/dev/null 2>&1 || true
+      nginx_reload || true
+      return 0
+    fi
+  fi
+
   # домен: из существующего маршрута, иначе спросить
   local domain=""
   domain=$(grep -E "^\s+\S+\s+inb_${id}_backend" "$SNI_CONF" 2>/dev/null | awk '{print $1}' | head -1 || true)
@@ -4263,7 +4305,6 @@ fix_inbound() {
     local def="r.example.com"; [[ "$proto" == "anytls" ]] && def="at.example.com"
     ask_sni_domain domain "$id" "$def"
   fi
-  [[ "$domain" == "www.microsoft.com" ]] && { warn "SNI=microsoft — чинить нечего"; return 0; }
   local owner=""
   owner=$(sni_domain_owner "$domain" "$id") || true
   [[ -n "$owner" ]] && { err "Домен $domain занят ($owner)"; return 1; }
@@ -4280,12 +4321,13 @@ fix_inbound() {
   cert="${cp_line%% *}"; key="${cp_line##* }"
 
   # decoy ТОЛЬКО для Reality (dest для рукопожатия); остальным протоколам decoy не нужен
-  local tls_port=""
+  local tls_port="" rdtpl="default"
   if grep -qi reality <<<"$stream"; then
+    decoy_template_choose rdtpl "Decoy-заглушка для #$id (страница на SNI-домене)" "corporate"
     tls_port=$(( 4444 + id ))
     while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
-    mk_decoy "$tls_port" "$domain" "$cert" "$key" "/var/www/decoy-$id" "default"
-    log "  + decoy (Reality) на порту $tls_port"
+    mk_decoy "$tls_port" "$domain" "$cert" "$key" "/var/www/decoy-$id" "$rdtpl"
+    log "  + decoy (Reality) на порту $tls_port ($rdtpl)"
   else
     log "  decoy не нужен ($proto — не Reality)"
   fi
