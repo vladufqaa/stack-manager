@@ -5135,7 +5135,12 @@ update_self() {
   local src_url="$STACK_SRC_URL"
   ask src_url "Raw-URL скрипта (Enter — сохранённый)" "$src_url" '^https?://'
   log "Качаю: $src_url"
-  if ! curl -fsSL --max-time 30 "$src_url" -o "$tmp"; then
+  # raw.githubusercontent кэшируется ~5 минут (Fastly): сразу после пуша можно
+  # скачать старую версию и получить ложное «обновление не требуется».
+  # ?ts=… меняет ключ кэша → всегда свежий файл. В /root/.stack-src пишем
+  # чистый URL (без бастера).
+  local bust_url="${src_url}?ts=$(date +%s)"
+  if ! curl -fsSL --max-time 30 "$bust_url" -o "$tmp"; then
     err "Не удалось скачать (проверь URL/доступность репозитория)"
     rm -f "$tmp"; return 1
   fi
@@ -5144,11 +5149,11 @@ update_self() {
     rm -f "$tmp"; return 1
   fi
   if cmp -s "$tmp" "$cur"; then
-    log "Обновление не требуется — версия совпадает"
+    log "Обновление не требуется — файл байт-в-байт идентичен (sha256: $(sha256sum "$tmp" 2>/dev/null | cut -c1-12)…)"
     rm -f "$tmp"; return 0
   fi
-  echo "  было:  $(stat -c%s "$cur" 2>/dev/null || echo '?') байт"
-  echo "  стало: $(stat -c%s "$tmp") байт"
+  echo "  было:  $(stat -c%s "$cur" 2>/dev/null || echo '?') байт (sha256: $(sha256sum "$cur" 2>/dev/null | cut -c1-12)…)"
+  echo "  стало: $(stat -c%s "$tmp") байт (sha256: $(sha256sum "$tmp" | cut -c1-12)…)"
   local yn=false
   askyn yn "Заменить $cur и перезапустить?" "y"
   if [[ "$yn" != true ]]; then rm -f "$tmp"; log "Отменено"; return 0; fi
