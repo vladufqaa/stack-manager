@@ -5225,31 +5225,31 @@ ask_adguard_and_decoy() {
     if [[ "$adg_install" == true ]]; then
       install_adguard_home || warn "AdGuard не установился — продолжаем без него."
       detect_env
-      if [[ "$ADG_PRESENT" == true ]]; then
-        U_ADG_USER="${U_ADG_USER:-admin}"
-        U_ADG_PASS=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
-        [[ -z "$U_ADG_PASS" ]] && U_ADG_PASS="AdG$(date +%s)"
-        if [[ -t 0 ]]; then
-          ask U_ADG_USER "Логин AdGuard (Enter — admin)" "$U_ADG_USER" '^[a-zA-Z0-9._-]{3,32}$'
-          ask U_ADG_PASS "Пароль AdGuard (Enter — случайный)" "$U_ADG_PASS" '^.{6,}$'
-        fi
-      fi
+      [[ "$ADG_PRESENT" == true ]] && ADG_JUST_INSTALLED=true
     fi
   fi
   ADG_PLACEMENT=""
+  local adg_installed_now=false
   if [[ "$ADG_PRESENT" == true ]]; then
     if [[ -t 0 ]]; then
-      if [[ -z "${U_ADG_PASS:-}" ]]; then
-        U_ADG_USER="${U_ADG_USER:-admin}"
-        U_ADG_PASS=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
-        [[ -z "$U_ADG_PASS" ]] && U_ADG_PASS="AdG$(date +%s)"
-        ask U_ADG_USER "Логин AdGuard (Enter — admin)" "$U_ADG_USER" '^[a-zA-Z0-9._-]{3,32}$'
-        ask U_ADG_PASS "Пароль AdGuard (Enter — случайный)" "$U_ADG_PASS" '^.{6,}$'
-      elif [[ -t 0 && -z "${U_ADG_USER_SET:-}" ]]; then
-        # пароль уже задан (установкой выше), логин уточняем один раз
-        U_ADG_USER="${U_ADG_USER:-admin}"
-        ask U_ADG_USER "Логин AdGuard (Enter — admin)" "$U_ADG_USER" '^[a-zA-Z0-9._-]{3,32}$'
-        U_ADG_USER_SET=1
+      if [[ "${ADG_JUST_INSTALLED:-}" == true ]]; then
+        # установили ТОЛЬКО ЧТО в этом запуске — креды спрашиваем
+        adg_installed_now=true
+        if [[ -z "${U_ADG_PASS:-}" ]]; then
+          U_ADG_USER="${U_ADG_USER:-admin}"
+          U_ADG_PASS=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
+          [[ -z "$U_ADG_PASS" ]] && U_ADG_PASS="AdG$(date +%s)"
+          ask U_ADG_USER "Логин AdGuard (Enter — admin)" "$U_ADG_USER" '^[a-zA-Z0-9._-]{3,32}$'
+          ask U_ADG_PASS "Пароль AdGuard (Enter — случайный)" "$U_ADG_PASS" '^.{6,}$'
+        elif [[ -z "${U_ADG_USER_SET:-}" ]]; then
+          # пароль уже задан (установкой выше), логин уточняем один раз
+          U_ADG_USER="${U_ADG_USER:-admin}"
+          ask U_ADG_USER "Логин AdGuard (Enter — admin)" "$U_ADG_USER" '^[a-zA-Z0-9._-]{3,32}$'
+          U_ADG_USER_SET=1
+        fi
+      else
+        # был установлен РАНЬШЕ — креды не трогаем и не спрашиваем (как с панелью)
+        log "AdGuard Home уже установлен — логин/пароль не трогаю (креды: /root/adguard-credentials.txt или твои)"
       fi
       echo "  AdGuard Home — где показывать веб-интерфейс?"
       echo "   1) За доменом панели   (https://<панель>/, DoH там же)"
