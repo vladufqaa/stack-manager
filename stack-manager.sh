@@ -5396,6 +5396,117 @@ firewall_apply() {
   sleep 1
 }
 
+# =====================================================================
+# САМОДИАГНОСТИКА (read-only health check): сервисы, порты, SNI, серты,
+# UFW, DNS. НИЧЕГО не меняет — только показывает проблемы и подсказки.
+# =====================================================================
+stack_doctor() {
+  line; echo -e "${B}   САМОДИАГНОСТИКА СТЕКА${N}"; line
+  local problems=0
+  ok()   { echo -e "  ${G}[✓]${N} $*"; }
+  bad()  { echo -e "  ${R}[x]${N} $*"; problems=$((problems+1)); }
+  warn2(){ echo -e "  ${Y}[!]${N} $*"; }
+  hint() { echo -e "      ${Y}→${N} $*"; }
+
+  echo -e "${B}— Сервисы —${N}"
+  local s
+  for s in nginx x-ui; do
+    if systemctl is-active --quiet "$s" 2>/dev/null; then ok "$s: активен"; else bad "$s: НЕ активен"; hint "systemctl restart $s"; fi
+  done
+  if [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]]; then
+    if systemctl is-active --quiet "$ADG_SERVICE" 2>/dev/null; then ok "AdGuard ($ADG_SERVICE): активен"; else bad "AdGuard: НЕ активен"; hint "systemctl restart $ADG_SERVICE"; fi
+  else
+    warn2 "AdGuard не установлен (необязательно)"
+  fi
+
+  echo -e "${B}— Слушающие порты —${N}"
+  if ss -tlnH "sport = :443" 2>/dev/null | grep -q .; then ok "443/tcp слушает nginx"; else bad "443/tcp НЕ слушается"; hint "п.1 пересборка стека / systemctl restart nginx"; fi
+  if ss -tlnH "sport = :80" 2>/dev/null | grep -q .; then ok "80/tcp слушается (ACME webroot)"; else warn2 "80/tcp не слушается — HTTP-01 выпуска не будет (wildcard DNS-01 не страдает)"; fi
+  local wp sp wl sl
+  wp=$(xui_get webPort); sp=$(xui_get subPort); wl=$(xui_get webListen); sl=$(xui_get subListen)
+  if [[ "$wl" == "127.0.0.1" ]]; then ok "панель слушает 127.0.0.1:$wp (наружу не торчит)"; else bad "панель слушает ${wl:-?}:$wp — доктрина 443 нарушена"; hint "п.1 (запишет 127.0.0.1)"; fi
+  if [[ "$sl" == "127.0.0.1" || -z "$sl" ]]; then ok "подписки слушают 127.0.0.1:$sp"; else bad "подписки слушают ${sl:-?}:$sp — наружу торчат"; fi
+  # инбаунды: TCP должен слушать 127.0.0.1 (tproxy — 0.0.0.0)
+  local iid iproto ilisten iport isec idest
+  while IFS='|' read -r iid iproto iport ilisten isec idest; do
+    [[ -z "$iid" ]] && continue
+    if [[ "$iproto" == "tproxy" ]]; then
+      [[ "$ilisten" == "0.0.0.0" || "$ilisten" == "::" ]] && ok "#$iid tproxy на 0.0.0.0:$iport" || warn2 "#$iid tproxy слушает $ilisten — маршруту tg нужен 0.0.0.0"
+      continue
+    fi
+    if is_udp_proto "$iproto"; then continue; fi   # UDP наружу напрямую — не проверяем
+    if [[ "$ilisten" != "127.0.0.1" && "$ilisten" != "" ]]; then
+      bad "#$iid ($iproto:$iport) слушает $ilisten — должен 127.0.0.1 (за 443)"
+      hint "п.4 → Починить инбаунд #$iid"
+    fi
+  done < <(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "SELECT id, protocol, port, COALESCE(listen,''), COALESCE(json_extract(stream_settings,'\$.security'),''), COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE enable=1;" 2>/dev/null || true)
+
+  echo -e "${B}— SNI-маршрут —${N}"
+  if [[ -f "$SNI_CONF" ]]; then
+    ok "$SNI_CONF на месте ($(grep -c 'upstream ' "$SNI_CONF" 2>/dev/null || echo 0) upstream-ов)"
+    grep -qE "panel_backend;" "$SNI_CONF" 2>/dev/null && ok "домен панели замаплен (panel_backend)" || bad "panel_backend не найден в $SNI_CONF"
+  else
+    bad "$SNI_CONF не найден"; hint "п.1 — первичная настройка"
+  fi
+  if nginx -t >/dev/null 2>&1; then ok "nginx -t: конфиг валиден"; else bad "nginx -t провален:"; nginx -t 2>&1 | tail -3 | sed 's/^/      /'; fi
+
+  echo -e "${B}— Сертификаты (истекают < 14 дн — [!]) —${N}"
+  local ldir crt end_left
+  ldir="/etc/letsencrypt/live"
+  if [[ -d "$ldir" ]] && ls -1 "$ldir" 2>/dev/null | grep -q .; then
+    local d
+    for d in "$ldir"/*/; do
+      d=$(basename "$d"); crt="$ldir/$d/fullchain.pem"
+      [[ -f "$crt" ]] || { warn2 "$d: fullchain.pem нет"; continue; }
+      end_left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$crt" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+      if [[ "$end_left" -ge 14 ]]; then ok "$d: ~${end_left} дн"; elif [[ "$end_left" -ge 0 ]]; then warn2 "$d: истекает через ~${end_left} дн"; hint "п.10 → обновить"; else bad "$d: ПРОСРОЧЕН"; hint "п.10 → обновить"; fi
+    done
+  else
+    warn2 "сертов в /etc/letsencrypt/live нет"
+  fi
+
+  echo -e "${B}— UFW —${N}"
+  if [[ "$(ufw status 2>/dev/null | head -1 | awk '{print $2}')" == "active" ]]; then
+    ok "UFW активен"
+    ufw status 2>/dev/null | grep -qE "443/tcp\s+ALLOW" && ok "443/tcp разрешён" || bad "443/tcp НЕ разрешён"; hint "п.11"
+    ufw status 2>/dev/null | grep -qE "${SSH_PORT:-22}/tcp\s+ALLOW" && ok "SSH (${SSH_PORT:-22}/tcp) разрешён" || warn2 "SSH-порт не помечен ALLOW — проверь, как подключаешься"
+    local extra
+    extra=$(ufw status 2>/dev/null | grep -E "ALLOW" | grep -E "/tcp" | grep -vE "443/tcp|${SSH_PORT:-22}/tcp" | head -5)
+    [[ -n "$extra" ]] && { warn2 "лишние TCP-разрешения:"; echo "$extra" | sed 's/^/        /'; hint "п.11 → сброс (только SSH+443+UDP)"; }
+  else
+    bad "UFW не активен"; hint "п.11"
+  fi
+
+  echo -e "${B}— DNS / домен панели —${N}"
+  local pd="${PANEL_DOMAIN:-$(xui_get subDomain 2>/dev/null || true)}"
+  if [[ -n "$pd" ]]; then
+    local a_ip srv_ip
+    a_ip=$(dig +short A "$pd" 2>/dev/null | tail -1)
+    srv_ip=$(server_ip4)
+    if [[ -n "$a_ip" && "$a_ip" == "$srv_ip" ]]; then ok "$pd → $a_ip (наш IP)"; elif [[ -z "$a_ip" ]]; then warn2 "$pd: A-запись не резолвится"; else warn2 "$pd → $a_ip, а сервер: $srv_ip"; fi
+  else
+    warn2 "домен панели не задан"
+  fi
+
+  echo -e "${B}— Heal-таймер —${N}"
+  if systemctl is-enabled --quiet stack-heal.timer 2>/dev/null; then
+    ok "самолечение включено (каждые 2 мин); последний лог: $(tail -1 /root/stack-heal.log 2>/dev/null | head -c 80)"
+  else
+    warn2 "самолечение выключено (отклонения чинятся только вручную: п.1/п.4)"
+  fi
+
+  echo
+  line
+  if [[ "$problems" -eq 0 ]]; then
+    echo -e "${G}  Итог: проблем не найдено ✓${N}"
+  else
+    echo -e "${R}  Итог: проблем — $problems${N} (подсказки [→] выше)"
+  fi
+  line
+  return 0
+}
+
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
@@ -5419,6 +5530,7 @@ run_menu_action() {
     17) uninstall_panel_lucx; pause ;;
     18) change_admin_passwords; pause ;;
     19) update_self; pause ;;
+    20) stack_doctor; pause ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -5459,6 +5571,7 @@ main_menu() {
     echo "  17) Удалить панель LucX UI (x-ui)"
     echo "  18) Сменить пароли admin (панель / AdGuard)"
     echo "  19) Обновить скрипт с GitHub"
+    echo "  20) Самодиагностика (проверка стека)"
     echo "   0) Выход     (q в любом вопросе — выход в меню)"
     line
     local c="" rc
