@@ -4622,13 +4622,17 @@ change_decoy() {
 
   # --- смена decoy для домена панели ---
   if [[ -n "$panel_dom" && "$domain" == "$panel_dom" ]]; then
-    # Корень панели = прокси (AdGuard за панелью)? Шаблон ставить НЕЛЬЗЯ:
-    # перестанут открываться AdGuard UI и перестанет работать DoH.
-    local pd_mode=""
-    pd_mode=$(sed -n '/listen 127\.0\.0\.1:4443/,/^}/p' "$panel_conf" 2>/dev/null \
-              | grep -m1 -oE 'proxy_pass https://127\.0\.0\.1:[0-9]+' || true)
-    if [[ -n "$pd_mode" ]]; then
-      warn "Корень домена панели сейчас — прокси на AdGuard Home (${pd_mode##*:})."
+    # Корень панели = прокси на AdGuard? Шаблон ставить НЕЛЬЗЯ: перестанут
+    # открываться AdGuard UI и работать DoH.
+    # ВАЖНО: в блоке 4443 ЕСТЬ и другие proxy_pass (панель, подписки) —
+    # отказ только если реально проксируемся на ТЕКУЩИЙ порт AdGuard.
+    # AdGuard не установлен → adg_config_port пуст → шаблон менять МОЖНО.
+    local pd_any="" adg_port_now=""
+    pd_any=$(sed -n '/listen 127\.0\.0\.1:4443/,/^}/p' "$panel_conf" 2>/dev/null \
+             | grep -oE 'proxy_pass https://127\.0\.0\.1:[0-9]+' || true)
+    adg_port_now=$(adg_config_port 2>/dev/null || true)
+    if [[ -n "$adg_port_now" ]] && grep -q ":$adg_port_now$" <<<"$pd_any"; then
+      warn "Корень домена панели сейчас — прокси на AdGuard Home (порт $adg_port_now)."
       warn "Смена на шаблон ЗАПРЕЩЕНА: перестанет открываться AdGuard UI и работать DoH."
       warn "Варианты:"
       warn "  • п.1 «Первичная настройка» → другой режим AdGuard (отдельный SNI-домен / локально),"
