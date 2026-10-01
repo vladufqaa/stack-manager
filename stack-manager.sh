@@ -1738,11 +1738,7 @@ create_inbounds_menu() {
 
   local existing=0
   existing=$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
-  if [[ "$existing" -gt 0 ]]; then
-    log "Уже есть $existing активных инбаундов."
-    askyn add_more "Добавить ещё?" "n"
-    [[ "$add_more" == true ]] || return 0
-  fi
+  [[ "$existing" -gt 0 ]] && log "Активных инбаундов: $existing — выбирай тип нового."
 
   # быстрая проверка схемы
   local cols
