@@ -4487,16 +4487,26 @@ remove_inbound() {
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
   sni_used_load 2>/dev/null || true
 
-  # список: ТОЛЬКО инбаунды с SNI-привязкой (домен панели здесь не показывается и не удаляется)
-  local row dom be iid proto port found=0
+  # список: ВСЕ инбаунды панели (и UDP тоже); SNI-привязка — пометкой,
+  # домен панели помечен как неудаляемый здесь
+  local -A SNI_BY_ID=()
   while IFS='|' read -r dom be iid; do
-    [[ -z "$dom" || -z "$iid" ]] && continue
-    proto=$(sqlite3 "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$iid;" 2>/dev/null || true)
-    port=$(sqlite3 "$XUI_DB" "SELECT port FROM inbounds WHERE id=$iid;" 2>/dev/null || true)
-    printf "  #%-3s %-28s %-10s порт %s\n" "$iid" "$dom" "${proto:-?}" "${port:-?}"
-    found=$((found+1))
+    [[ -n "$iid" ]] && SNI_BY_ID["$iid"]="$dom|$be"
   done < <(sni_map_domains)
-  [[ $found -eq 0 ]] && warn "Инбаундов с SNI-привязкой нет"
+
+  local iid proto port found=0 dom be
+  while IFS='|' read -r iid proto port; do
+    [[ -z "$iid" ]] && continue
+    dom=""; be=""
+    [[ -n "${SNI_BY_ID[$iid]:-}" ]] && IFS='|' read -r dom be <<<"${SNI_BY_ID[$iid]}"
+    if [[ "$be" == "panel_backend" ]]; then
+      printf "  #%-3s %-10s порт %-6s %s — домен ПАНЕЛИ (здесь не удалять)\n" "$iid" "${proto:-?}" "${port:-?}" "$dom"
+    else
+      printf "  #%-3s %-10s порт %-6s %s\n" "$iid" "${proto:-?}" "${port:-?}" "${dom:+[SNI: $dom]}"
+    fi
+    found=$((found+1))
+  done < <(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT id, protocol, port FROM inbounds ORDER BY id;" 2>/dev/null || true)
+  [[ $found -eq 0 ]] && warn "Инбаундов в панели нет"
 
   echo
   local id=""
