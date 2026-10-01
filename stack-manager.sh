@@ -4578,6 +4578,16 @@ sni_cleanup_stale() {
       log "  #$iid: инбаунд выключен (enable=0) — SNI-запись «$dom» сохраняю (включишь — заработает сразу)"
       continue
     fi
+    # tproxy (tg web proxy) обслуживается ТОЛЬКО через tg_backend (setup_tproxy_web).
+    # Любые «домен → inb_<id>_backend» для него — мусор прошлых багов (svc-N.example.com).
+    local tproto=""
+    tproto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+             "SELECT protocol FROM inbounds WHERE id=$iid;" 2>/dev/null | tr -d '[:space:]') || true
+    if [[ "$tproto" == "tproxy" && "$be" != "tg_backend" ]]; then
+      warn "  #$iid tproxy: маршрут «$dom → $be» лишний (tg ведёт tg_backend) — на удаление"
+      dead_map+=("$dom|$be|$iid")
+      continue
+    fi
     # Чужой таргет reality, который инбаунд УЖЕ не использует → лишний SNI:
     # клиент берёт serverNames из инбаунда, домен в nginx должен СОВПАДАТЬ,
     # иначе соединение уходит в default и виснет по таймауту.
