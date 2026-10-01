@@ -693,7 +693,7 @@ install_adguard_home() {
 
   log "AdGuard Home установлен: $ADG_SERVICE"
   adg_pick_port
-  local adg_user="admin" adg_pass=""
+  local adg_user="${U_ADG_USER:-admin}" adg_pass=""
   adg_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
   [[ -z "$adg_pass" ]] && adg_pass="AdG$(date +%s)"
   # чистая установка: конфига нет (режим визарда) → создаём через wizard-API
@@ -703,7 +703,7 @@ install_adguard_home() {
   configure_adguard_local || warn "Настройте bind вручную"
 
   # автоматические учётные данные админа — визард не нужен
-  local adg_user="admin" adg_pass=""
+  adg_user="${U_ADG_USER:-admin}" adg_pass=""
   adg_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
   [[ -z "$adg_pass" ]] && adg_pass="AdG$(date +%s)"
   if adg_set_admin "$adg_user" "$adg_pass"; then
@@ -1358,7 +1358,8 @@ install_lucx_panel() {
   # Все параметры передаём через env — вопросов ноль. Серт панели вписывается
   # сразу после установки (setup_panel_cert_domain) или через СЕРТИФИКАТЫ → 5.
   # пароль панели: заданный при авто-установке (U_PANEL_PASS) → интерактивный
-  # вопрос (Enter — случайный) → случайный
+  # вопрос (Enter — случайный) → случайный; логин — U_PANEL_USER (Enter — admin)
+  local lucx_user="${U_PANEL_USER:-admin}"
   local lucx_pass="${U_PANEL_PASS:-}"
   if [[ -z "$lucx_pass" ]]; then
     lucx_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
@@ -1371,7 +1372,7 @@ install_lucx_panel() {
   lucx_wbp=$(gen_random_string 12)
   log "Запуск установщика LucX UI (XUI_NONINTERACTIVE=1 + XUI_SSL_MODE=none — без вопросов и без SSL)..."
   XUI_NONINTERACTIVE=1 XUI_SSL_MODE=none XUI_DB_TYPE=sqlite \
-    XUI_USERNAME="admin" XUI_PASSWORD="$lucx_pass" \
+    XUI_USERNAME="$lucx_user" XUI_PASSWORD="$lucx_pass" \
     XUI_PANEL_PORT="$lucx_port" XUI_WEB_BASE_PATH="$lucx_wbp" \
     bash "$tmp_sh"
   rc=$?
@@ -1380,12 +1381,13 @@ install_lucx_panel() {
   # креды панели — фиксируем (установщик в неинтерактиве берёт их из env)
   {
     echo "LucX UI панель — $(date '+%F %T')"
-    echo "  Логин:  admin"
+    echo "  Логин:  $lucx_user"
     echo "  Пароль: $lucx_pass"
   } > /root/panel-credentials.txt 2>/dev/null || true
   chmod 600 /root/panel-credentials.txt 2>/dev/null || true
-  # запомнить финальный пароль глобально — чтобы авто-поток не спрашивал его второй раз
+  # запомнить финальные креды глобально — авто-поток не спрашивает второй раз
   U_PANEL_PASS="$lucx_pass"
+  U_PANEL_USER="$lucx_user"
 
   if [[ $rc -ne 0 ]]; then
     err "Ошибка установки LucX UI"; return 1
@@ -2391,15 +2393,18 @@ PYPASS
     fi
   fi
   if [[ "$what" == "2" || "$what" == "3" ]]; then
-    local apass=""
-    ask apass "Новый пароль ADGUARD (admin; Enter — случайный)" "" '^$|.{6,}'
+    local auser="" apass=""
+    auser=$(grep -i "логин" /root/adguard-credentials.txt 2>/dev/null | awk '{print $NF}' | head -1)
+    [[ -z "$auser" ]] && auser="${U_ADG_USER:-admin}"
+    ask auser "Логин ADGUARD (Enter — $auser)" "$auser" '^[a-zA-Z0-9._-]{3,32}$'
+    ask apass "Новый пароль ADGUARD (Enter — случайный)" "" '^$|.{6,}'
     [[ -z "$apass" ]] && apass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
-    if adg_set_admin admin "$apass"; then
+    if adg_set_admin "$auser" "$apass"; then
       {
         echo "AdGuard Home — $(date '+%F %T')"
         echo "  URL:    https://${PANEL_DOMAIN:-<домен панели>}/"
         echo "  DoH:    https://${PANEL_DOMAIN:-<домен панели>}/dns-query"
-        echo "  Логин:  admin"
+        echo "  Логин:  $auser"
         echo "  Пароль: $apass"
       } > /root/adguard-credentials.txt
       chmod 600 /root/adguard-credentials.txt
@@ -4041,7 +4046,7 @@ EOF
     fi
     # визард не пройден (users пуст) — создаём админа автоматически и показываем пароль
     if grep -qE '^users: ?\[\]?' "$ADG_CONFIG" 2>/dev/null; then
-      local adg_user="admin" adg_pass=""
+      local adg_user="${U_ADG_USER:-admin}" adg_pass=""
       if [[ -n "${U_ADG_PASS:-}" ]]; then
         adg_pass="$U_ADG_PASS"   # пароль задан при установке
       else
@@ -5166,9 +5171,11 @@ ask_panel_creds() {
   if [[ -n "${U_PANEL_PASS:-}" && -n "$XUI_DB" && -f "$XUI_DB" ]]; then
     :
   else
+    U_PANEL_USER="${U_PANEL_USER:-admin}"
     U_PANEL_PASS=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
     if [[ -t 0 ]]; then
-      ask U_PANEL_PASS "Пароль панели admin (Enter — случайный)" "$U_PANEL_PASS" '^.{6,}$'
+      ask U_PANEL_USER "Логин панели (Enter — admin)" "$U_PANEL_USER" '^[a-zA-Z0-9._-]{3,32}$'
+      ask U_PANEL_PASS "Пароль панели (Enter — случайный)" "$U_PANEL_PASS" '^.{6,}$'
     fi
   fi
   U_PANEL_PORT=""; U_SUB_PORT=""; U_PANEL_PATH=""; U_SUB_PATH=""
@@ -5200,9 +5207,13 @@ ask_adguard_and_decoy() {
       install_adguard_home || warn "AdGuard не установился — продолжаем без него."
       detect_env
       if [[ "$ADG_PRESENT" == true ]]; then
+        U_ADG_USER="${U_ADG_USER:-admin}"
         U_ADG_PASS=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
         [[ -z "$U_ADG_PASS" ]] && U_ADG_PASS="AdG$(date +%s)"
-        [[ -t 0 ]] && ask U_ADG_PASS "Пароль AdGuard admin (Enter — случайный)" "$U_ADG_PASS" '^.{6,}$'
+        if [[ -t 0 ]]; then
+          ask U_ADG_USER "Логин AdGuard (Enter — admin)" "$U_ADG_USER" '^[a-zA-Z0-9._-]{3,32}$'
+          ask U_ADG_PASS "Пароль AdGuard (Enter — случайный)" "$U_ADG_PASS" '^.{6,}$'
+        fi
       fi
     fi
   fi
@@ -5210,9 +5221,16 @@ ask_adguard_and_decoy() {
   if [[ "$ADG_PRESENT" == true ]]; then
     if [[ -t 0 ]]; then
       if [[ -z "${U_ADG_PASS:-}" ]]; then
+        U_ADG_USER="${U_ADG_USER:-admin}"
         U_ADG_PASS=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
         [[ -z "$U_ADG_PASS" ]] && U_ADG_PASS="AdG$(date +%s)"
-        ask U_ADG_PASS "Пароль AdGuard admin (Enter — случайный)" "$U_ADG_PASS" '^.{6,}$'
+        ask U_ADG_USER "Логин AdGuard (Enter — admin)" "$U_ADG_USER" '^[a-zA-Z0-9._-]{3,32}$'
+        ask U_ADG_PASS "Пароль AdGuard (Enter — случайный)" "$U_ADG_PASS" '^.{6,}$'
+      elif [[ -t 0 && -z "${U_ADG_USER_SET:-}" ]]; then
+        # пароль уже задан (установкой выше), логин уточняем один раз
+        U_ADG_USER="${U_ADG_USER:-admin}"
+        ask U_ADG_USER "Логин AdGuard (Enter — admin)" "$U_ADG_USER" '^[a-zA-Z0-9._-]{3,32}$'
+        U_ADG_USER_SET=1
       fi
       echo "  AdGuard Home — где показывать веб-интерфейс?"
       echo "   1) За доменом панели   (https://<панель>/, DoH там же)"
@@ -5573,15 +5591,16 @@ auto_full_setup() {
   initial_setup < "$ansf" >/tmp/auto-setup.log 2>&1 || warn "initial_setup вернул ошибку — смотри /tmp/auto-setup.log"
   grep -E "\[\+\]|\[!\]|\[x\]" /tmp/auto-setup.log 2>/dev/null | tail -12
 
-  # --- 2с) Пароль AdGuard, заданный при установке: применяем ВСЕГДА
+  # --- 2с) Логин/пароль AdGuard, заданные при установке: применяем ВСЕГДА
   #         (даже если у AdGuard уже были пользователи — выбор пользователя важнее)
   if [[ "$ADG_PRESENT" == true && -n "${U_ADG_PASS:-}" ]]; then
-    if adg_set_admin admin "$U_ADG_PASS"; then
-      log "Пароль AdGuard admin установлен (задан при установке)"
-      printf 'AdGuard Home — %s\n  Логин:  admin\n  Пароль: %s\n' "$(date "+%Y-%m-%d %H:%M:%S")" "$U_ADG_PASS" > /root/adguard-credentials.txt
+    U_ADG_USER="${U_ADG_USER:-admin}"
+    if adg_set_admin "$U_ADG_USER" "$U_ADG_PASS"; then
+      log "Логин/пароль AdGuard установлены ($U_ADG_USER) — заданы при установке"
+      printf 'AdGuard Home — %s\n  Логин:  %s\n  Пароль: %s\n' "$(date "+%Y-%m-%d %H:%M:%S")" "$U_ADG_USER" "$U_ADG_PASS" > /root/adguard-credentials.txt
       chmod 600 /root/adguard-credentials.txt
     else
-      warn "Не удалось установить пароль AdGuard — причина выше"
+      warn "Не удалось установить креды AdGuard — причина выше"
     fi
   fi
 
@@ -5595,13 +5614,15 @@ auto_full_setup() {
   pp=$(xui_get webBasePath 2>/dev/null || true)
   pp="/${pp#/}"
   panel_pass=$(grep -i "пароль" /root/panel-credentials.txt 2>/dev/null | awk '{print $NF}' | head -1)
+  local panel_user=""
+  panel_user=$(grep -i "логин" /root/panel-credentials.txt 2>/dev/null | awk '{print $NF}' | head -1)
   adg_pass=$(grep -i "пароль" /root/adguard-credentials.txt 2>/dev/null | awk '{print $NF}' | head -1)
   adg_user=$(grep -i "логин"  /root/adguard-credentials.txt 2>/dev/null | awk '{print $NF}' | head -1)
   line
   echo -e "${G}   ИТОГ УСТАНОВКИ${N}"
   line
   echo "  ПАНЕЛЬ:  https://$base$pp"
-  echo "           логин: admin   пароль: ${panel_pass:-см. /root/panel-credentials.txt}"
+  echo "           логин: ${panel_user:-${U_PANEL_USER:-admin}}   пароль: ${panel_pass:-см. /root/panel-credentials.txt}"
   if [[ "$ADG_PRESENT" == true ]]; then
     echo "  ADGUARD: https://$base/   (DoH: https://$base/dns-query)"
     echo "           логин: ${adg_user:-admin}   пароль: ${adg_pass:-см. /root/adguard-credentials.txt}"
