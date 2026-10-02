@@ -140,10 +140,16 @@ SSH_PORT="22"
 DECOY_TEMPLATES=(
   "default|Nginx default — стандартная заглушка"
   "blank|Пустая белая страница"
-  "corporate|Корпоративный лендинг"
-  "blog|Персональный блог"
+  "corporate|Корпоративный лендинг (варьируется)"
+  "blog|Персональный блог (варьируется)"
   "docs|Документация / wiki"
   "cloudflare|Cloudflare-style"
+  "maintenance|▶ Техработы — «вернёмся позже»"
+  "hosting-panel|▶ Панель хостинга — login (интерактивный)"
+  "portfolio|▶ Фото-портфолио"
+  "shop|▶ Магазин «скоро открытие» (трап-подписка)"
+  "redirect|▶ Редирект 302 на URL — контента нет вовсе"
+  "locked|▶ Закрытый раздел 401 — только окно логина"
   "adguard|▶ AdGuard Home — login (интерактивный)"
   "portainer|▶ Portainer — login (интерактивный)"
   "pihole|▶ Pi-hole — login (интерактивный)"
@@ -173,7 +179,7 @@ RECOMMENDED_INBOUNDS=(
 
 is_login_template() {
   case "$1" in
-    adguard|portainer|pihole|omv|jellyfin|homeassistant|uptime-kuma) return 0 ;;
+    adguard|portainer|pihole|omv|jellyfin|homeassistant|uptime-kuma|hosting-panel|shop) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1976,19 +1982,33 @@ tpl_write() {
 decoy_templates_init() {
   mkdir -p "$DECOY_TPL_DIR" 2>/dev/null || true
 
-  tpl_write "$DECOY_TPL_DIR/default.html" <<'HTML'
+  # honeypot-ссылки: невидимы для человека, но их парсят боты → путь /admin,
+  # /wp-login.php, /.env → nginx отдаёт 404 в лог decoy-access → fail2ban банит
+  local honey='<a href="/admin" style="position:fixed;left:-9999px;top:-9999px" aria-hidden="true" tabindex="-1">admin</a>
+<a href="/wp-login.php" style="position:fixed;left:-9999px;top:-9999px" aria-hidden="true" tabindex="-1">wp login</a>
+<a href="/.env" style="position:fixed;left:-9999px;top:-9999px" aria-hidden="true" tabindex="-1">env</a>'
+
+  tpl_write "$DECOY_TPL_DIR/default.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>Welcome to nginx!</title>
 <style>body{font-family:sans-serif;background:#f4f4f4;text-align:center;padding-top:80px;color:#333}
 h1{color:#2b6cb0}p{color:#666}</style></head>
 <body><h1>Welcome to nginx!</h1>
-<p>If you see this page, the nginx web server is successfully installed and working.</p></body></html>
+<p>If you see this page, the nginx web server is successfully installed and working.</p>
+$honey</body></html>
 HTML
 
   tpl_write "$DECOY_TPL_DIR/blank.html" <<'HTML'
 <!doctype html><html><head><meta charset="utf-8"><title> </title></head><body></body></html>
 HTML
 
-  tpl_write "$DECOY_TPL_DIR/corporate.html" <<'HTML'
+  # corporate: случайные год основания и слоган — домены не выглядят близнецами
+  local cy=$(( 1998 + RANDOM % 20 ))
+  local ctg; case $(( RANDOM % 3 )) in
+    0) ctg="Building the future of infrastructure." ;;
+    1) ctg="Reliable software for ambitious teams." ;;
+    2) ctg="Engineering clarity into complex systems." ;;
+  esac
+  tpl_write "$DECOY_TPL_DIR/corporate.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>Corp — Solutions</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;color:#111;line-height:1.6}
 nav{padding:20px 40px;border-bottom:1px solid #eee;display:flex;justify-content:space-between}nav a{color:#111;text-decoration:none;margin-left:24px;font-size:14px}
@@ -1997,24 +2017,30 @@ h1{font-size:52px;font-weight:600;letter-spacing:-1px;margin-bottom:24px}p.lead{
 .btn{display:inline-block;margin-top:32px;padding:14px 28px;background:#111;color:#fff;text-decoration:none;border-radius:6px}
 footer{padding:40px;border-top:1px solid #eee;color:#888;font-size:13px;text-align:center}</style></head><body>
 <nav><div class="logo">Corp</div><div><a href="#">Product</a><a href="#">Solutions</a><a href="#">Contact</a></div></nav>
-<div class="hero"><h1>Building the future of infrastructure.</h1>
+<div class="hero"><h1>$ctg</h1>
 <p class="lead">We help enterprises scale with confidence.</p><a href="#" class="btn">Learn more</a></div>
-<footer>© 2026 Corp Inc. All rights reserved.</footer></body></html>
+<footer>© $cy Corp Inc. All rights reserved.</footer>
+$honey</body></html>
 HTML
 
-  tpl_write "$DECOY_TPL_DIR/blog.html" <<'HTML'
+  # blog: случайные даты постов — каждая генерация чуть другая
+  local bd1 bd2
+  bd1=$(date -d "-$(( RANDOM % 18 + 2 )) days" '+%B %-d, %Y' 2>/dev/null || date '+%B %d, %Y')
+  bd2=$(date -d "-$(( RANDOM % 55 + 25 )) days" '+%B %-d, %Y' 2>/dev/null || date -d '-30 days' '+%B %d, %Y')
+  tpl_write "$DECOY_TPL_DIR/blog.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>Notes</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Georgia,serif;max-width:720px;margin:auto;padding:60px 24px;color:#222;line-height:1.7}
 h1{font-size:32px;margin-bottom:8px}.sub{color:#888;font-size:14px;margin-bottom:48px}article{margin-bottom:48px}
 article h2{font-size:22px;margin-bottom:8px}article .meta{color:#888;font-size:13px;margin-bottom:12px}article p{color:#444}</style></head><body>
 <h1>Notes</h1><p class="sub">Thoughts on software, systems, and craft.</p>
-<article><h2>On simple systems</h2><div class="meta">March 12, 2026</div>
+<article><h2>On simple systems</h2><div class="meta">$bd1</div>
 <p>The best systems are the ones you can hold in your head.</p></article>
-<article><h2>The quiet majority</h2><div class="meta">March 5, 2026</div>
-<p>Most software does its job silently.</p></article></body></html>
+<article><h2>The quiet majority</h2><div class="meta">$bd2</div>
+<p>Most software does its job silently.</p></article>
+$honey</body></html>
 HTML
 
-  tpl_write "$DECOY_TPL_DIR/docs.html" <<'HTML'
+  tpl_write "$DECOY_TPL_DIR/docs.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>Documentation</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;display:flex;color:#222}
 aside{width:260px;background:#fafafa;border-right:1px solid #eee;padding:24px;min-height:100vh}
@@ -2025,10 +2051,11 @@ p{margin-bottom:16px;color:#444;line-height:1.7}code{background:#f4f4f4;padding:
 pre{background:#1e1e1e;color:#f8f8f8;padding:20px;border-radius:8px;overflow-x:auto;margin:20px 0}</style></head><body>
 <aside><h2>Getting Started</h2><a href="#">Introduction</a><a href="#">Installation</a><a href="#">Configuration</a></aside>
 <main><h1>Introduction</h1><p>Welcome to the documentation.</p>
-<pre>npm install @example/sdk</pre><p>Then call <code>client.connect()</code>.</p></main></body></html>
+<pre>npm install @example/sdk</pre><p>Then call <code>client.connect()</code>.</p></main>
+$honey</body></html>
 HTML
 
-  tpl_write "$DECOY_TPL_DIR/cloudflare.html" <<'HTML'
+  tpl_write "$DECOY_TPL_DIR/cloudflare.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>Attention Required! | Cloudflare</title>
 <style>body{font-family:sans-serif;background:#f5f5f5;color:#333;margin:0;padding:60px 20px}
 .container{max-width:800px;margin:auto;background:#fff;border-radius:6px;padding:60px;box-shadow:0 2px 12px rgba(0,0,0,.06)}
@@ -2037,8 +2064,46 @@ h1{font-size:26px;margin-bottom:24px;color:#111}p{line-height:1.7;color:#555;mar
 <div class="container"><h1>Attention Required!</h1>
 <p>You are unable to access this site.</p><p>Please enable cookies and JavaScript.</p>
 <div class="footer">Cloudflare Ray ID: 8a3f... &nbsp;•&nbsp; Performance &amp; security by Cloudflare</div>
-</div></body></html>
+</div>$honey</body></html>
 HTML
+
+  # maintenance: правдоподобное «почему не работает» — отбивает желание копать
+  local mh
+  mh=$(date -d "+$(( RANDOM % 3 + 2 )) hours" '+%H:%M' 2>/dev/null || echo "12:00")
+  tpl_write "$DECOY_TPL_DIR/maintenance.html" <<HTML
+<!doctype html><html><head><meta charset="utf-8"><title>Scheduled maintenance</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#fffde7;color:#333;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{max-width:520px;text-align:center;padding:40px}
+.ic{font-size:44px;margin-bottom:12px}h1{font-size:24px;margin-bottom:14px}p{color:#666;line-height:1.7;margin-bottom:8px}
+.t{font-weight:600;color:#a05a00}</style></head><body><div class="card">
+<div class="ic">&#128736;</div><h1>Scheduled maintenance</h1>
+<p>We are performing planned maintenance on our systems.</p>
+<p>Expected back online by <span class="t">$mh</span>. Thank you for your patience.</p></div>
+$honey</body></html>
+HTML
+
+  # portfolio: тихая фото-визитка, без логина — совсем не палево
+  tpl_write "$DECOY_TPL_DIR/portfolio.html" <<HTML
+<!doctype html><html><head><meta charset="utf-8"><title>Selected Works — A. Raven</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Georgia,serif;background:#111;color:#ddd}
+header{padding:80px 40px 40px;max-width:900px;margin:auto}h1{font-size:40px;font-weight:400;letter-spacing:1px}
+header p{color:#888;margin-top:10px;font-style:italic}
+.grid{max-width:900px;margin:auto;padding:0 40px 80px;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:18px}
+.ph{aspect-ratio:4/3;border-radius:4px;position:relative;overflow:hidden}
+.ph:nth-child(1){background:linear-gradient(140deg,#23303d,#3d5266)}.ph:nth-child(2){background:linear-gradient(140deg,#3d2f33,#66424a)}
+.ph:nth-child(3){background:linear-gradient(140deg,#2d3d33,#48664f)}.ph:nth-child(4){background:linear-gradient(140deg,#38332d,#5f5744)}
+.ph span{position:absolute;bottom:10px;left:12px;font-size:13px;color:#cfcfcf;opacity:.75}
+footer{padding:30px;text-align:center;color:#666;font-size:13px}</style></head><body>
+<header><h1>Anna Raven</h1><p>photographer &mdash; selected works, 2019&ndash;2026</p></header>
+<div class="grid">
+<div class="ph"><span>Nordkapp, series IV</span></div><div class="ph"><span>Harbor study 12</span></div>
+<div class="ph"><span>Forest interval</span></div><div class="ph"><span>Concrete noon</span></div></div>
+<footer>contact: studio@raven.example &middot; prints on request</footer>
+$honey</body></html>
+HTML
+
+  # hosting-panel и shop — интерактивные (трап через $js) → живут в
+  # decoy_login_templates_init, где определены $css/$js.
 
   # tg-домену НЕ даём отдельного шаблона в меню: мимикрия под Telegram — палево
   # (сразу видно, что за доменом tg-прокси). Сайт tproxy получает нейтральный
@@ -2056,7 +2121,8 @@ decoy_login_templates_init() {
   rm -f "$DECOY_LOGIN_DIR/adguard.html" "$DECOY_LOGIN_DIR/portainer.html" \
         "$DECOY_LOGIN_DIR/pihole.html" "$DECOY_LOGIN_DIR/omv.html" \
         "$DECOY_LOGIN_DIR/jellyfin.html" "$DECOY_LOGIN_DIR/homeassistant.html" \
-        "$DECOY_LOGIN_DIR/uptime-kuma.html" 2>/dev/null || true
+        "$DECOY_LOGIN_DIR/uptime-kuma.html" "$DECOY_LOGIN_DIR/hosting-panel.html" \
+        "$DECOY_LOGIN_DIR/shop.html" 2>/dev/null || true
 
   local agv="0.107.$(( RANDOM % 25 + 40 ))"   # версия в футере — правдоподобная рандомизация
 
@@ -2252,8 +2318,57 @@ button:hover{background:#4bcf7b}
 </form></div>$js</body></html>
 HTML
 
+  # hosting-panel: cPanel-стиль, ловит POST /login как остальные реплики
+  tpl_write "$DECOY_LOGIN_DIR/hosting-panel.html" <<HTML
+<!doctype html><html><head><meta charset="utf-8"><title>Hosting Control Panel — Login</title>
+$css<style>
+body{font-family:Arial,Helvetica,sans-serif;background:linear-gradient(180deg,#0b2d4d,#123c66);display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#fff;width:400px;border-radius:8px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.3)}
+.head{background:#f5f7f9;padding:26px;text-align:center;border-bottom:1px solid #e3e8ec}
+.logo{font-size:22px;font-weight:700;color:#0b5c8c}.logo i{font-style:normal;color:#ff6c2c}
+.head small{display:block;color:#8a97a0;font-size:12px;margin-top:4px}
+.body{padding:28px}
+button{background:#ff6c2c;color:#fff;border-radius:4px;font-weight:600}
+button:hover{background:#e85a1c}
+label{color:#5a6a75;text-transform:uppercase;font-size:11px;letter-spacing:.5px}
+.foot{padding:14px;text-align:center;color:#9aa7b0;font-size:12px;border-top:1px solid #e3e8ec}
+</style></head><body><div class="card">
+<div class="head"><div class="logo">Hosting<i>Panel</i></div><small>Client Area &middot; cPanel 110.4</small></div>
+<div class="body">
+<div id="msg" class="msg"></div>
+<form id="form" method="POST" action="/login">
+<label>Username</label><input name="u" required autocomplete="off">
+<label>Password</label><input name="p" type="password" required>
+<button>Log in</button>
+</form></div>
+<div class="foot">&copy; 2019 Hosting Solutions &middot; License v3</div></div>$js</body></html>
+HTML
+
+  # shop: «скоро открытие» — форма подписки постит в тот же трап /login
+  tpl_write "$DECOY_LOGIN_DIR/shop.html" <<HTML
+<!doctype html><html><head><meta charset="utf-8"><title>Ember Goods — coming soon</title>
+$css<style>
+body{font-family:-apple-system,sans-serif;background:#faf7f4;color:#2b2b2b;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{max-width:480px;text-align:center;padding:40px}
+.logo{font-size:28px;font-weight:700;letter-spacing:3px;color:#b3541e;margin-bottom:8px}
+h1{font-size:22px;font-weight:400;margin-bottom:14px}p{color:#777;line-height:1.7;margin-bottom:22px}
+input{border:1px solid #ddd;border-radius:4px;padding:12px}
+button{background:#b3541e;color:#fff;border-radius:4px}
+.small{font-size:12px;color:#aaa;margin-top:16px}
+</style></head><body><div class="card">
+<div class="logo">EMBER GOODS</div>
+<h1>Something warm is coming.</h1>
+<p>We are putting the finishing touches on our store.<br>Leave your email to get 15% off at launch.</p>
+<div id="msg" class="msg"></div>
+<form id="form" method="POST" action="/login">
+<input name="u" placeholder="you@example.com" required autocomplete="off">
+<button>Notify me</button>
+</form>
+<p class="small">No spam. Unsubscribe anytime.</p></div>$js</body></html>
+HTML
+
   chown -R www-data:www-data "$DECOY_LOGIN_DIR" 2>/dev/null || true
-  log "7 login-шаблонов установлены"
+  log "9 login-шаблонов установлены"
 }
 
 # =====================================================================
@@ -2271,7 +2386,9 @@ decoy_fail2ban_init() {
 
   cat > /etc/fail2ban/filter.d/decoy-login.conf <<'F2B'
 [Definition]
-failregex = ^<HOST> - \S+ \[[^\]]+\] "POST /login HTTP/[0-9.]+" 401
+# формат decoy_ext: IP [time] "REQUEST" STATUS "UA" host=dom
+failregex = ^<HOST> \[[^\]]+\] "POST /login HTTP/[0-9.]+" 401
+            ^<HOST> \[[^\]]+\] "(?:GET|POST|HEAD) /(?:admin|wp-admin|wp-login\.php|\.env|\.git|api/debug|phpmyadmin|configuration\.php|actuator)(?:/|\?| )[^\"]*" \d+
 ignoreregex =
 F2B
 
@@ -3323,6 +3440,10 @@ decoy_template_choose() {
 stack_ensure() {
   mkdir -p "$NGINX_SITES_AVAIL" "$NGINX_SITES_DIR" 2>/dev/null || true
   [[ -f "$STACK_CONF" ]] || printf '# stack-manager: единый конфиг (ACME :80, панель :4443, decoy)\n' > "$STACK_CONF"
+  # формат лога декоёв: с доменом (host=) — нужен для статистики и бана смотревших
+  if ! grep -q "log_format decoy_ext" "$STACK_CONF" 2>/dev/null; then
+    sed -i "1i log_format decoy_ext '\$remote_addr [\$time_local] \"\$request\" \$status \"\$http_user_agent\" host=\$host';" "$STACK_CONF"
+  fi
   [[ -e "$STACK_LINK" || -L "$STACK_LINK" ]] || ln -sf "$STACK_CONF" "$STACK_LINK"
   return 0
 }
@@ -3372,15 +3493,51 @@ stack_decoy_meta() {
 }
 
 mk_decoy() {
+  # $1..$6 как раньше; $7 (необязательно) — opts: "ua404=1 redir=https://..."
   local port="$1" dom="$2" cert="$3" key="$4" root="$5"
-  local tpl="${6:-default}"
+  local tpl="${6:-default}" opts="${7:-}"
+  local opt_ua404=1 opt_redir=""
+  local _o _k _v
+  for _o in $opts; do
+    _k="${_o%%=*}"; _v="${_o#*=}"
+    case "$_k" in
+      ua404) opt_ua404="$_v" ;;
+      redir) opt_redir="$_v" ;;
+    esac
+  done
   mkdir -p "$root" 2>/dev/null || true
-  local body
 
-  if is_login_template "$tpl"; then
-    cp -f "$DECOY_LOGIN_DIR/$tpl.html" "$root/index.html" 2>/dev/null || true
-    chown www-data:www-data "$root/index.html" 2>/dev/null || true
-    body=$(cat <<EOF
+  # index.html: login-реплики из DECOY_LOGIN_DIR, статика из DECOY_TPL_DIR
+  local tpl_src="$DECOY_TPL_DIR/$tpl.html"
+  is_login_template "$tpl" && tpl_src="$DECOY_LOGIN_DIR/$tpl.html"
+  if [[ -f "$tpl_src" ]]; then
+    cp -f "$tpl_src" "$root/index.html" 2>/dev/null || true
+  elif [[ "$tpl" != redirect && "$tpl" != locked ]]; then
+    cp -f "$DECOY_TPL_DIR/default.html" "$root/index.html" 2>/dev/null || true
+  fi
+  chown www-data:www-data "$root/index.html" 2>/dev/null || true
+
+  # redirect/locked: ответ формирует сам nginx, index не нужен
+  local extra=""
+  case "$tpl" in
+    redirect)
+      [[ -z "$opt_redir" ]] && opt_redir="https://www.google.com/"
+      extra="    return 302 $opt_redir;"
+      ;;
+    locked)
+      extra='    add_header WWW-Authenticate "Basic realm=Restricted" always;
+    return 401;'
+      ;;
+  esac
+
+  # UA-свитч: сканерам/ботам — пустая 404 (в лог попадает → банов не миновать)
+  local ua_block=""
+  if [[ "$opt_ua404" == "1" && "$tpl" != "redirect" && "$tpl" != "locked" ]]; then
+    ua_block='    if ($http_user_agent ~* (curl|wget|python|scrapy|httpclient|okhttp|go-http|libwww|zgrab|nikto|dirbuster|gobuster|wfuzz|nuclei|masscan|headless|bot|spider|crawler|scanner)) { return 404; }'
+  fi
+
+  local body
+  body=$(cat <<EOF
 server {
     listen 127.0.0.1:$port ssl http2;
     server_name $dom;
@@ -3388,37 +3545,23 @@ server {
     ssl_certificate_key $key;
     root $root;
     index index.html;
-    access_log $DECOY_LOG_ACCESS;
+    access_log $DECOY_LOG_ACCESS decoy_ext;
     error_log  /var/log/nginx/decoy-error.log;
+$extra
+$ua_block
+    location = /robots.txt { return 200 "User-agent: *\nDisallow: /\n"; }
+    location ~ ^/(admin|wp-admin|wp-login\.php|\.env|\.git|api/debug|phpmyadmin|configuration\.php|actuator)(/|\$|\?) { return 404; }
     location / { try_files \$uri \$uri/ /index.html; }
     location = /login { limit_except POST { deny all; } return 401; }
 }
 EOF
 )
-  else
-    if [[ -f "$DECOY_TPL_DIR/$tpl.html" ]]; then
-      cp -f "$DECOY_TPL_DIR/$tpl.html" "$root/index.html" 2>/dev/null || true
-    else
-      cp -f "$DECOY_TPL_DIR/default.html" "$root/index.html" 2>/dev/null || true
-    fi
-    chown www-data:www-data "$root/index.html" 2>/dev/null || true
-    body=$(cat <<EOF
-server {
-    listen 127.0.0.1:$port ssl http2;
-    server_name $dom;
-    ssl_certificate     $cert;
-    ssl_certificate_key $key;
-    root $root;
-    index index.html;
-}
-EOF
-)
-  fi
 
   stack_ensure
   stack_del_decoy "$dom"   # замена блока того же домена (upsert)
   {
-    echo "# >>> decoy port=$port root=$root cert=$cert key=$key domain=$dom"
+    # ВАЖНО: domain= держим ПОСЛЕДНИМ ключом — парсеры маркера на это рассчитаны
+    echo "# >>> decoy port=$port root=$root cert=$cert key=$key tpl=$tpl ua404=$opt_ua404 domain=$dom"
     echo "$body"
     echo "# <<< decoy port=$port domain=$dom"
   } >> "$STACK_CONF"
@@ -4906,7 +5049,19 @@ change_decoy() {
   old_hash=$(md5sum "$root/index.html" 2>/dev/null | awk '{print $1}')
   decoy_template_choose tpl "Новый decoy" "default"
   [[ -z "$tpl" ]] && { warn "Шаблон не определён — применяю default"; tpl="default"; }
-  mk_decoy "$port" "$domain" "$cert" "$key" "$root" "$tpl"
+
+  # opts для mk_decoy: redirect — спросить URL; остальным — UA-свитч для ботов
+  local opts=""
+  if [[ "$tpl" == "redirect" ]]; then
+    local rurl=""
+    ask rurl "Куда редиректить (URL)" "https://www.google.com/" '^https?://[A-Za-z0-9.-]+(/[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]*)?$'
+    opts="redir=$rurl"
+  elif [[ "$tpl" != "locked" ]]; then
+    local ub="true"
+    askyn ub "Прятать сайт от ботов/сканеров (404 по User-Agent)?" "y"
+    [[ "$ub" == true ]] && opts="ua404=1" || opts="ua404=0"
+  fi
+  mk_decoy "$port" "$domain" "$cert" "$key" "$root" "$tpl" "$opts"
   new_hash=$(md5sum "$root/index.html" 2>/dev/null | awk '{print $1}')
   if ! nginx -t >/dev/null 2>&1; then
     err "nginx -t не прошёл после смены decoy:"
@@ -5074,6 +5229,93 @@ certs_menu() {
   pause
 }
 
+# статистика decoy-посещений за 24ч (парсинг decoy_ext через python3)
+decoy_stats() {
+  [[ -s "$DECOY_LOG_ACCESS" ]] || { warn "Лог деко-доступов пуст"; pause; return 0; }
+  python3 - "$DECOY_LOG_ACCESS" <<'PY'
+import sys, time, re, collections
+cut = time.time() - 86400
+hits = 0
+ips = collections.Counter()
+hosts = collections.Counter()
+paths = collections.Counter()
+for line in open(sys.argv[1], errors="replace"):
+    m = re.match(r'(\S+) \[([^]]+)\] "([^"]*)" (\d+) "([^"]*)" host=(\S+)', line)
+    if not m:
+        continue
+    try:
+        t = time.mktime(time.strptime(m.group(2).split(" +")[0], "%d/%b/%Y:%H:%M:%S"))
+    except Exception:
+        continue
+    if t < cut:
+        continue
+    hits += 1
+    ips[m.group(1)] += 1
+    hosts[m.group(6)] += 1
+    p = m.group(3).split(" ")[1] if len(m.group(3).split(" ")) > 1 else "/"
+    paths[p[:60]] += 1
+print(f"  Запросов за 24ч: {hits}")
+print(f"  Уникальных IP:   {len(ips)}")
+if hosts:
+    print("  По доменам:")
+    for h, c in hosts.most_common(10):
+        print(f"    {h:40s} {c}")
+if paths:
+    print("  Топ путей:")
+    for p, c in paths.most_common(8):
+        print(f"    {p:42s} {c}")
+if ips:
+    print("  Топ IP:")
+    for ip, c in ips.most_common(8):
+        print(f"    {ip:42s} {c}")
+PY
+  pause
+}
+
+# забанить всех, кто открывал decoy за N часов
+decoy_ban_watchers() {
+  local hrs="" ips="" own_ip
+  ask hrs "За сколько часов (1-168)" "24" '^[0-9]{1,3}$'
+  ips=$(python3 - "$DECOY_LOG_ACCESS" "$hrs" <<'PY'
+import sys, time, re
+cut = time.time() - int(sys.argv[2]) * 3600
+seen = []
+for line in open(sys.argv[1], errors="replace"):
+    m = re.match(r'(\S+) \[([^]]+)\] ', line)
+    if not m:
+        continue
+    try:
+        t = time.mktime(time.strptime(m.group(2).split(" +")[0], "%d/%b/%Y:%H:%M:%S"))
+    except Exception:
+        continue
+    if t >= cut and m.group(1) not in seen:
+        seen.append(m.group(1))
+print(" ".join(seen))
+PY
+)
+  [[ -z "$ips" ]] && { warn "Никого не нашлось"; pause; return 0; }
+  own_ip=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null || true)
+  echo "  Найдены IP:"
+  local ip banned=0 skipped=0
+  for ip in $ips; do
+    if [[ "$ip" == "$own_ip" ]]; then
+      echo "    $ip  (твой сервер/выход — пропущен)"; skipped=$((skipped+1))
+    else
+      echo "    $ip"
+    fi
+  done
+  local conf="false"
+  askyn conf "Забанить все НЕ-серверные IP в jail decoy-login?" "n"
+  if [[ "$conf" == true ]]; then
+    for ip in $ips; do
+      [[ "$ip" == "$own_ip" ]] && continue
+      fail2ban-client set decoy-login banip "$ip" >/dev/null 2>&1 && banned=$((banned+1))
+    done
+    log "Забанено: $banned"
+  fi
+  pause
+}
+
 security_menu() {
   line; echo -e "${B}   БЕЗОПАСНОСТЬ — БАНЫ, DECOY-ЛОГИНЫ, FAIL2BAN${N}"; line
 
@@ -5100,11 +5342,15 @@ security_menu() {
   echo "  2) Разбанить все (во всех jail)"
   echo "  3) Очистить лог деко-попыток"
   echo "  4) Добавить IP в whitelist (ignoreip)"
+  echo "  5) Статистика decoy-посещений (24ч)"
+  echo "  6) Забанить всех, кто открывал decoy"
   echo "  0) Назад"
   line
   local c=""
   read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
   case "$c" in
+    5) decoy_stats ;;
+    6) decoy_ban_watchers ;;
     1)
       local jj="" ip=""
       ask jj "Jail (Enter — decoy-login)" "decoy-login" '^[A-Za-z0-9_-]*$'
@@ -5275,6 +5521,88 @@ firewall_menu() {
   done
 }
 
+# пересборка ВСЕХ decoy-блоков: подтянуть robots/honeypot/UA-404/логи с доменом.
+# Шаблон берём из маркера (tpl=), если нет — угадываем по md5 index.html.
+decoy_rebuild_all() {
+  [[ -f "$STACK_CONF" ]] || { err "stack.conf не найден"; pause; return 1; }
+  local mline mport mroot mcert mkey mdom mtpl muaf idx hash tf troot found
+  local -A TPL_OF=()
+  local -a ROWS=()
+  while IFS= read -r mline; do
+    [[ "$mline" != "# >>> decoy "* ]] && continue
+    mport=$(grep -oE 'port=[0-9]+'   <<<"$mline" | head -1 | cut -d= -f2)
+    mroot=$(grep -oE 'root=[^ ]+'    <<<"$mline" | head -1 | cut -d= -f2-)
+    mcert=$(grep -oE 'cert=[^ ]+'    <<<"$mline" | head -1 | cut -d= -f2-)
+    mkey=$(grep  -oE ' key=[^ ]+'    <<<"$mline" | head -1 | sed 's/^ key=//')
+    mdom=$(grep  -oE 'domain=[^ ]+$' <<<"$mline" | head -1 | cut -d= -f2-)
+    mtpl=$(grep -oE 'tpl=[^ ]+'      <<<"$mline" | head -1 | cut -d= -f2-)
+    muaf=$(grep -oE 'ua404=[0-9]'    <<<"$mline" | head -1 | cut -d= -f2-)
+    [[ -z "$mdom" || -z "$mport" || -z "$mroot" ]] && continue
+    if [[ -z "$mtpl" && -f "$mroot/index.html" ]]; then
+      hash=$(md5sum "$mroot/index.html" 2>/dev/null | awk '{print $1}')
+      found=""
+      for tf in "$DECOY_TPL_DIR"/*.html "$DECOY_LOGIN_DIR"/*.html; do
+        [[ -f "$tf" ]] || continue
+        [[ "$(md5sum "$tf" 2>/dev/null | awk '{print $1}')" == "$hash" ]] && { found=$(basename "$tf" .html); break; }
+      done
+      mtpl="${found:-corporate}"
+    fi
+    [[ -z "$mtpl" ]] && mtpl="corporate"
+    [[ -z "$muaf" ]] && muaf=1
+    ROWS+=("$mport|$mdom|$mcert|$mkey|$mroot|$mtpl|$muaf")
+  done < "$STACK_CONF"
+  [[ ${#ROWS[@]} -eq 0 ]] && { warn "Decoy-блоки не найдены"; pause; return 0; }
+  local r
+  for r in "${ROWS[@]}"; do
+    IFS='|' read -r mport mdom mcert mkey mroot mtpl muaf <<<"$r"
+    mk_decoy "$mport" "$mdom" "$mcert" "$mkey" "$mroot" "$mtpl" "ua404=$muaf"
+    log "  $mdom → «$mtpl» (ua404=$muaf, robots+honeypot+логи)"
+  done
+  if nginx -t >/dev/null 2>&1; then
+    nginx_reload || true
+    log "Все decoy-блоки пересобраны ✓"
+  else
+    err "nginx -t не прошёл:"; nginx -t 2>&1 | tail -5 | sed 's/^/    /'
+  fi
+  pause
+}
+
+# «проверить как посторонний»: что реально увидит человек и сканер
+decoy_outsider_check() {
+  local mline mport mdom
+  local -a DOM_LIST=()
+  local -A PORT_OF=()
+  while IFS= read -r mline; do
+    [[ "$mline" != "# >>> decoy "* ]] && continue
+    mport=$(grep -oE 'port=[0-9]+'   <<<"$mline" | head -1 | cut -d= -f2)
+    mdom=$(grep  -oE 'domain=[^ ]+$' <<<"$mline" | head -1 | cut -d= -f2-)
+    [[ -n "$mdom" ]] && { DOM_LIST+=("$mdom"); PORT_OF[$mdom]="$mport"; }
+  done < "$STACK_CONF"
+  [[ ${#DOM_LIST[@]} -eq 0 ]] && { warn "Decoy-доменов нет"; pause; return 0; }
+  local i=1 d pick
+  for d in "${DOM_LIST[@]}"; do printf "  %d) %s\n" "$i" "$d"; i=$((i+1)); done
+  ask pick "Проверить какой домен" "1" '^[0-9]+$'
+  (( pick > ${#DOM_LIST[@]} )) && { err "Нет такого"; pause; return 1; }
+  mdom="${DOM_LIST[$((pick-1))]}"
+  mport="${PORT_OF[$mdom]}"
+  local HUA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+  local cb ch title
+  cb=$(curl -sk -A "curl/8.5.0" -o /dev/null -w "%{http_code}" "https://127.0.0.1:$mport/" 2>/dev/null)
+  curl -sk -A "$HUA" "https://127.0.0.1:$mport/" -o /tmp/smg_out.html 2>/dev/null
+  ch=$(curl -sk -A "$HUA" -o /dev/null -w "%{http_code}" "https://127.0.0.1:$mport/" 2>/dev/null)
+  title=$(grep -oE '<title>[^<]*' /tmp/smg_out.html 2>/dev/null | head -1 | sed 's/<title>//')
+  echo
+  echo "  Домен: $mdom (локальный порт $mport)"
+  echo "  ---------------------------------------------"
+  echo "  Человек (браузер): HTTP $ch   title: ${title:-—}"
+  echo "  Сканер (curl):     HTTP $cb   $( [[ "$cb" == 404 ]] && echo '← бот видит пустоту ✓' )"
+  echo
+  echo "  Заголовки (как для браузера):"
+  curl -skI -A "$HUA" "https://127.0.0.1:$mport/" 2>/dev/null | head -6 | sed 's/^/    /'
+  rm -f /tmp/smg_out.html
+  pause
+}
+
 view_decoy_templates() {
   line; echo -e "${B}   DECOY-ШАБЛОНЫ${N}"; line
   echo "▸ Статические HTML:"
@@ -5295,6 +5623,16 @@ view_decoy_templates() {
     [[ -f "$DECOY_LOGIN_DIR/$name.html" ]] && size=$(stat -c%s "$DECOY_LOGIN_DIR/$name.html" 2>/dev/null || echo 0)
     printf "  %-15s %6s B  %s\n" "$name" "$size" "$desc"
   done
+  echo
+  echo "  1) Пересобрать все decoy-блоки (включить robots/honeypot/UA-404/логи)"
+  echo "  2) Проверить домен как посторонний (человек vs сканер)"
+  echo "  0) Назад"
+  local c=""
+  read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
+  case "$c" in
+    1) decoy_rebuild_all ;;
+    2) decoy_outsider_check ;;
+  esac
   pause
 }
 
