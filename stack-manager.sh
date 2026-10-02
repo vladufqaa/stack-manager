@@ -1845,6 +1845,10 @@ create_inbounds_menu() {
         d_new=""
         ask d_new "Домен для $name (нужен сертификат + decoy)" "$def2" '^[a-zA-Z0-9.-]+$'
         [[ -z "$d_new" ]] && continue
+        if [[ "$d_new" == *.example.com ]]; then
+          err "Это шаблон-плейсхолдер. Введи НАСТОЯЩИЙ домен (поддомен своего base-домена)"
+          continue
+        fi
         owner2=$(sni_domain_owner "$d_new" "")
         if [[ -n "$owner2" ]]; then
           err "Домен $d_new уже занят ($owner2). Укажите другой — инбаунд ещё не создан."
@@ -2306,6 +2310,12 @@ setup_tproxy_web() {
   [[ -z "$tid" ]] && return 0   # tproxy не выбран при установке — нечего настраивать
   local tdom="${T_PROXY_DOMAIN:-}"
   if [[ -z "$tdom" ]]; then
+    # реальный домен — из настроек инбаунда (если не плейсхолдер *.example.com)
+    tdom=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+           "SELECT COALESCE(json_extract(settings,'\$.hostname'),'') FROM inbounds WHERE id=$tid;" 2>/dev/null | tr -d '[:space:]')
+    [[ "$tdom" =~ \.example\.com$ ]] && tdom=""
+  fi
+  if [[ -z "$tdom" ]]; then
     local base="${PANEL_DOMAIN#*.}"
     [[ "$base" != *.* ]] && base="$PANEL_DOMAIN"
     tdom="tg.${base:-example.com}"
@@ -2338,12 +2348,23 @@ print(f"  tproxy #{iid}: hostname={dom}, серт {'вписан' if os.environ.
 PYTP
   systemctl start x-ui 2>/dev/null || true
   sleep 4
-  # маршрут 443 → tproxy (idempotent)
-  if [[ -f "$SNI_CONF" ]] && ! grep -q "tg_backend" "$SNI_CONF"; then
-    sed -i "s|^\(    default\)|    $tdom              tg_backend;\n\1|" "$SNI_CONF" 2>/dev/null || true
-    sed -i "1i upstream tg_backend { server 127.0.0.1:11443; }" "$SNI_CONF" 2>/dev/null || true
+  # маршрут 443 → tproxy (idempotent UPSERT: upstream есть всегда,
+  # строка домена — всегда АКТУАЛЬНЫЙ tdom; старый домен заменяется)
+  if [[ -f "$SNI_CONF" ]]; then
+    if ! grep -q "upstream tg_backend" "$SNI_CONF"; then
+      sed -i "1i upstream tg_backend { server 127.0.0.1:11443; }" "$SNI_CONF" 2>/dev/null || true
+    fi
+    if ! grep -qE "^[[:space:]]*${tdom}[[:space:]]+tg_backend;" "$SNI_CONF"; then
+      if grep -qE "^[[:space:]]*[A-Za-z0-9.-]+[[:space:]]+tg_backend;" "$SNI_CONF"; then
+        sed -i -E "s|^([[:space:]]*)[A-Za-z0-9.-]+([[:space:]]+tg_backend;)|\1${tdom}\2|" "$SNI_CONF" 2>/dev/null || true
+      else
+        sed -i "s|^\(    default\)|    ${tdom}              tg_backend;\n\1|" "$SNI_CONF" 2>/dev/null || true
+      fi
+      log "tg web proxy: мап обновлён → $tdom → tg_backend"
+    fi
   fi
-  ufw allow 11443/tcp >/dev/null 2>&1 || true
+  # доктрина «всё за 443»: 11443 наружу не открываем (и закрываем, если было)
+  ufw delete allow 11443/tcp >/dev/null 2>&1 || true
   nginx -t >/dev/null 2>&1 && nginx_reload || true
   log "tg web proxy: https://$tdom/ — сайт-заглушка + веб-интерфейс прокси (ключи/ссылки в панели)"
 }
