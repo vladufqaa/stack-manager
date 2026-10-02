@@ -2379,7 +2379,7 @@ setup_tproxy_web() {
   fi
   # сайт-заглушка обязательна: без index.html в siteDir caddy tproxy не поднимается
   mkdir -p /var/www/html
-  ensure_tproxy_site   # Telegram Web-заглушка (перезаписывает пустышку/старое)
+  ensure_tproxy_site   # нейтральная blog-заглушка (перезаписывает пустышку/старое)
   # серт: точный → wildcard базового домена → выпуск
   local cline c_cert="" c_key=""
   cline=$(cert_lineage_for "$tdom")
