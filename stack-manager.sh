@@ -5643,9 +5643,9 @@ PYLIVE
   while IFS=$'\x1f' read -r iid proto p net cert ncl dom; do
     [[ -z "$iid" ]] && continue
     if [[ "$net" == "udp" ]]; then
-      ss -uln 2>/dev/null | grep -qw ":$p" && st_us="✓" || st_us="✗"
+      ss -uln 2>/dev/null | grep -qE ":${p}[[:space:]]" && st_us="✓" || st_us="✗"
     else
-      ss -tln 2>/dev/null | grep -qw ":$p" && st_us="✓" || st_us="✗"
+      ss -tln 2>/dev/null | grep -qE ":${p}[[:space:]]" && st_us="✓" || st_us="✗"
     fi
     days="—"
     if [[ "$cert" == "REALITY" ]]; then
@@ -5664,7 +5664,7 @@ PYLIVE
     printf "  %-5s %-11s %-7s %-5s %-8s %-5s %-9s %s\n" "#$iid" "$proto" "$p" "$st_us" "$days" "$ncl" "$traf" "$dom"
   done <<<"$out"
   echo
-  warn2 "✗ — порт НЕ слушается (инбаунд не работает) · RLTY — reality: серт у decoy в nginx · Кл. — число клиентов"
+  warn "✗ — порт НЕ слушается (инбаунд не работает) · RLTY — reality: серт у decoy в nginx · Кл. — число клиентов"
   line
   return 0
 }
