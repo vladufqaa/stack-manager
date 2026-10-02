@@ -2041,6 +2041,11 @@ HTML
 # =====================================================================
 decoy_login_templates_init() {
   mkdir -p "$DECOY_LOGIN_DIR" 2>/dev/null || true
+  # реплики 1:1 (окт 2026): старые шаблоны сносим, чтобы tpl_write записал новые
+  rm -f "$DECOY_LOGIN_DIR/adguard.html" "$DECOY_LOGIN_DIR/portainer.html" \
+        "$DECOY_LOGIN_DIR/pihole.html" "$DECOY_LOGIN_DIR/omv.html" \
+        "$DECOY_LOGIN_DIR/jellyfin.html" "$DECOY_LOGIN_DIR/homeassistant.html" \
+        "$DECOY_LOGIN_DIR/uptime-kuma.html" 2>/dev/null || true
 
   local css='<style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -2071,32 +2076,43 @@ function showBan(){
   tpl_write "$DECOY_LOGIN_DIR/adguard.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>AdGuard Home</title>
 $css<style>
-body{font-family:-apple-system,sans-serif;background:#67b279;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:#fff;padding:40px;width:360px;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.15)}
-h1{font-size:22px;color:#3d3d3d;text-align:center;margin-bottom:8px}
-.sub{font-size:13px;color:#888;text-align:center;margin-bottom:24px}
-button{background:#67b279;color:#fff}
-</style></head><body><div class="card">
-<h1>AdGuard Home</h1><div class="sub">Sign in to continue</div>
+body{font-family:Roboto,-apple-system,'Segoe UI',sans-serif;background:#fff;color:#3c4043;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
+.logo{display:flex;align-items:center;gap:10px;margin-bottom:26px}
+.logo svg{width:46px;height:46px}
+.logo b{font-size:27px;font-weight:500;color:#3c4043}
+.card{width:360px;padding:32px;background:#fff;border:1px solid #e0e0e0;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+input{border:1px solid #c6c6c6;border-radius:4px;padding:12px}
+input:focus{border-color:#68b279;outline:none}
+button{background:#68b279;color:#fff;font-weight:500;border-radius:4px}
+button:hover{background:#5aa36c}
+.foot{margin-top:20px;font-size:12px;color:#9aa0a6;text-align:center}
+.foot span{color:#68b279;cursor:pointer}
+</style></head><body>
+<div class="logo"><svg viewBox="0 0 24 24"><path fill="#68b279" d="M12 2 4 5v6c0 5 3.4 9.7 8 11 4.6-1.3 8-6 8-11V5l-8-3z"/><path fill="#fff" d="M10.6 14.9l-2.9-2.9 1.2-1.2 1.7 1.7 4.5-4.5 1.2 1.2-5.7 5.7z"/></svg><b>AdGuard Home</b></div>
+<div class="card">
 <div id="msg" class="msg"></div>
 <form id="form" method="POST" action="/login">
 <label>Username</label><input name="u" required autocomplete="off">
 <label>Password</label><input name="p" type="password" required>
 <button>Sign in</button>
-</form></div>$js</body></html>
+</form></div>
+<div class="foot">AdGuard Home v0.107.52 · <span>Homepage</span> · <span>Report issue</span></div>
+$js</body></html>
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/portainer.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>Portainer</title>
 $css<style>
-body{font-family:-apple-system,sans-serif;background:#f4f4f4;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:#fff;padding:48px;width:400px;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,.08)}
-.logo{width:52px;height:52px;background:#13b5ea;border-radius:6px;margin:0 auto 20px}
-h1{font-size:22px;color:#333;text-align:center;margin-bottom:32px}
-label{text-transform:uppercase;letter-spacing:.5px;font-size:12px}
-button{background:#13b5ea;color:#fff}
+body{font-family:'Segoe UI',Roboto,-apple-system,sans-serif;background:#eceff1;color:#333;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#fff;padding:40px 36px;width:400px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.14)}
+.logo{width:56px;height:56px;background:#13bef9;border-radius:12px;display:flex;align-items:center;justify-content:center;margin:0 auto 18px}
+.logo svg{width:32px;height:32px}
+h1{font-size:24px;font-weight:400;color:#333;text-align:center;margin-bottom:26px}
+button{background:#2b7fd4;color:#fff;font-weight:500}
+button:hover{background:#246cb4}
 </style></head><body><div class="card">
-<div class="logo"></div><h1>Portainer</h1>
+<div class="logo"><svg viewBox="0 0 24 24"><path fill="#fff" d="M4 7h10v4H4V7zm0 6h10v4H4v-4zm12-6h4v4h-4V7zm0 6h4v4h-4v-4z"/></svg></div>
+<h1>Portainer</h1>
 <div id="msg" class="msg"></div>
 <form id="form" method="POST" action="/login">
 <label>Username</label><input name="u" required autocomplete="off">
@@ -2106,16 +2122,19 @@ button{background:#13b5ea;color:#fff}
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/pihole.html" <<HTML
-<!doctype html><html><head><meta charset="utf-8"><title>Pi-hole</title>
+<!doctype html><html><head><meta charset="utf-8"><title>Pi-hole - Admin Console</title>
 $css<style>
-body{font-family:-apple-system,sans-serif;background:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#333}
-.card{width:420px;padding:40px;text-align:center}
-h1{font-size:26px;color:#c00;margin-bottom:8px}
-.sub{color:#888;font-size:13px;margin-bottom:32px}
-label{text-align:left}
-button{background:#c00;color:#fff}
+body{font-family:'Helvetica Neue',Arial,sans-serif;background:#f5f6f7;color:#333;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#fff;padding:36px 40px;width:400px;border-radius:6px;border:1px solid #e2e4e6;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.logo{display:flex;align-items:center;gap:12px;margin-bottom:24px;justify-content:center}
+.logo svg{width:44px;height:44px}
+.logo b{font-size:28px;font-weight:600;color:#2b3033}
+.logo b i{font-style:normal;color:#c0392b}
+input{border:1px solid #ccc;border-radius:3px;padding:10px}
+button{background:#3c8dbc;color:#fff;border-radius:3px}
+button:hover{background:#3579a8}
 </style></head><body><div class="card">
-<h1>Pi-hole</h1><div class="sub">Admin console</div>
+<div class="logo"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#c0392b"/><circle cx="12" cy="12" r="6" fill="#fff"/><circle cx="12" cy="12" r="2.5" fill="#c0392b"/></svg><b>Pi-<i>hole</i></b></div>
 <div id="msg" class="msg"></div>
 <form id="form" method="POST" action="/login">
 <label>Password</label><input name="p" type="password" required>
@@ -2124,35 +2143,46 @@ button{background:#c00;color:#fff}
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/omv.html" <<HTML
-<!doctype html><html><head><meta charset="utf-8"><title>openmediavault</title>
+<!doctype html><html><head><meta charset="utf-8"><title>openmediavault - Login</title>
 $css<style>
-body{font-family:-apple-system,sans-serif;background:#e9eef2;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#333}
-.card{background:#fff;width:400px;border-radius:4px;box-shadow:0 2px 12px rgba(0,0,0,.08);overflow:hidden}
-.head{background:#5d7789;color:#fff;padding:20px 24px;font-size:18px;font-weight:500}
-.body{padding:32px 24px}
-button{background:#5d7789;color:#fff}
-</style></head><body><div class="card">
-<div class="head">openmediavault</div><div class="body">
+body{font-family:'Segoe UI',Roboto,sans-serif;background:#262c31;color:#e8eaed;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
+.brand{font-size:30px;font-weight:300;color:#fff;margin-bottom:6px;letter-spacing:.5px}
+.brand i{font-style:normal;color:#5d9cec}
+.sub{font-size:13px;color:#8a939b;margin-bottom:28px}
+.card{background:#31373d;width:400px;padding:36px 32px;border-radius:6px;box-shadow:0 4px 18px rgba(0,0,0,.35)}
+label{color:#b8bfc6}
+input{background:#262c31;border:1px solid #454d54;color:#e8eaed;border-radius:4px}
+input:focus{border-color:#5d9cec;outline:none}
+button{background:#5d7789;color:#fff;border-radius:4px}
+button:hover{background:#4d6575}
+</style></head><body>
+<div class="brand">openmediavault<i>.</i></div>
+<div class="sub">Network Attached Storage Solution</div>
+<div class="card">
 <div id="msg" class="msg"></div>
 <form id="form" method="POST" action="/login">
 <label>Username</label><input name="u" required autocomplete="off">
 <label>Password</label><input name="p" type="password" required>
-<button>Login</button>
-</form></div></div>$js</body></html>
+<button>Sign in</button>
+</form></div>$js</body></html>
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/jellyfin.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>Jellyfin</title>
 $css<style>
-body{font-family:-apple-system,sans-serif;background:linear-gradient(135deg,#101010,#1a0033);color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{width:380px;padding:40px 32px;background:rgba(255,255,255,.04);border-radius:12px;border:1px solid rgba(255,255,255,.08)}
-.logo{width:56px;height:56px;background:#aa5cc3;border-radius:12px;margin:0 auto 16px}
-h1{font-size:20px;text-align:center;margin-bottom:32px;font-weight:500}
-label{color:#bbb}
-input{background:#1a1a1a;border:1px solid #333;color:#fff}
-button{background:#aa5cc3;color:#fff}
-</style></head><body><div class="card">
-<div class="logo"></div><h1>Jellyfin</h1>
+body{font-family:'Segoe UI',Roboto,-apple-system,sans-serif;background:linear-gradient(160deg,#141e2c,#0b1017);color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
+.logo svg{width:72px;height:72px;margin-bottom:12px}
+h1{font-size:30px;font-weight:400;text-align:center;margin-bottom:24px;letter-spacing:.5px}
+.card{width:340px}
+label{color:#aebac9}
+input{background:#1a2431;border:1px solid #2f3d4f;color:#fff;border-radius:4px}
+input:focus{border-color:#52b54b;outline:none}
+button{background:#52b54b;color:#fff;font-weight:500;border-radius:4px}
+button:hover{background:#46a03f}
+</style></head><body>
+<div class="logo"><svg viewBox="0 0 24 24"><defs><linearGradient id="jg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#aa5cc3"/><stop offset="1" stop-color="#00a4dc"/></linearGradient></defs><circle cx="12" cy="12" r="11" fill="url(#jg)"/><circle cx="12" cy="12" r="5.5" fill="none" stroke="#fff" stroke-width="1.6"/><circle cx="12" cy="12" r="1.6" fill="#fff"/></svg></div>
+<h1>Jellyfin</h1>
+<div class="card">
 <div id="msg" class="msg"></div>
 <form id="form" method="POST" action="/login">
 <label>Username</label><input name="u" required autocomplete="off">
@@ -2164,29 +2194,43 @@ HTML
   tpl_write "$DECOY_LOGIN_DIR/homeassistant.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>Home Assistant</title>
 $css<style>
-body{font-family:-apple-system,sans-serif;background:#03a9f4;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:#fff;padding:40px 32px;width:380px;border-radius:4px;box-shadow:0 4px 20px rgba(0,0,0,.15)}
-h1{font-size:24px;color:#0388d1;text-align:center;margin-bottom:32px;font-weight:500}
-button{background:#03a9f4;color:#fff}
-</style></head><body><div class="card">
+body{font-family:Roboto,'Segoe UI',sans-serif;background:#fafafa;color:#212121;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
+.logo svg{width:64px;height:64px;margin-bottom:10px}
+h1{font-size:28px;font-weight:400;text-align:center;margin-bottom:26px;color:#424242}
+.card{width:360px;padding:28px;background:#fff;border:1px solid #e0e0e0;border-radius:8px}
+input{border:1px solid #c6c6c6;border-radius:4px;padding:12px}
+input:focus{border-color:#41bdf2;outline:none}
+button{background:#41bdf2;color:#fff;font-weight:500;border-radius:4px}
+button:hover{background:#2cabdf}
+</style></head><body>
+<div class="logo"><svg viewBox="0 0 24 24"><path fill="#41bdf2" d="M12 3 2 12h3v8h5v-5h4v5h5v-8h3L12 3z"/></svg></div>
 <h1>Home Assistant</h1>
+<div class="card">
 <div id="msg" class="msg"></div>
 <form id="form" method="POST" action="/login">
 <label>Username</label><input name="u" required autocomplete="off">
 <label>Password</label><input name="p" type="password" required>
-<button>Log in</button>
+<button>Connect</button>
 </form></div>$js</body></html>
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/uptime-kuma.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"><title>Uptime Kuma</title>
 $css<style>
-body{font-family:-apple-system,sans-serif;background:#5cdd8b;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:#fff;padding:36px 32px;width:360px;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.12)}
-h1{font-size:20px;color:#333;text-align:center;margin-bottom:28px}
-button{background:#5cdd8b;color:#fff}
-</style></head><body><div class="card">
-<h1>Uptime Kuma</h1>
+body{font-family:Roboto,'Segoe UI',sans-serif;background:#1b2637;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
+.logo{display:flex;align-items:center;gap:10px;margin-bottom:30px}
+.logo svg{width:40px;height:40px}
+.logo b{font-size:24px;font-weight:600;color:#fff}
+.logo b i{font-style:normal;color:#5cdd8b}
+.card{width:360px;padding:32px;background:#243447;border:1px solid #2e4157;border-radius:10px}
+label{color:#9fb0c0}
+input{background:#1b2637;border:1px solid #33475e;color:#fff;border-radius:6px}
+input:focus{border-color:#5cdd8b;outline:none}
+button{background:#5cdd8b;color:#1b2637;font-weight:700;border-radius:6px}
+button:hover{background:#4bcf7b}
+</style></head><body>
+<div class="logo"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#5cdd8b" stroke-width="2"/><path fill="none" stroke="#5cdd8b" stroke-width="2" d="M6 12h3l2-4 2 8 2-4h3"/></svg><b>Uptime <i>Kuma</i></b></div>
+<div class="card">
 <div id="msg" class="msg"></div>
 <form id="form" method="POST" action="/login">
 <label>Username</label><input name="u" required autocomplete="off">
@@ -5780,8 +5824,8 @@ main_menu() {
     echo -e "${B}║       STACK MANAGER — SNI-роутер + 3x-ui/LucX        ║${N}"
     echo -e "${B}╚══════════════════════════════════════════════════════╝${N}"
     echo "  x-ui.db:  ${XUI_DB:-не найден}"
-    if [[ "$ADG_PRESENT" == true ]]; then
-      echo "  AdGuard:  ${ADG_SERVICE:-конфиг найден}"
+    if [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]]; then
+      echo "  AdGuard:  $(systemctl is-active "$ADG_SERVICE" 2>/dev/null || echo -)  ($ADG_SERVICE)"
     else
       echo "  AdGuard:  не найден"
     fi
