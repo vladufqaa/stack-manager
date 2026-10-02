@@ -144,7 +144,6 @@ DECOY_TEMPLATES=(
   "blog|Персональный блог"
   "docs|Документация / wiki"
   "cloudflare|Cloudflare-style"
-  "telegram|▶ Telegram Web — экран загрузки (мимикрия под tg)"
   "adguard|▶ AdGuard Home — login (интерактивный)"
   "portainer|▶ Portainer — login (интерактивный)"
   "pihole|▶ Pi-hole — login (интерактивный)"
@@ -529,12 +528,14 @@ END;
 SQL
 }
 
-# Камуфляж-сайт для tproxy (Telegram WEB-proxy): реплика экрана загрузки Telegram Web
+# Камуфляж-сайт для tproxy: НЕЙТРАЛЬНАЯ заглушка (blog), НЕ связанная с Telegram —
+# мимикрия под Telegram на tg-домене = прямая подсказка, что за ним tg-прокси.
 ensure_tproxy_site() {
   mkdir -p /var/www/html 2>/dev/null || true
+  rm -f /var/www/html/telegram.html 2>/dev/null || true   # след прошлой версии
   # перезаписываем ВСЕГДА: пустышка/старый index = белый лист для посторонних
-  if [[ -n "$DECOY_TPL_DIR" && -f "$DECOY_TPL_DIR/telegram.html" ]]; then
-    cp -f "$DECOY_TPL_DIR/telegram.html" /var/www/html/index.html 2>/dev/null || true
+  if [[ -n "$DECOY_TPL_DIR" && -f "$DECOY_TPL_DIR/blog.html" ]]; then
+    cp -f "$DECOY_TPL_DIR/blog.html" /var/www/html/index.html 2>/dev/null || true
   elif [[ ! -s /var/www/html/index.html ]]; then
     printf '%s\n' \
       '<!DOCTYPE html><html><head><meta charset="utf-8"><title></title></head><body></body></html>' \
@@ -2039,33 +2040,9 @@ h1{font-size:26px;margin-bottom:24px;color:#111}p{line-height:1.7;color:#555;mar
 </div></body></html>
 HTML
 
-  tpl_write "$DECOY_TPL_DIR/telegram.html" <<'TGHTML'
-<!doctype html><html><head><meta charset="utf-8"><title>Telegram Web</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10' fill='%232aabee'/%3E%3Cpath fill='%23fff' d='M18 7.5 6.5 12l3.5 1.5L11 17l2-2.8 3.4 2.3L18 7.5z'/%3E%3C/svg%3E">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:#fff;height:100vh;display:flex;flex-direction:column}
-.hdr{height:48px;background:#517da2;display:flex;align-items:center;padding:0 16px;color:#fff;font-size:16px;font-weight:500;gap:10px}
-.hdr .m{display:inline-block;width:22px;height:18px;background:#7ea6c9;border-radius:3px}
-.main{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}
-.logo{width:120px;height:120px;background:linear-gradient(180deg,#2aabee,#229ed9);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 24px rgba(34,158,217,.35)}
-.logo svg{width:64px;height:64px}
-h1{font-size:24px;font-weight:400;color:#707579}
-.spin{width:28px;height:28px;border:3px solid #e6ebee;border-top-color:#2aabee;border-radius:50%;animation:s 1s linear infinite}
-@keyframes s{to{transform:rotate(360deg)}}
-.st{font-size:14px;color:#8d99a4}
-.ftr{text-align:center;font-size:12px;color:#a2acb4;padding:14px}
-.ftr b{color:#2aabee;font-weight:600}
-</style></head><body>
-<div class="hdr"><span class="m"></span> Telegram Web</div>
-<div class="main">
-<div class="logo"><svg viewBox="0 0 24 24"><path fill="#fff" d="M21.9 3.4 18.9 19c-.2 1-.8 1.2-1.7.8l-4.6-3.4-2.2 2.1c-.2.2-.4.4-.9.4l.3-4.7 8.6-7.8c.4-.3-.1-.5-.6-.2L7.3 12.7l-4.5-1.4c-1-.3-1-1 .2-1.4l17.6-6.8c.8-.3 1.5.2 1.3 1.3z"/></svg></div>
-<h1>Telegram Web</h1>
-<div class="spin"></div>
-<div class="st">Connecting…</div>
-</div>
-<div class="ftr">Telegram Web A 1.5 · <b>Learn more</b></div>
-</body></html>
-TGHTML
+  # tg-домену НЕ даём отдельного шаблона в меню: мимикрия под Telegram — палево
+  # (сразу видно, что за доменом tg-прокси). Сайт tproxy получает нейтральный
+  # blog (ensure_tproxy_site) — не совпадающий с corporate у reality-декоев.
 
   log "Статические decoy-шаблоны готовы"
 }
@@ -2532,9 +2509,9 @@ sync_inbound_certs() {
   # x-ui держит inbounds в памяти и при рестарте сбрасывает её поверх БД —
   # поэтому ВСЕ правки inbounds делаем только при ОСТАНОВЛЕННОМ x-ui
   systemctl stop x-ui 2>/dev/null || true
-  # tproxy (caddy) отказывается стартовать без index.html в siteDir
-  if [[ -d /var/www/html && -n "$DECOY_TPL_DIR" && -f "$DECOY_TPL_DIR/telegram.html" ]]; then
-    cp -f "$DECOY_TPL_DIR/telegram.html" /var/www/html/index.html 2>/dev/null || true
+  # tproxy (caddy) отказывается стартовать без index.html в siteDir — нейтральный blog
+  if [[ -d /var/www/html && -n "$DECOY_TPL_DIR" && -f "$DECOY_TPL_DIR/blog.html" ]]; then
+    cp -f "$DECOY_TPL_DIR/blog.html" /var/www/html/index.html 2>/dev/null || true
   fi
   # Читаем через python: панель хранит stream/settings pretty-JSON (многострочно),
   # sqlite3|while-read обрезал бы значение на первом переносе — reality-инбаунды
