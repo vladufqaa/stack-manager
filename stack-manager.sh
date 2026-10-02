@@ -6126,6 +6126,10 @@ PYLIVE
         st_us="✓"
       elif command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -qw "$p"; then
         st_us="✓*"   # порт открыт NAT-правилом (port hopping) — сокет слушает другой порт
+      elif iptables -t nat -S 2>/dev/null | grep -qE "dport[ =]$p([ :]|$)|:$p([ :]|$)"; then
+        st_us="✓*"   # то же, но legacy-iptables
+      elif grep -qiE ":$(printf '%04X' "$p" 2>/dev/null)([[:space:]]|\$)" /proc/net/udp /proc/net/udp6 2>/dev/null; then
+        st_us="✓"    # прямое чтение /proc — работает даже без ss
       else
         st_us="✗"
       fi
