@@ -6072,9 +6072,6 @@ fmt_bytes() {   # <bytes> → человекочитаемо
 inbounds_live() {
   line; echo -e "${B}   ИНБАУНДЫ — LIVE${N}"; line
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
-  local has_traffic
-  has_traffic=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-    "SELECT name FROM sqlite_master WHERE type='table' AND name='client_traffics';" 2>/dev/null || true)
 
   printf "  %-5s %-11s %-7s %-5s %-8s %-5s %-9s %s\n" "ID" "Прото" "Порт" "Слух" "Серт" "Кл." "Трафик" "Домен"
   echo "  ─────────────────────────────────────────────────────────────────────────────"
@@ -6106,16 +6103,34 @@ for iid,proto,port,listen,setts_s,stream_s in rows:
     if (st.get("security") or "").lower()=="reality": cert="REALITY"
     try: ncl=len(se.get("clients") or [])
     except Exception: ncl=0
-    print(f"{iid}\x1f{proto}\x1f{p}\x1f{net}\x1f{cert}\x1f{ncl}\x1f{dom}")
+    # трафик: панель может писать его и в client_traffics (по клиентам),
+    # и в inbounds.up/down (по инбаунду) — берём максимум из обоих источников
+    t1=t2=0
+    try:
+        r=con.execute("SELECT COALESCE(SUM(up),0)+COALESCE(SUM(down),0) FROM client_traffics WHERE inbound_id=?", (iid,)).fetchone()
+        t1=r[0] if r else 0
+    except Exception: pass
+    try:
+        r=con.execute("SELECT COALESCE(up,0)+COALESCE(down,0) FROM inbounds WHERE id=?", (iid,)).fetchone()
+        t2=r[0] if r else 0
+    except Exception: pass
+    tot=max(int(t1 or 0), int(t2 or 0))
+    print(f"{iid}\x1f{proto}\x1f{p}\x1f{net}\x1f{cert}\x1f{ncl}\x1f{dom}\x1f{tot}")
 PYLIVE
 )
-  local iid proto p net cert ncl dom st_us days traf e
-  while IFS=$'\x1f' read -r iid proto p net cert ncl dom; do
+  local iid proto p net cert ncl dom tot st_us days traf e
+  while IFS=$'\x1f' read -r iid proto p net cert ncl dom tot; do
     [[ -z "$iid" ]] && continue
     if [[ "$net" == "udp" ]]; then
-      ss -uln 2>/dev/null | grep -qE ":${p}[[:space:]]" && st_us="✓" || st_us="✗"
+      if ss -ulan 2>/dev/null | grep -qE ":${p}([[:space:]]|\$)"; then
+        st_us="✓"
+      elif command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -qw "$p"; then
+        st_us="✓*"   # порт открыт NAT-правилом (port hopping) — сокет слушает другой порт
+      else
+        st_us="✗"
+      fi
     else
-      ss -tln 2>/dev/null | grep -qE ":${p}[[:space:]]" && st_us="✓" || st_us="✗"
+      ss -tln 2>/dev/null | grep -qE ":${p}([[:space:]]|\$)" && st_us="✓" || st_us="✗"
     fi
     days="—"
     if [[ "$cert" == "REALITY" ]]; then
@@ -6125,16 +6140,11 @@ PYLIVE
       days="$(( ($(date -d "$e" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 )) дн"
       [[ "$days" == "-1 дн" || "$days" == "0 дн" ]] && days="ПРОСРОЧЕН"
     fi
-    traf="—"
-    if [[ -n "$has_traffic" ]]; then
-      traf=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-        "SELECT COALESCE(SUM(up+down),0) FROM client_traffics WHERE inbound_id=$iid;" 2>/dev/null || echo 0)
-      traf=$(fmt_bytes "$traf")
-    fi
+    traf=$(fmt_bytes "${tot:-0}")
     printf "  %-5s %-11s %-7s %-5s %-8s %-5s %-9s %s\n" "#$iid" "$proto" "$p" "$st_us" "$days" "$ncl" "$traf" "$dom"
   done <<<"$out"
   echo
-  warn "✗ — порт НЕ слушается (инбаунд не работает) · RLTY — reality: серт у decoy в nginx · Кл. — число клиентов"
+  warn "✗ — порт НЕ слушается (инбаунд не работает) · ✓* — UDP открыт через NAT (port hopping) · RLTY — reality: серт у decoy в nginx · Кл. — число клиентов"
   line
   return 0
 }
