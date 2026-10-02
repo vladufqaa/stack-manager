@@ -4995,27 +4995,80 @@ certs_menu() {
   pause
 }
 
-decoy_ban_status() {
-  line; echo -e "${B}   LOGIN-ДЕКОИ И БАНЫ${N}"; line
+security_menu() {
+  line; echo -e "${B}   БЕЗОПАСНОСТЬ — БАНЫ, DECOY-ЛОГИНЫ, FAIL2BAN${N}"; line
+
+  # --- деко-логины (jail decoy-login) ---
+  echo -e "${B}▸ Декои (jail decoy-login)${N}"
   fail2ban-client status decoy-login 2>/dev/null | sed 's/^/  /' || echo "  jail не активен"
-  echo; echo "▸ Забаненные IP:"
   local ips=""
   ips=$(fail2ban-client get decoy-login banip 2>/dev/null || true)
-  [[ -n "$ips" ]] && echo "$ips" | tr ' ' '\n' | sed 's/^/  /' || echo "  —"
+  echo "  Забаненные IP:"
+  [[ -n "$ips" ]] && echo "$ips" | tr ' ' '\n' | sed 's/^/    /' || echo "    —"
+
+  # --- остальные jail (sshd и пр.) ---
+  local jails j
+  jails=$(fail2ban-client status 2>/dev/null | sed -n 's/^.*Jail list:\s*//p' | tr ',' ' ')
+  for j in $jails; do
+    [[ "$j" == "decoy-login" ]] && continue
+    echo
+    echo -e "${B}▸ jail: $j${N}"
+    fail2ban-client status "$j" 2>/dev/null | sed 's/^/  /'
+  done
+
   echo
   echo "  1) Разбанить IP"
-  echo "  2) Разбанить все"
-  echo "  3) Очистить лог"
+  echo "  2) Разбанить все (во всех jail)"
+  echo "  3) Очистить лог деко-попыток"
+  echo "  4) Добавить IP в whitelist (ignoreip)"
   echo "  0) Назад"
   line
   local c=""
   read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
   case "$c" in
-    1) local ip=""; ask ip "IP" "" '^[0-9.]+$'; fail2ban-client set decoy-login unbanip "$ip" 2>/dev/null && log "OK" || warn "Fail" ;;
-    2) fail2ban-client unban --all 2>/dev/null && log "OK" || warn "Fail" ;;
-    3) > "$DECOY_LOG_ACCESS" 2>/dev/null || true; systemctl restart fail2ban 2>/dev/null || true; log "OK" ;;
+    1)
+      local jj="" ip=""
+      ask jj "Jail (Enter — decoy-login)" "decoy-login" '^[A-Za-z0-9_-]*$'
+      [[ -z "$jj" ]] && jj="decoy-login"
+      ask ip "IP для разбана" "" '^[0-9a-fA-F.:]+$'
+      fail2ban-client set "$jj" unbanip "$ip" >/dev/null 2>&1 && log "Разбанен: $ip (jail $jj)" || err "Не получилось — проверь jail и IP"
+      pause
+      ;;
+    2)
+      local ca=""
+      askyn ca "Снять ВСЕ баны во всех jail?" "n"
+      [[ "$ca" == true ]] && { fail2ban-client unban --all >/dev/null 2>&1 && log "Все баны сняты" || err "Не вышло (похоже, старый fail2ban)"; }
+      pause
+      ;;
+    3)
+      > "$DECOY_LOG_ACCESS" 2>/dev/null || true
+      systemctl restart fail2ban 2>/dev/null || true
+      log "Лог деко-попыток очищен, fail2ban перезапущен"
+      pause
+      ;;
+    4)
+      local wip="" f="/etc/fail2ban/jail.local"
+      ask wip "IP или подсеть для whitelist (напр. 203.0.113.5)" "" '^[0-9a-fA-F.:/]{3,45}$'
+      if [[ -f "$f" ]]; then
+        if grep -qE "^ignoreip" "$f" 2>/dev/null; then
+          if grep -E "^ignoreip" "$f" | grep -qw "$wip"; then
+            warn "Этот IP уже в whitelist"
+          else
+            sed -i "s|^\(ignoreip.*\)$|\1 $wip|" "$f"
+            systemctl restart fail2ban 2>/dev/null || true
+            log "Whitelist обновлён (+$wip), fail2ban перезапущен — этот IP больше не забанят"
+          fi
+        else
+          printf '\nignoreip = 127.0.0.1/8 %s\n' "$wip" >> "$f"
+          systemctl restart fail2ban 2>/dev/null || true
+          log "Whitelist создан (+$wip), fail2ban перезапущен"
+        fi
+      else
+        err "$f не найден — fail2ban настраивается в п.1"
+      fi
+      pause
+      ;;
   esac
-  pause
 }
 
 # DNS для Xray удалён из скрипта: xray резолвит системно (dns-секция шаблона
@@ -5669,82 +5722,6 @@ PYLIVE
   return 0
 }
 
-# п.22: fail2ban — статус, баны, whitelist
-fail2ban_menu() {
-  line; echo -e "${B}   FAIL2BAN — БАНЫ И БЕЗОПАСНОСТЬ${N}"; line
-  if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
-    warn "fail2ban не активен."
-    local sa=""
-    askyn sa "Запустить fail2ban?" "y"
-    if [[ "$sa" == true ]]; then
-      systemctl start fail2ban 2>/dev/null || { err "не запустился — journalctl -u fail2ban"; return 1; }
-    else
-      return 0
-    fi
-  fi
-  local jails j
-  jails=$(fail2ban-client status 2>/dev/null | sed -n 's/^.*Jail list:\s*//p' | tr ',' ' ')
-  if [[ -z "${jails// /}" ]]; then
-    warn "Jail-ов нет — fail2ban ставится в п.1 (первичная настройка)."
-    return 0
-  fi
-  for j in $jails; do
-    echo -e "${B}— jail: $j —${N}"
-    fail2ban-client status "$j" 2>/dev/null | sed 's/^/  /'
-  done
-  echo
-  echo "   1) Разбанить IP"
-  echo "   2) Разбанить ВСЁ (все jail)"
-  echo "   3) Добавить IP в whitelist (ignoreip)"
-  echo "   0) Назад"
-  local c=""
-  read -rp "$(echo -e "${B}Выбор:${N} ")" c || c=0
-  case "$c" in
-    1)
-      local jj="" jip=""
-      ask jj "Jail (Enter — sshd)" "sshd" '^[A-Za-z0-9_-]*$'
-      [[ -z "$jj" ]] && jj="sshd"
-      ask jip "IP для разбана" "" '^[0-9a-fA-F.:]+$'
-      if fail2ban-client set "$jj" unbanip "$jip" >/dev/null 2>&1; then
-        log "Разбанен: $jip (jail $jj)"
-      else
-        err "Не получилось — проверь имя jail и IP"
-      fi
-      ;;
-    2)
-      local ca=""
-      askyn ca "Снять ВСЕ баны во всех jail?" "n"
-      if [[ "$ca" == true ]]; then
-        if fail2ban-client unban --all >/dev/null 2>&1; then
-          log "Все баны сняты"
-        else
-          err "Не вышло (похоже, старый fail2ban — разбирай по одному)"
-        fi
-      fi
-      ;;
-    3)
-      local wip="" f="/etc/fail2ban/jail.local"
-      ask wip "IP или подсеть для whitelist (напр. 203.0.113.5)" "" '^[0-9a-fA-F.:/]{3,45}$'
-      if [[ -f "$f" ]]; then
-        if grep -qE "^ignoreip" "$f" 2>/dev/null; then
-          if grep -E "^ignoreip" "$f" | grep -qw "$wip"; then
-            warn "Этот IP уже в whitelist"
-            return 0
-          fi
-          sed -i "s|^\(ignoreip.*\)$|\1 $wip|" "$f"
-        else
-          printf '\nignoreip = 127.0.0.1/8 %s\n' "$wip" >> "$f"
-        fi
-        systemctl restart fail2ban 2>/dev/null || true
-        log "Whitelist обновлён (+$wip), fail2ban перезапущен — этот IP больше не забанят"
-      else
-        err "$f не найден — fail2ban настраивается в п.1"
-      fi
-      ;;
-    *) return 0 ;;
-  esac
-}
-
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
@@ -5755,7 +5732,7 @@ run_menu_action() {
     4) change_decoy ;;
     5) view_decoy_templates ;;
     6) show_status ;;
-    7) decoy_ban_status ;;
+    7) security_menu ;;
     8) backup_config ;;
     9) restore_config ;;
     10) certs_menu ;;
@@ -5770,7 +5747,6 @@ run_menu_action() {
     19) update_self; pause ;;
     20) stack_doctor_menu; pause ;;
     21) inbounds_live; pause ;;
-    22) fail2ban_menu; pause ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -5798,7 +5774,7 @@ main_menu() {
     echo "   4) Сменить decoy для SNI-домена"
     echo "   5) Просмотр каталога decoy-шаблонов"
     echo "   6) Показать статус"
-    echo "   7) Статус login-декоев и управление банами"
+    echo "   7) Безопасность: баны, деко-логины, fail2ban"
     echo "   8) Бэкап конфигурации"
     echo "   9) Восстановить из бэкапа"
     echo "  10) Управление сертификатами"
@@ -5813,7 +5789,6 @@ main_menu() {
     echo "  19) Обновить скрипт с GitHub"
     echo "  20) Самодиагностика (проверка стека)"
     echo "  21) Инбаунды: live-таблица (порты/серты/клиенты/трафик)"
-    echo "  22) fail2ban: баны и whitelist"
     echo "   0) Выход     (q в любом вопросе — выход в меню)"
     line
     local c="" rc
