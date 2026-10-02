@@ -5517,16 +5517,44 @@ stack_doctor() {
     bad "UFW не активен"; hint "п.11"
   fi
 
-  echo -e "${B}— DNS / домен панели —${N}"
-  local pd="${PANEL_DOMAIN:-$(xui_get subDomain 2>/dev/null || true)}"
-  if [[ -n "$pd" ]]; then
-    local a_ip srv_ip
-    a_ip=$(dig +short A "$pd" 2>/dev/null | tail -1)
-    srv_ip=$(server_ip4)
-    if [[ -n "$a_ip" && "$a_ip" == "$srv_ip" ]]; then ok "$pd → $a_ip (наш IP)"; elif [[ -z "$a_ip" ]]; then warn2 "$pd: A-запись не резолвится"; else warn2 "$pd → $a_ip, а сервер: $srv_ip"; fi
-  else
-    warn2 "домен панели не задан"
-  fi
+  echo -e "${B}— DNS / домены стека —${N}"
+  local srv_ip
+  srv_ip=$(server_ip4)
+  local doms pd
+  pd="${PANEL_DOMAIN:-$(xui_get webDomain 2>/dev/null || true)}"
+  doms=$(python3 - "$XUI_DB" "${REALITY_TARGETS[@]}" <<'PYDOMS' 2>/dev/null
+import sqlite3, json, sys
+skip=set(a.lower() for a in sys.argv[2:])
+seen=set(); out=[]
+def add(d):
+    d=(d or "").strip().lower()
+    if d and d not in skip and d not in seen:
+        seen.add(d); out.append(d)
+try:
+    con=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True,timeout=5)
+    for setts_s,stream_s in con.execute("SELECT settings,stream_settings FROM inbounds WHERE enable=1"):
+        try: se=json.loads(setts_s or "{}")
+        except Exception: se={}
+        try: st=json.loads(stream_s or "{}")
+        except Exception: st={}
+        rs=st.get("realitySettings") or {}
+        add(se.get("domain")); add(se.get("hostname")); add(se.get("sni"))
+        add((st.get("tlsSettings") or {}).get("serverName"))
+        add((rs.get("serverNames") or [None])[0])   # чужие цели отсеет skip-список
+except Exception:
+    pass
+print("\n".join(out))
+PYDOMS
+)
+  [[ -n "$pd" ]] && doms="$pd"$'\n'"$doms"
+  local d a_ip
+  while IFS= read -r d; do
+    [[ -z "$d" ]] && continue
+    a_ip=$(dig +short A "$d" 2>/dev/null | tail -1)
+    if [[ -n "$a_ip" && "$a_ip" == "$srv_ip" ]]; then ok "$d → $a_ip ✓"
+    elif [[ -z "$a_ip" ]]; then warn2 "$d: A-запись не резолвится"
+    else warn2 "$d → $a_ip, а сервер: $srv_ip"; fi
+  done <<<"$doms"
 
   echo -e "${B}— Heal-таймер —${N}"
   if systemctl is-enabled --quiet stack-heal.timer 2>/dev/null; then
@@ -5544,6 +5572,177 @@ stack_doctor() {
   fi
   line
   return 0
+}
+
+# п.20 с обёрткой: одиночный прогон или наблюдение каждые 10 сек
+stack_doctor_menu() {
+  stack_doctor
+  local wm=""
+  askyn wm "Наблюдать непрерывно (обновление каждые 10 сек, любая клавиша — выход)?" "n"
+  [[ "$wm" == true ]] || return 0
+  while :; do
+    local k=""
+    read -t 10 -n 1 k 2>/dev/null && [[ -n "$k" ]] && break
+    clear
+    stack_doctor
+  done
+}
+
+fmt_bytes() {   # <bytes> → человекочитаемо
+  local b="${1:-0}"
+  [[ -z "$b" || "$b" == "NULL" ]] && b=0
+  if   (( b >= 1099511627776 )); then echo "$(( b / 1099511627776 )) ТБ"
+  elif (( b >= 1073741824 ));    then echo "$(( b / 1073741824 )) ГБ"
+  elif (( b >= 1048576 ));       then echo "$(( b / 1048576 )) МБ"
+  elif (( b >= 1024 ));          then echo "$(( b / 1024 )) КБ"
+  else echo "${b} Б"; fi
+}
+
+# п.21: live-таблица по всем инбаундам — порт слушает?, серт (дней), клиенты, трафик
+inbounds_live() {
+  line; echo -e "${B}   ИНБАУНДЫ — LIVE${N}"; line
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
+  local has_traffic
+  has_traffic=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='client_traffics';" 2>/dev/null || true)
+
+  printf "  %-5s %-11s %-7s %-5s %-8s %-5s %-9s %s\n" "ID" "Прото" "Порт" "Слух" "Серт" "Кл." "Трафик" "Домен"
+  echo "  ─────────────────────────────────────────────────────────────────────────────"
+
+  local out
+  out=$(python3 - "$XUI_DB" <<'PYLIVE' 2>/dev/null
+import sqlite3, json, sys
+try:
+    con=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True,timeout=5)
+    rows=con.execute("SELECT id,protocol,port,COALESCE(listen,''),settings,stream_settings FROM inbounds ORDER BY id").fetchall()
+except Exception:
+    sys.exit(0)
+for iid,proto,port,listen,setts_s,stream_s in rows:
+    try: se=json.loads(setts_s or "{}")
+    except Exception: se={}
+    try: st=json.loads(stream_s or "{}")
+    except Exception: st={}
+    rs=st.get("realitySettings") or {}
+    dom=(se.get("domain") or se.get("hostname") or se.get("sni")
+         or (st.get("tlsSettings") or {}).get("serverName")
+         or (rs.get("serverNames") or [None])[0] or "")
+    try: p=int(se.get("port") or port or 0)
+    except Exception: p=int(port or 0)
+    net=st.get("network") or ("udp" if proto in ("hysteria","qwdtt","csqtt","wireguard","amnezia","amneziawg","awg") else "tcp")
+    cert=(se.get("certFile") or "")
+    if not cert:
+        certs=(st.get("tlsSettings") or {}).get("certificates") or []
+        if certs: cert=certs[0].get("certificateFile","")
+    if (st.get("security") or "").lower()=="reality": cert="REALITY"
+    try: ncl=len(se.get("clients") or [])
+    except Exception: ncl=0
+    print(f"{iid}\x1f{proto}\x1f{p}\x1f{net}\x1f{cert}\x1f{ncl}\x1f{dom}")
+PYLIVE
+)
+  local iid proto p net cert ncl dom st_us days traf e
+  while IFS=$'\x1f' read -r iid proto p net cert ncl dom; do
+    [[ -z "$iid" ]] && continue
+    if [[ "$net" == "udp" ]]; then
+      ss -uln 2>/dev/null | grep -qw ":$p" && st_us="✓" || st_us="✗"
+    else
+      ss -tln 2>/dev/null | grep -qw ":$p" && st_us="✓" || st_us="✗"
+    fi
+    days="—"
+    if [[ "$cert" == "REALITY" ]]; then
+      days="RLTY"
+    elif [[ -n "$cert" && -f "$cert" ]]; then
+      e=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2)
+      days="$(( ($(date -d "$e" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 )) дн"
+      [[ "$days" == "-1 дн" || "$days" == "0 дн" ]] && days="ПРОСРОЧЕН"
+    fi
+    traf="—"
+    if [[ -n "$has_traffic" ]]; then
+      traf=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+        "SELECT COALESCE(SUM(up+down),0) FROM client_traffics WHERE inbound_id=$iid;" 2>/dev/null || echo 0)
+      traf=$(fmt_bytes "$traf")
+    fi
+    printf "  %-5s %-11s %-7s %-5s %-8s %-5s %-9s %s\n" "#$iid" "$proto" "$p" "$st_us" "$days" "$ncl" "$traf" "$dom"
+  done <<<"$out"
+  echo
+  warn2 "✗ — порт НЕ слушается (инбаунд не работает) · RLTY — reality: серт у decoy в nginx · Кл. — число клиентов"
+  line
+  return 0
+}
+
+# п.22: fail2ban — статус, баны, whitelist
+fail2ban_menu() {
+  line; echo -e "${B}   FAIL2BAN — БАНЫ И БЕЗОПАСНОСТЬ${N}"; line
+  if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+    warn "fail2ban не активен."
+    local sa=""
+    askyn sa "Запустить fail2ban?" "y"
+    if [[ "$sa" == true ]]; then
+      systemctl start fail2ban 2>/dev/null || { err "не запустился — journalctl -u fail2ban"; return 1; }
+    else
+      return 0
+    fi
+  fi
+  local jails j
+  jails=$(fail2ban-client status 2>/dev/null | sed -n 's/^.*Jail list:\s*//p' | tr ',' ' ')
+  if [[ -z "${jails// /}" ]]; then
+    warn "Jail-ов нет — fail2ban ставится в п.1 (первичная настройка)."
+    return 0
+  fi
+  for j in $jails; do
+    echo -e "${B}— jail: $j —${N}"
+    fail2ban-client status "$j" 2>/dev/null | sed 's/^/  /'
+  done
+  echo
+  echo "   1) Разбанить IP"
+  echo "   2) Разбанить ВСЁ (все jail)"
+  echo "   3) Добавить IP в whitelist (ignoreip)"
+  echo "   0) Назад"
+  local c=""
+  read -rp "$(echo -e "${B}Выбор:${N} ")" c || c=0
+  case "$c" in
+    1)
+      local jj="" jip=""
+      ask jj "Jail (Enter — sshd)" "sshd" '^[A-Za-z0-9_-]*$'
+      [[ -z "$jj" ]] && jj="sshd"
+      ask jip "IP для разбана" "" '^[0-9a-fA-F.:]+$'
+      if fail2ban-client set "$jj" unbanip "$jip" >/dev/null 2>&1; then
+        log "Разбанен: $jip (jail $jj)"
+      else
+        err "Не получилось — проверь имя jail и IP"
+      fi
+      ;;
+    2)
+      local ca=""
+      askyn ca "Снять ВСЕ баны во всех jail?" "n"
+      if [[ "$ca" == true ]]; then
+        if fail2ban-client unban --all >/dev/null 2>&1; then
+          log "Все баны сняты"
+        else
+          err "Не вышло (похоже, старый fail2ban — разбирай по одному)"
+        fi
+      fi
+      ;;
+    3)
+      local wip="" f="/etc/fail2ban/jail.local"
+      ask wip "IP или подсеть для whitelist (напр. 203.0.113.5)" "" '^[0-9a-fA-F.:/]{3,45}$'
+      if [[ -f "$f" ]]; then
+        if grep -qE "^ignoreip" "$f" 2>/dev/null; then
+          if grep -E "^ignoreip" "$f" | grep -qw "$wip"; then
+            warn "Этот IP уже в whitelist"
+            return 0
+          fi
+          sed -i "s|^\(ignoreip.*\)$|\1 $wip|" "$f"
+        else
+          printf '\nignoreip = 127.0.0.1/8 %s\n' "$wip" >> "$f"
+        fi
+        systemctl restart fail2ban 2>/dev/null || true
+        log "Whitelist обновлён (+$wip), fail2ban перезапущен — этот IP больше не забанят"
+      else
+        err "$f не найден — fail2ban настраивается в п.1"
+      fi
+      ;;
+    *) return 0 ;;
+  esac
 }
 
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
@@ -5569,7 +5768,9 @@ run_menu_action() {
     17) uninstall_panel_lucx; pause ;;
     18) change_admin_passwords; pause ;;
     19) update_self; pause ;;
-    20) stack_doctor; pause ;;
+    20) stack_doctor_menu; pause ;;
+    21) inbounds_live; pause ;;
+    22) fail2ban_menu; pause ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -5611,6 +5812,8 @@ main_menu() {
     echo "  18) Сменить пароли admin (панель / AdGuard)"
     echo "  19) Обновить скрипт с GitHub"
     echo "  20) Самодиагностика (проверка стека)"
+    echo "  21) Инбаунды: live-таблица (порты/серты/клиенты/трафик)"
+    echo "  22) fail2ban: баны и whitelist"
     echo "   0) Выход     (q в любом вопросе — выход в меню)"
     line
     local c="" rc
