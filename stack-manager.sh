@@ -6095,7 +6095,10 @@ for iid,proto,port,listen,setts_s,stream_s in rows:
          or (rs.get("serverNames") or [None])[0] or "")
     try: p=int(se.get("port") or port or 0)
     except Exception: p=int(port or 0)
-    net=st.get("network") or ("udp" if proto in ("hysteria","qwdtt","csqtt","wireguard","amnezia","amneziawg","awg") else "tcp")
+    # UDP-протоколы классифицируем ПО ИМЕНИ — поле network в stream_settings
+    # бывает испорчено/наследовано (hysteria с network=tcp живёт у LucX)
+    UDP_PROTOS={"hysteria","hysteria2","qwdtt","csqtt","tuic","wireguard","amnezia","amneziawg","awg"}
+    net="udp" if proto.lower() in UDP_PROTOS else (st.get("network") or "tcp")
     cert=(se.get("certFile") or "")
     if not cert:
         certs=(st.get("tlsSettings") or {}).get("certificates") or []
