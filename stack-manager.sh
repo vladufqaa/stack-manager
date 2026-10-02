@@ -4600,6 +4600,7 @@ sni_cleanup_stale() {
   [[ ! -f "$SNI_CONF" ]] && { warn "$SNI_CONF не найден — чистить нечего"; return 0; }
 
   local -a dead_map=() dead_hosts=() dead_upstreams=()
+  local tg_route_broken=0
   local row dom be iid cnt decoy pdom cur_panel uline uname
   cur_panel=$(xui_get subDomain)
 
@@ -4638,6 +4639,7 @@ sni_cleanup_stale() {
              "SELECT protocol FROM inbounds WHERE id=$iid;" 2>/dev/null | tr -d '[:space:]') || true
     if [[ "$tproto" == "tproxy" && "$be" != "tg_backend" ]]; then
       warn "  #$iid tproxy: маршрут «$dom → $be» лишний (tg ведёт tg_backend) — на удаление"
+      tg_route_broken=1
       dead_map+=("$dom|$be|$iid")
       continue
     fi
@@ -4729,6 +4731,14 @@ sni_cleanup_stale() {
     sni_upstream_remove "$uname"
     log "Удалён upstream: $uname"
   done
+
+  # Если удаляли лишний tproxy-маршрут — канонический tg-мап мог отсутствовать
+  # (нарушение = tg без маршрута). Пересобираем: setup_tproxy_web идемпотентен,
+  # вернёт upstream tg_backend + «tg-домен → tg_backend».
+  if [[ "$tg_route_broken" == 1 ]]; then
+    log "Восстанавливаю tg-маршрут (tg_backend + домен tproxy)…"
+    setup_tproxy_web || warn "  пересборка tg-маршрута не прошла — запусти setup_tproxy_web вручную"
+  fi
 
   nginx_reload || true
   systemctl restart x-ui >/dev/null 2>&1 || true
