@@ -2040,7 +2040,7 @@ h1{font-size:26px;margin-bottom:24px;color:#111}p{line-height:1.7;color:#555;mar
 HTML
 
   tpl_write "$DECOY_TPL_DIR/telegram.html" <<'TGHTML'
-<!doctype html><html><head><meta charset="utf-8"><title>Telegram Web</title>
+<!doctype html><html><head><meta charset="utf-8"><title>Telegram Web</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10' fill='%232aabee'/%3E%3Cpath fill='%23fff' d='M18 7.5 6.5 12l3.5 1.5L11 17l2-2.8 3.4 2.3L18 7.5z'/%3E%3C/svg%3E">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:#fff;height:100vh;display:flex;flex-direction:column}
@@ -2081,6 +2081,8 @@ decoy_login_templates_init() {
         "$DECOY_LOGIN_DIR/jellyfin.html" "$DECOY_LOGIN_DIR/homeassistant.html" \
         "$DECOY_LOGIN_DIR/uptime-kuma.html" 2>/dev/null || true
 
+  local agv="0.107.$(( RANDOM % 25 + 40 ))"   # версия в футере — правдоподобная рандомизация
+
   local css='<style>
 *{box-sizing:border-box;margin:0;padding:0}
 .msg{padding:12px;border-radius:4px;margin-bottom:16px;text-align:center;font-size:14px;display:none}
@@ -2108,7 +2110,7 @@ function showBan(){
 </script>'
 
   tpl_write "$DECOY_LOGIN_DIR/adguard.html" <<HTML
-<!doctype html><html><head><meta charset="utf-8"><title>AdGuard Home</title>
+<!doctype html><html><head><meta charset="utf-8"><title>AdGuard Home</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2368b279' d='M12 2 4 5v6c0 5 3.4 9.7 8 11 4.6-1.3 8-6 8-11V5z'/%3E%3C/svg%3E">
 $css<style>
 body{font-family:Roboto,-apple-system,'Segoe UI',sans-serif;background:#fff;color:#3c4043;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
 .logo{display:flex;align-items:center;gap:10px;margin-bottom:26px}
@@ -2130,12 +2132,12 @@ button:hover{background:#5aa36c}
 <label>Password</label><input name="p" type="password" required>
 <button>Sign in</button>
 </form></div>
-<div class="foot">AdGuard Home v0.107.52 · <span>Homepage</span> · <span>Report issue</span></div>
+<div class="foot">AdGuard Home v$agv · <span>Homepage</span> · <span>Report issue</span></div>
 $js</body></html>
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/portainer.html" <<HTML
-<!doctype html><html><head><meta charset="utf-8"><title>Portainer</title>
+<!doctype html><html><head><meta charset="utf-8"><title>Portainer</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2313bef9'/%3E%3Cpath fill='%23fff' d='M5 8h9v3.5H5V8zm0 5.5h9V17H5v-3.5zm11-5.5h3v3.5h-3V8zm0 5.5h3V17h-3v-3.5z'/%3E%3C/svg%3E">
 $css<style>
 body{font-family:'Segoe UI',Roboto,-apple-system,sans-serif;background:#eceff1;color:#333;display:flex;align-items:center;justify-content:center;min-height:100vh}
 .card{background:#fff;padding:40px 36px;width:400px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.14)}
@@ -2156,7 +2158,7 @@ button:hover{background:#246cb4}
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/pihole.html" <<HTML
-<!doctype html><html><head><meta charset="utf-8"><title>Pi-hole - Admin Console</title>
+<!doctype html><html><head><meta charset="utf-8"><title>Pi-hole - Admin Console</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10' fill='%23c0392b'/%3E%3Ccircle cx='12' cy='12' r='5' fill='%23fff'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%23c0392b'/%3E%3C/svg%3E">
 $css<style>
 body{font-family:'Helvetica Neue',Arial,sans-serif;background:#f5f6f7;color:#333;display:flex;align-items:center;justify-content:center;min-height:100vh}
 .card{background:#fff;padding:36px 40px;width:400px;border-radius:6px;border:1px solid #e2e4e6;box-shadow:0 1px 4px rgba(0,0,0,.06)}
@@ -2177,7 +2179,7 @@ button:hover{background:#3579a8}
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/omv.html" <<HTML
-<!doctype html><html><head><meta charset="utf-8"><title>openmediavault - Login</title>
+<!doctype html><html><head><meta charset="utf-8"><title>openmediavault - Login</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%235d7789'/%3E%3Cpath fill='%23fff' d='M7 14a5 5 0 1 1 10 0h-2a3 3 0 1 0-6 0H7z'/%3E%3C/svg%3E">
 $css<style>
 body{font-family:'Segoe UI',Roboto,sans-serif;background:#262c31;color:#e8eaed;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
 .brand{font-size:30px;font-weight:300;color:#fff;margin-bottom:6px;letter-spacing:.5px}
@@ -2202,7 +2204,7 @@ button:hover{background:#4d6575}
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/jellyfin.html" <<HTML
-<!doctype html><html><head><meta charset="utf-8"><title>Jellyfin</title>
+<!doctype html><html><head><meta charset="utf-8"><title>Jellyfin</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10' fill='%23aa5cc3'/%3E%3Ccircle cx='12' cy='12' r='4.5' fill='none' stroke='%23fff' stroke-width='1.5'/%3E%3Ccircle cx='12' cy='12' r='1.5' fill='%23fff'/%3E%3C/svg%3E">
 $css<style>
 body{font-family:'Segoe UI',Roboto,-apple-system,sans-serif;background:linear-gradient(160deg,#141e2c,#0b1017);color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
 .logo svg{width:72px;height:72px;margin-bottom:12px}
@@ -2226,7 +2228,7 @@ button:hover{background:#46a03f}
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/homeassistant.html" <<HTML
-<!doctype html><html><head><meta charset="utf-8"><title>Home Assistant</title>
+<!doctype html><html><head><meta charset="utf-8"><title>Home Assistant</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2341bdf2' d='M12 3 2 12h3v8h5v-5h4v5h5v-8h3L12 3z'/%3E%3C/svg%3E">
 $css<style>
 body{font-family:Roboto,'Segoe UI',sans-serif;background:#fafafa;color:#212121;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
 .logo svg{width:64px;height:64px;margin-bottom:10px}
@@ -2249,7 +2251,7 @@ button:hover{background:#2cabdf}
 HTML
 
   tpl_write "$DECOY_LOGIN_DIR/uptime-kuma.html" <<HTML
-<!doctype html><html><head><meta charset="utf-8"><title>Uptime Kuma</title>
+<!doctype html><html><head><meta charset="utf-8"><title>Uptime Kuma</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10' fill='none' stroke='%235cdd8b' stroke-width='2.5'/%3E%3Cpath fill='none' stroke='%235cdd8b' stroke-width='2' d='M6 12h3l2-4 2 8 2-4h3'/%3E%3C/svg%3E">
 $css<style>
 body{font-family:Roboto,'Segoe UI',sans-serif;background:#1b2637;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
 .logo{display:flex;align-items:center;gap:10px;margin-bottom:30px}
@@ -3315,23 +3317,23 @@ decoy_template_choose() {
   echo -e "   (её увидит посторонний, открыв домен в браузере; на работу протокола не влияет)" >&2
   local i=1
   local -a NAMES=()
-  local tpl
-  for tpl in "${DECOY_TEMPLATES[@]}"; do
-    local name="${tpl%%|*}" desc="${tpl##*|}"
-    printf "  %2d) %-15s %s\n" "$i" "$name" "$desc" >&2
-    NAMES+=("$name"); i=$((i+1))
+  local __t
+  for __t in "${DECOY_TEMPLATES[@]}"; do
+    local __n="${__t%%|*}" __dsc="${__t##*|}"
+    printf "  %2d) %-15s %s\n" "$i" "$__n" "$__dsc" >&2
+    NAMES+=("$__n"); i=$((i+1))
   done
   echo >&2
-  local choice=""
-  ask choice "$prompt" "$default" '^[0-9]+$|^[a-z-]+$' 2>/dev/null || { printf -v "$__result" '%s' "$default"; return 0; }
-  if [[ "$choice" =~ ^[0-9]+$ ]]; then
-    if (( choice >= 1 && choice <= ${#NAMES[@]} )); then
-      printf -v "$__result" '%s' "${NAMES[$((choice-1))]}"
+  local __c=""
+  ask __c "$prompt" "$default" '^[0-9]+$|^[a-z-]+$' 2>/dev/null || { printf -v "$__result" '%s' "$default"; return 0; }
+  if [[ "$__c" =~ ^[0-9]+$ ]]; then
+    if (( __c >= 1 && __c <= ${#NAMES[@]} )); then
+      printf -v "$__result" '%s' "${NAMES[$((__c-1))]}"
     else
       printf -v "$__result" '%s' "$default"
     fi
   else
-    printf -v "$__result" '%s' "$choice"
+    printf -v "$__result" '%s' "$__c"
   fi
 }
 
