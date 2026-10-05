@@ -6644,6 +6644,137 @@ EOF
   pause
 }
 
+# =====================================================================
+# СТЕЛС-АУДИТ: что о сервере увидит Shodan/Censys/crt.sh.
+# Только чтение — ничего не меняет.
+# =====================================================================
+stealth_audit() {
+  line; echo -e "${B}   СТЕЛС-АУДИТ (глазами сканера)${N}"; line
+  local base="${WILDCARD_DOMAIN:-${PANEL_DOMAIN:-}}"
+  base="${base#*.}"; base="${base#*.}"
+
+  local ufw_on=0
+  ufw_is_active && ufw_on=1
+  local allowed=""
+  if [[ "$ufw_on" == 1 ]]; then
+    allowed=$(LC_ALL=C ufw status 2>/dev/null | awk '/ALLOW/ {print $1}' | sort -u)
+  else
+    warn "UFW не активен — ВСЕ слушающие порты видны интернету!"
+  fi
+  stealth_vis() {   # порт виден миру? (ufw off → виден всё)
+    [[ "$ufw_on" == 1 ]] || return 0
+    grep -qE "^${1}/" <<<"$allowed" || grep -qx "$1" <<<"$allowed"
+  }
+
+  echo; echo -e "${B}— 1. Слушающие TCP-порты —${N}"
+  local p
+  for p in $(ss -tln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; split($4,a,":"); print a[length(a)] }' | sort -un); do
+    if ! stealth_vis "$p"; then
+      ok "порт $p — слушается, но закрыт UFW (сканерам невидим)"
+    elif [[ "$p" == "443" ]]; then
+      ok "порт 443 — SNI-роутер (decoy-доктрина)"
+    elif [[ "$p" == "80" ]]; then
+      log "порт 80 — HTTP (обычно для ACME); что отдаёт — см. раздел 3"
+    elif [[ "$p" == "22" ]]; then
+      warn "порт 22 — SSH открыт миру: банер + host key привязывают тебя между IP (см. раздел 5)"
+    else
+      err "порт $p — нестандартный и ОТКРЫТ: сканеры его индексируют (инбаунд?). Лучше за 443/SNI или reality"
+    fi
+  done
+
+  echo; echo -e "${B}— 2. Слушающие UDP-порты (QUIC/крауты) —${N}"
+  local any_udp=0
+  for p in $(ss -uln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; split($4,a,":"); print a[length(a)] }' | sort -un); do
+    any_udp=1
+    if ! stealth_vis "$p"; then
+      ok "udp $p — закрыт UFW (невидим)"
+    elif [[ "$p" == "53" ]]; then
+      warn "udp 53 — DNS; если отвечает наружу — open resolver (см. раздел 5)"
+    else
+      err "udp $p — открыт (hysteria/tuic?): QUIC-банер фингерпринтится Censys"
+    fi
+  done
+  [[ "$any_udp" == 0 ]] && ok "открытых UDP-слушателей нет"
+
+  echo; echo -e "${B}— 3. Что видит сканер на :443 БЕЗ SNI —${N}"
+  local subj
+  subj=$(echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -noservername 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
+  if [[ -z "$subj" ]]; then
+    warn "сертификат не получен — проверь руками: openssl s_client -connect $(hostname -I 2>/dev/null | awk '{print $1}'):443"
+  else
+    echo "    $subj"
+    if [[ -n "$PANEL_DOMAIN" && "$subj" == *"$PANEL_DOMAIN"* ]]; then
+      err "443 отдаёт серт ПАНЕЛИ → Shodan привяжет «$PANEL_DOMAIN» к IP. Смени default-блок (decoy-серт)."
+    elif [[ -n "$base" && "$subj" == *"$base"* ]]; then
+      ok "свой wildcard/decoy-серт — приемлемо (панель не светится)"
+    else
+      ok "чужой серт — идеально (выглядишь чужим сайтом)"
+    fi
+  fi
+
+  echo; echo -e "${B}— 4. HTTP :80 —${N}"
+  if ! stealth_vis "80"; then
+    ok "80 закрыт UFW — невидим (ACME п.4 временно открывает сам)"
+  else
+    local code; code=$(curl -s -o /dev/null -w '%{http_code}' -m 6 http://127.0.0.1/ 2>/dev/null)
+    case "$code" in
+      301|302|308) ok "редирект на HTTPS ($code) — нейтрально" ;;
+      000) warn "80 открыт в UFW, но не отвечает — лучше закрыть" ;;
+      *) warn "ответ $code — сканер индексирует содержимое; проверь, что там decoy/заглушка, а не служебное" ;;
+    esac
+  fi
+
+  echo; echo -e "${B}— 5. SSH :22 —${N}"
+  if ! stealth_vis "22"; then
+    ok "22 закрыт UFW для мира — сканерам невиден"
+  else
+    warn "22 открыт: host key Shodan связывает все твои IP (переезд не помогает)."
+    echo "      Смягчение: UFW только на свой IP, смена порта или knocking (ТОЛЬКО на 22, не на 443!)."
+  fi
+
+  echo; echo -e "${B}— 6. DNS :53 наружу —${N}"
+  local udp53; udp53=$(ss -uln 2>/dev/null | awk 'NR>1 && $4 ~ /:53$/ && $4 !~ /^127\./ && $4 !~ /^\[::1\]/ {c++} END {print c+0}')
+  if [[ "$udp53" -eq 0 ]]; then
+    ok "53 наружу не слушается ✓"
+  elif ! stealth_vis "53"; then
+    ok "53 слушается, но закрыт UFW ✓"
+  else
+    err "53 открыт миру — open resolver (абьюз + палево)! Закрой в UFW (п.11)."
+  fi
+
+  echo; echo -e "${B}— 7. Публичные имена (Certificate Transparency) —${N}"
+  if [[ -z "$base" ]]; then
+    log "базовый домен не определён — пропуск"
+  else
+    local ct
+    ct=$(curl -s -m 12 "https://crt.sh/?q=%25.${base}&output=json" 2>/dev/null | python3 -c '
+import json, sys
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(0)
+names = set()
+for r in d if isinstance(d, list) else []:
+    for n in str(r.get("name_value", "")).split("\n"):
+        n = n.strip().lstrip("*.")
+        if n and "=" not in n: names.add(n)
+for n in sorted(names)[:20]: print(n)' 2>/dev/null)
+    if [[ -z "$ct" ]]; then
+      log "crt.sh не ответил — проверь руками: https://crt.sh/?q=%.${base}"
+    else
+      warn "эти имена уже публичны (каждый выпуск серта = запись в CT-логах):"
+      echo "$ct" | sed 's/^/      /'
+      echo "      Правило: чувствительным именам не выпускать отдельных сертов — только wildcard."
+    fi
+  fi
+
+  echo; echo -e "${B}— 8. Опт-аут из поисковиков —${N}"
+  echo "      Shodan: аккаунт → shodan.io → «Request IP Removal» для $(server_ip4 2>/dev/null)"
+  echo "      Censys: search.censys.io → ваш хост → Opt-Out Host"
+  echo "      Сначала закрыть дыры (выше), потом опт-аут — иначе ре-скан всё вернёт."
+  echo
+  log "Аудит только читал — ничего не менял."
+  pause
+}
+
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
@@ -6670,6 +6801,7 @@ run_menu_action() {
     19) inbounds_live; pause ;;
     20) inbound_change_domain ;;
     21) nginx_hygiene ;;
+    22) stealth_audit ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -6770,6 +6902,7 @@ main_menu() {
     echo -e "  ${B}19)${N} 📡 Инбаунды: live-таблица"
     echo -e "  ${B}20)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
     echo -e "  ${B}21)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
+    echo -e "  ${B}22)${N} 🕶 Стелс-аудит (глазами Shodan/Censys)"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
