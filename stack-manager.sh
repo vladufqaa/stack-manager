@@ -6652,7 +6652,12 @@ EOF
 stealth_audit() {
   line; echo -e "${B}   СТЕЛС-АУДИТ (глазами сканера)${N}"; line
   local base="${WILDCARD_DOMAIN:-${PANEL_DOMAIN:-}}"
-  base="${base#*.}"   # *.vladufqaa.online → vladufqaa.online (одна обрезка!)
+  base="${base#*.}"   # *.vladufqaa.online → vladufqaa.online
+  # на случай «голого» домена/поддомена берём последние два лейбла
+  local _p
+  IFS='.' read -r -a _p <<<"$base"
+  local _n=${#_p[@]}
+  if (( _n >= 3 )); then base="${_p[_n-2]}.${_p[_n-1]}"; fi
 
   local ufw_on=0
   ufw_is_active && ufw_on=1
@@ -6680,6 +6685,7 @@ stealth_audit() {
       warn "порт 22 — SSH открыт миру: банер + host key привязывают тебя между IP (см. раздел 5)"
     else
       err "порт $p — нестандартный и ОТКРЫТ: сканеры его индексируют (инбаунд?). Лучше за 443/SNI или reality"
+      echo "      (пропустило правило UFW: $(grep -E "^${p}/" <<<"$allowed" | head -1))"
     fi
   done
 
@@ -6693,6 +6699,7 @@ stealth_audit() {
       warn "udp 53 — DNS; если отвечает наружу — open resolver (см. раздел 5)"
     else
       err "udp $p — открыт (hysteria/tuic?): QUIC-банер фингерпринтится Censys"
+      echo "      (пропустило правило UFW: $(grep -E "^${p}/" <<<"$allowed" | head -1))"
     fi
   done
   [[ "$any_udp" == 0 ]] && ok "открытых UDP-слушателей нет"
