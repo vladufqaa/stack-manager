@@ -6633,87 +6633,6 @@ adguard_manage() {
 }
 
 # =====================================================================
-# SSH: ключи вместо пароля — мастер с обязательной проверкой второй
-# сессией ДО запрета пароля (иначе можно отрезать себе вход).
-# =====================================================================
-ssh_keys_setup() {
-  line; echo -e "${B}   SSH: КЛЮЧИ ВМЕСТО ПАРОЛЯ${N}"; line
-  command -v sshd >/dev/null 2>&1 || { err "sshd не найден"; return 1; }
-  echo "  Текущее состояние:"
-  echo "    вход по паролю:  $(sshd -T 2>/dev/null | awk '/^passwordauthentication/{print $2}')"
-  echo "    root-вход:       $(sshd -T 2>/dev/null | awk '/^permitrootlogin/{print $2}')"
-  local ak=/root/.ssh/authorized_keys
-  if [[ -f "$ak" ]]; then echo "    ключей в authorized_keys: $(grep -c . "$ak")"; else echo "    authorized_keys: нет"; fi
-  echo
-  echo "  Шаг 1. Публичный ключ твоего компьютера."
-  echo "    Приватный уже есть (\$env:TEMP\\kd3)? Публичный к нему в PowerShell:"
-  echo "      ssh-keygen -y -f \"\$env:TEMP\\kd3\""
-  echo "    Ключа нет — создай: ssh-keygen -t ed25519  (Enter — всё по умолчанию)"
-  local pub=""
-  ask pub "Вставь строку публичного ключа (можно только AAAA… — тип определю сам)" "" '^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521))[ ]+[A-Za-z0-9+/=]+|^AAAA[A-Za-z0-9+/=]+$'
-  [[ -z "$pub" ]] && return 0
-  # тело ключа без префикса типа — дополняем по шапке base64-блоба
-  if [[ "$pub" != *" "* ]]; then
-    case "$pub" in
-      AAAAC3NzaC1lZDI1NTE5*) pub="ssh-ed25519 $pub" ;;
-      AAAAB3NzaC1yc2*)       pub="ssh-rsa $pub" ;;
-      AAAAE2VjZHNh*)         pub="ecdsa-sha2-nistp256 $pub" ;;
-      *) err "Строка не похожа на публичный ключ OpenSSH (нет типа и шапка не ssh-блоб)"; return 1 ;;
-    esac
-    log "Тип ключа определён: ${pub%% *}"
-  fi
-  mkdir -p /root/.ssh && chmod 700 /root/.ssh
-  touch "$ak" && chmod 600 "$ak"
-  if grep -qF "$pub" "$ak" 2>/dev/null; then
-    log "Этот ключ уже в authorized_keys"
-  else
-    printf '%s\n' "$pub" >> "$ak" && log "Ключ добавлен в $ak"
-  fi
-  echo
-  echo "  Шаг 2. ПРОВЕРКА (текущую сессию не закрывай!)."
-  echo "    В НОВОМ окне PowerShell подключись:"
-  echo "      ssh -i \"\$env:TEMP\\kd3\" root@$(hostname -I 2>/dev/null | awk '{print $1}' | cut -d. -f1).$(hostname -I 2>/dev/null | awk '{print $1}' | cut -d. -f2-)"
-  echo "    Если пускает БЕЗ пароля сервера — ключ работает."
-  local go=""
-  askyn go "Ключ проверен во второй сессии — запрещать вход по паролю?" "n"
-  [[ "$go" == true ]] || { warn "Парольный вход оставлен как есть (ключ уже работает — заходи им)."; return 0; }
-  # Шаг 3: hardening — бэкап → правка → sshd -t → рестарт; при ошибке откат
-  local bak="/root/stack-backups/pre-ssh-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$BACKUP_DIR" "$bak" 2>/dev/null || true
-  cp -a /etc/ssh/sshd_config "$bak/" 2>/dev/null || true
-  [[ -d /etc/ssh/sshd_config.d ]] && cp -a /etc/ssh/sshd_config.d "$bak/" 2>/dev/null || true
-  if grep -qE '^\s*Include\s+/etc/ssh/sshd_config.d' /etc/ssh/sshd_config 2>/dev/null; then
-    cat > /etc/ssh/sshd_config.d/99-stack-hardening.conf <<'EOF'
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-PermitRootLogin prohibit-password
-EOF
-  else
-    sed -i -E 's/^#?\s*PasswordAuthentication\s+.*/PasswordAuthentication no/; s/^#?\s*KbdInteractiveAuthentication\s+.*/KbdInteractiveAuthentication no/; s/^#?\s*PermitRootLogin\s+.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-    grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config || \
-      printf '\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' >> /etc/ssh/sshd_config
-  fi
-  if sshd -t 2>/dev/null; then
-    if systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; then
-      echo
-      log "Вход по паролю ЗАПРЕЩЁН, только ключи."
-      warn "Не закрывай ЭТУ сессию, пока не проверишь вход во второй!"
-      echo "    Откат: rm -f /etc/ssh/sshd_config.d/99-stack-hardening.conf && systemctl restart ssh"
-      audit "ssh: парольный вход запрещён (только ключи)"
-    else
-      err "ssh не перезапустился — верни конфиг из $bak и проверь systemctl status ssh"
-      return 1
-    fi
-  else
-    err "sshd -t не прошёл — откат!"
-    [[ -f "$bak/sshd_config" ]] && cp -a "$bak/sshd_config" /etc/ssh/sshd_config
-    rm -f /etc/ssh/sshd_config.d/99-stack-hardening.conf
-    sshd -t 2>&1 | tail -3
-    return 1
-  fi
-}
-
-# =====================================================================
 # Гигиена nginx и логов: server_tokens off, security-заголовки на decoy,
 # ротация decoy-логов (если не покрыта системным logrotate).
 # =====================================================================
@@ -6818,8 +6737,7 @@ run_menu_action() {
     19) inbounds_live; pause ;;
     20) inbound_export_links ;;
     21) inbound_change_domain ;;
-    22) ssh_keys_setup ;;
-    23) nginx_hygiene ;;
+    22) nginx_hygiene ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -6920,8 +6838,7 @@ main_menu() {
     echo -e "  ${B}19)${N} 📡 Инбаунды: live-таблица"
     echo -e "  ${B}20)${N} 📤 Экспорт ссылок инбаунда в файл"
     echo -e "  ${B}21)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
-    echo -e "  ${B}22)${N} 🔐 SSH: ключи вместо пароля"
-    echo -e "  ${B}23)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
+    echo -e "  ${B}22)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
