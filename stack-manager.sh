@@ -16,11 +16,21 @@ warn() { echo -e "${Y}[!]${N} $*"; }
 err()  { echo -e "${R}[x]${N} $*" >&2; }
 line() { echo -e "${B}────────────────────────────────────────────────────────${N}"; }
 
+# Аудит действий: каждая операция, меняющая систему, — строка в журнал.
+audit() {
+  local f="${ACTION_LOG:-/root/stack-actions.log}"
+  printf '%s root%s | %s\n' "$(date '+%F %T')" "${SUDO_USER:+ (sudo:$SUDO_USER)}" "$*" >> "$f" 2>/dev/null || true
+}
+
 [[ $EUID -eq 0 ]] || { err "Запустите от root (sudo $0)"; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
+# Стабильный EN-вывод subprocess (ufw/systemctl/certbot): RU-локаль даёт
+# «Статус: активен» и ломает парсинг. Собственные RU-сообщения скрипта не страдают.
+export LC_ALL=C LANG=C
 
 BACKUP_DIR="/root/stack-backups"
 FW_STATE_DIR="/root/stack-backups/firewall-state"
+ACTION_LOG="/root/stack-actions.log"
 
 # Wildcard-сертификат Cloudflare (один на все поддомены базового домена)
 WILDCARD_DOMAIN=""
@@ -3390,6 +3400,7 @@ restore_firewall_state() {
   [[ ! -f "$FW_STATE_DIR/saved" ]] && { warn "Снимок не найден"; pause; return 1; }
   askyn confirm "Восстановить?" "n"
   [[ "$confirm" == true ]] || return 0
+  audit "firewall: восстановление состояния из снимка"
   # shellcheck disable=SC1090
   . "$FW_STATE_DIR/state" 2>/dev/null || true
   [[ -f "$FW_STATE_DIR/iptables.v4" ]] && iptables-restore  < "$FW_STATE_DIR/iptables.v4"  2>/dev/null || true
@@ -5178,6 +5189,7 @@ restore_config() {
   [[ -z "$file" || ! -f "$file" ]] && { err "Не найден"; return 1; }
   askyn confirm "Восстановить из $file?" "n"
   [[ "$confirm" == true ]] || return 0
+  audit "restore: восстановление конфигурации из $(basename "$file")"
   backup_config >/dev/null 2>&1 || true
   systemctl stop nginx 2>/dev/null || true
   systemctl stop x-ui  2>/dev/null || true
@@ -5344,6 +5356,8 @@ security_menu() {
   echo "  4) Добавить IP в whitelist (ignoreip)"
   echo "  5) Статистика decoy-посещений (24ч)"
   echo "  6) Забанить всех, кто открывал decoy"
+  echo "  7) Включить jail recidive (рецидивисты — бан на неделю)"
+  echo "  8) Живой лог fail2ban (tail -f)"
   echo "  0) Назад"
   line
   local c=""
@@ -5351,18 +5365,20 @@ security_menu() {
   case "$c" in
     5) decoy_stats ;;
     6) decoy_ban_watchers ;;
+    7) f2b_recidive_setup; pause ;;
+    8) f2b_tail ;;
     1)
       local jj="" ip=""
       ask jj "Jail (Enter — decoy-login)" "decoy-login" '^[A-Za-z0-9_-]*$'
       [[ -z "$jj" ]] && jj="decoy-login"
       ask ip "IP для разбана" "" '^[0-9a-fA-F.:]+$'
-      fail2ban-client set "$jj" unbanip "$ip" >/dev/null 2>&1 && log "Разбанен: $ip (jail $jj)" || err "Не получилось — проверь jail и IP"
+      fail2ban-client set "$jj" unbanip "$ip" >/dev/null 2>&1 && { log "Разбанен: $ip (jail $jj)"; audit "f2b: unban $ip (jail $jj)"; } || err "Не получилось — проверь jail и IP"
       pause
       ;;
     2)
       local ca=""
       askyn ca "Снять ВСЕ баны во всех jail?" "n"
-      [[ "$ca" == true ]] && { fail2ban-client unban --all >/dev/null 2>&1 && log "Все баны сняты" || err "Не вышло (похоже, старый fail2ban)"; }
+      [[ "$ca" == true ]] && { fail2ban-client unban --all >/dev/null 2>&1 && { log "Все баны сняты"; audit "f2b: unban all"; } || err "Не вышло (похоже, старый fail2ban)"; }
       pause
       ;;
     3)
@@ -5558,6 +5574,7 @@ decoy_rebuild_all() {
     mk_decoy "$mport" "$mdom" "$mcert" "$mkey" "$mroot" "$mtpl" "ua404=$muaf"
     log "  $mdom → «$mtpl» (ua404=$muaf, robots+honeypot+логи)"
   done
+  audit "decoy: пересборка всех блоков"
   if nginx -t >/dev/null 2>&1; then
     nginx_reload || true
     log "Все decoy-блоки пересобраны ✓"
@@ -5906,6 +5923,295 @@ firewall_apply() {
 }
 
 # =====================================================================
+# ЗДОРОВЬЕ: UFW-fallback, recidive, живой лог, шаблоны decoy, экспорт
+# ссылок, смена домена инбаунда
+# =====================================================================
+
+# Статус UFW с запасным путём: бинарь может не находиться в PATH — тогда
+# смотрим сервис (oneshot ufw.service остаётся active после применения правил).
+ufw_is_active() {
+  local ub
+  ub=$(command -v ufw 2>/dev/null || true)
+  [[ -z "$ub" && -x /usr/sbin/ufw ]] && ub=/usr/sbin/ufw
+  if [[ -n "$ub" ]]; then
+    LC_ALL=C "$ub" status 2>/dev/null | head -1 | grep -q "Status: active" && return 0
+    return 1
+  fi
+  systemctl is-active --quiet ufw 2>/dev/null
+}
+
+# Jail recidive: рецидивисты (3 бана за сутки) получают бан на неделю,
+# который переживает рестарты fail2ban.
+f2b_recidive_setup() {
+  command -v fail2ban-client >/dev/null 2>&1 || { err "fail2ban не установлен"; return 1; }
+  local f=/etc/fail2ban/jail.d/recidive.local
+  cat > "$f" <<'EOF'
+[recidive]
+enabled   = true
+filter    = recidive
+logpath   = /var/log/fail2ban.log
+banaction = iptables-allports
+bantime   = 1w
+findtime  = 1d
+maxretry  = 3
+EOF
+  systemctl restart fail2ban 2>/dev/null || fail2ban-client reload >/dev/null 2>&1 || true
+  sleep 1
+  if fail2ban-client status recidive >/dev/null 2>&1; then
+    log "recidive включён: 3 бана за сутки → бан на неделю (переживает рестарты)"
+    audit "f2b: recidive jail включён"
+  else
+    err "recidive не поднялся — смотри /var/log/fail2ban.log (возможно, нет banaction iptables-allports)"
+    return 1
+  fi
+}
+
+f2b_tail() {
+  local f=/var/log/fail2ban.log
+  [[ -f "$f" ]] || { err "$f не найден"; return 1; }
+  line; echo -e "${B}   FAIL2BAN — ЖИВОЙ ЛОГ (Ctrl+C — выход)${N}"; line
+  tail -n 30 -f "$f"
+}
+
+# Сменить шаблон ВСЕМ decoy-блокам: правка tpl= в маркерах stack.conf
+# (domain= остаётся последним ключом) → пересборка decoy_rebuild_all.
+decoy_settpl_all() {
+  line; echo -e "${B}   DECOY: СМЕНА ШАБЛОНА ВСЕМ БЛОКАМ${N}"; line
+  [[ -f "$STACK_CONF" ]] || { err "$STACK_CONF не найден"; return 1; }
+  grep -q "^# >>> decoy " "$STACK_CONF" || { warn "Decoy-блоков нет (п.1/п.4)"; return 0; }
+  local -a TPLS=()
+  local f
+  for f in "$DECOY_TPL_DIR"/*.html;  do [[ -f "$f" ]] && TPLS+=("$(basename "$f" .html)"); done
+  for f in "$DECOY_LOGIN_DIR"/*.html; do [[ -f "$f" ]] && TPLS+=("$(basename "$f" .html)"); done
+  TPLS+=("redirect" "locked")
+  echo "  Шаблоны:"
+  local i=1 t
+  for t in "${TPLS[@]}"; do printf "   %2d) %s\n" "$i" "$t"; i=$((i+1)); done
+  echo "       (redirect — 302 на google.com: свой URL в маркер не пишется и после пересборки сбросится)"
+  local sel=""
+  ask sel "Номер шаблона (0 — отмена)" "0" '^[0-9]+$'
+  [[ "$sel" == 0 ]] && return 0
+  local tpl="${TPLS[$((sel-1))]:-}"
+  [[ -z "$tpl" ]] && { err "Нет такого номера"; return 1; }
+  askyn go "Поставить «$tpl» во ВСЕ decoy-блоки и пересобрать их?" "n"
+  [[ "$go" == true ]] || return 0
+  # у legacy-маркеров без tpl= — вставляем после key= (перед ua404/domain)
+  sed -i -E "/^# >>> decoy /{ s/tpl=[^ ]+/tpl=$tpl/; /tpl=/! s/(key=[^ ]+ )/\1tpl=$tpl /; }" "$STACK_CONF"
+  audit "decoy: сменён шаблон на «$tpl» во всех блоках"
+  decoy_rebuild_all
+}
+
+# Экспорт ссылок доступа по инбаунду в файл (без QR; то, что показывают
+# подписки панели, в плоском виде для передачи клиенту).
+inbound_export_links() {
+  line; echo -e "${B}   ЭКСПОРТ ССЫЛОК ИНБАУНДА${N}"; line
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
+  inbounds_live
+  local id=""
+  ask id "ID инбаунда (0 — отмена)" "0" '^[0-9]+$'
+  [[ "$id" == 0 ]] && return 0
+  mkdir -p /root/exports 2>/dev/null || true
+  local out="/root/exports/inbound-$id-links.txt"
+  python3 - "$XUI_DB" "$id" "$out" <<'PYEXP' || { err "Экспорт не удался"; return 1; }
+import sqlite3, json, sys, os, urllib.parse
+db, iid, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+row = con.execute("SELECT protocol,port,settings,stream_settings FROM inbounds WHERE id=?", (iid,)).fetchone()
+if not row:
+    print(f"[x] инбаунд #{iid} не найден"); sys.exit(1)
+proto, port, setts_s, stream_s = row
+se = json.loads(setts_s or "{}"); st = json.loads(stream_s or "{}")
+# адрес: hosts (подписочный) → settings.domain/hostname/sni → tls serverName → IP сервера
+host = ""
+try:
+    r = con.execute("SELECT address FROM hosts WHERE inbound_id=? AND port=443 LIMIT 1", (iid,)).fetchone()
+    host = (r[0] if r else "") or ""
+except Exception:
+    pass
+if not host:
+    host = se.get("domain") or se.get("hostname") or se.get("sni") \
+        or (st.get("tlsSettings") or {}).get("serverName") or ""
+sec = (st.get("security") or "").lower()
+rs  = st.get("realitySettings") or {}
+tls = st.get("tlsSettings") or {}
+net = st.get("network") or "tcp"
+lines = []
+name = f"in{iid}-{proto}-{port}"
+for c in (se.get("clients") or []):
+    uuid = c.get("id") or c.get("uuid") or ""
+    pwd  = c.get("password") or ""
+    user = c.get("username") or ""
+    flow = c.get("flow") or ""
+    cn   = c.get("email") or name
+    q = urllib.parse.quote(cn, safe="")
+    link = ""
+    if "vless" in proto.lower():
+        if not uuid: continue
+        p = []
+        if sec == "reality":
+            p += [f"security=reality", f"pbk={rs.get('publicKey','')}",
+                  f"sid={(rs.get('shortIds') or [''])[0]}", f"fp=chrome"]
+            sn = (rs.get("serverNames") or [""])[0]
+            if sn: p.append(f"sni={sn}")
+        elif sec == "tls":
+            p.append("security=tls")
+            if tls.get("serverName"): p.append(f"sni={tls['serverName']}")
+        else:
+            p.append("security=none")
+        p.append(f"type={net}")
+        if flow: p.append(f"flow={flow}")
+        link = f"vless://{urllib.parse.quote(uuid, safe='')}@{host}:{port}?{'&'.join(p)}#{q}"
+    elif proto.lower().startswith("hysteria"):
+        p = []
+        sn = (rs.get("serverNames") or [""])[0] if sec == "reality" else tls.get("serverName", "")
+        if sn: p.append(f"sni={sn}")
+        link = f"hysteria2://{urllib.parse.quote(pwd, safe='')}@{host}:{port}/?{'&'.join(p)}#{q}"
+    elif "tuic" in proto.lower():
+        link = f"tuic://{urllib.parse.quote(uuid, safe='')}:{urllib.parse.quote(pwd, safe='')}@{host}:{port}?congestion_control=bbr&alpn=h3#{q}"
+    elif "anytls" in proto.lower():
+        link = f"anytls://{urllib.parse.quote(pwd, safe='')}@{host}:{port}#{q}"
+    if link:
+        lines.append(link)
+    else:
+        lines.append(f"# {cn}: вручную — {proto} {host}:{port} {('id='+uuid) if uuid else ''} {('пароль='+pwd) if pwd else ''}")
+if not lines:
+    print("[x] клиентов нет или протокол не поддерживает ссылки"); sys.exit(1)
+fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    f.write("\n".join(lines) + "\n")
+print(f"[+] {len(lines)} шт → {out}")
+PYEXP
+  [[ -f "$out" ]] && { log "Файл: $out (права 0600)"; sed 's/^/  /' "$out" | head -5; }
+  audit "inbound: экспорт ссылок #$id → $out"
+  pause
+}
+
+# Смена домена инбаунда без пересоздания: stop панели → правка JSON/hosts/
+# SNI-карты → start → nginx reload. Reality: свой decoy перепривязывается
+# через reality_set_dest, чужая цель — через замену dest/serverNames.
+inbound_change_domain() {
+  line; echo -e "${B}   СМЕНА ДОМЕНА ИНБАУНДА (без пересоздания)${N}"; line
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
+  inbounds_live
+  local id=""
+  ask id "ID инбаунда (0 — отмена)" "0" '^[0-9]+$'
+  [[ "$id" == 0 ]] && return 0
+  local row
+  row=$(python3 - "$XUI_DB" "$id" <<'PYROW' 2>/dev/null
+import sqlite3, json, sys
+con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=5)
+r = con.execute("SELECT protocol,port,settings,stream_settings FROM inbounds WHERE id=?", (int(sys.argv[2]),)).fetchone()
+if not r: sys.exit(1)
+proto, port, s1, s2 = r
+se = json.loads(s1 or "{}"); st = json.loads(s2 or "{}")
+rs = st.get("realitySettings") or {}
+dom = se.get("domain") or se.get("hostname") or se.get("sni") \
+   or (st.get("tlsSettings") or {}).get("serverName") \
+   or (rs.get("serverNames") or [""])[0] or ""
+dest = rs.get("dest") or rs.get("target") or ""
+cert = se.get("certFile") or ""
+if not cert:
+    c = (st.get("tlsSettings") or {}).get("certificates") or []
+    if c: cert = c[0].get("certificateFile", "")
+print(f"{proto}|{port}|{dom}|{(st.get('security') or '').lower()}|{dest}|{cert}")
+PYROW
+) || { err "Инбаунд #$id не найден"; return 1; }
+  local proto port old sec dest cert
+  IFS='|' read -r proto port old sec dest cert <<<"$row"
+  [[ -z "$old" ]] && { err "У инбаунда не найден текущий домен — меняй вручную"; return 1; }
+  echo "  #$id: $proto $port/tcp · домен: $old · security: ${sec:-none} · dest: ${dest:--}"
+  local nd=""
+  ask nd "Новый домен (A-запись → этот сервер)" "" '^[a-zA-Z0-9.-]+$'
+  [[ -z "$nd" ]] && return 0
+  [[ "$nd" == "$old" ]] && { warn "Домен не изменился"; return 0; }
+  local srv_ip dip
+  srv_ip=$(server_ip4)
+  dip=$(dig +short A "$nd" 2>/dev/null | tail -1)
+  if [[ "$dip" != "$srv_ip" ]]; then
+    warn "DNS: $nd → ${dip:-не резолвится}, а сервер: $srv_ip"
+    local go=""
+    askyn go "Продолжить всё равно (клиенты не подключатся, пока DNS не поправишь)?" "n"
+    [[ "$go" == true ]] || return 0
+  fi
+  if [[ "$sec" == "tls" && ! -f "/etc/letsencrypt/live/$nd/fullchain.pem" ]]; then
+    # wildcard-сертификат тоже годится: *.<база> покрывает поддомены
+    if [[ -n "$WILDCARD_DOMAIN" && "$nd" == *."$WILDCARD_DOMAIN" ]]; then
+      log "Сёрт: wildcard *.$WILDCARD_DOMAIN покрывает $nd"
+    else
+      err "Сертификата для $nd нет (live/$nd) — выпусти сначала (п.10) и повтори"
+      return 1
+    fi
+  fi
+  echo "  План: JSON стрима/настроек ($old→$nd), hosts, SNI-карта, reality-dest при необходимости."
+  local go=""
+  askyn go "Менять? (панель будет остановлена на время правки)" "n"
+  [[ "$go" == true ]] || return 0
+  auto_backup_stack >/dev/null 2>&1 || true
+  local xui_was=""
+  if systemctl is-active --quiet x-ui 2>/dev/null; then
+    xui_was=1; systemctl stop x-ui >/dev/null 2>&1 || true; sleep 1
+  fi
+  local pyok=1
+  python3 - "$XUI_DB" "$id" "$old" "$nd" <<'PYSET' && pyok=0 || pyok=1
+import sqlite3, json, sys
+db, iid, old, new = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+def walk(v):
+    if isinstance(v, str):
+        return new if v == old else v
+    if isinstance(v, list):
+        return [walk(x) for x in v]
+    if isinstance(v, dict):
+        return {k: walk(x) for k, x in v.items()}
+    return v
+con = sqlite3.connect(db, timeout=10)
+con.execute("PRAGMA busy_timeout=8000")
+s1, s2 = con.execute("SELECT settings,stream_settings FROM inbounds WHERE id=?", (iid,)).fetchone()
+se = json.loads(s1 or "{}"); st = json.loads(s2 or "{}")
+se = walk(se); st = walk(st)
+# reality: dest с чужим доменом → новый:443; локальный decoy (127.*) не трогаем
+rs = st.get("realitySettings") or {}
+for k in ("dest", "target"):
+    d = rs.get(k)
+    if isinstance(d, str) and d.startswith(old + ":"):
+        rs[k] = new + ":443"
+if rs: st["realitySettings"] = rs
+# tls: свой серт на новый домен, если выпущен
+if (st.get("security") or "").lower() == "tls":
+    fc, fk = f"/etc/letsencrypt/live/{new}/fullchain.pem", f"/etc/letsencrypt/live/{new}/privkey.pem"
+    import os
+    if os.path.isfile(fc) and os.path.isfile(fk):
+        for c in (st.get("tlsSettings") or {}).get("certificates") or []:
+            if c.get("certificateFile"): c["certificateFile"] = fc
+            if c.get("keyFile"):        c["keyFile"] = fk
+con.execute("UPDATE inbounds SET settings=?, stream_settings=? WHERE id=?",
+            (json.dumps(se, ensure_ascii=False), json.dumps(st, ensure_ascii=False), iid))
+con.commit()
+print("[+] JSON обновлён")
+PYSET
+  if [[ "$pyok" != 0 ]]; then
+    err "Правка БД не прошла — панель НЕ трогаю дальше"; [[ "$xui_was" == 1 ]] && systemctl start x-ui; return 1
+  fi
+  hosts_upsert "$id" "$nd"
+  # SNI-карта: переносим бэкенд старого домена на новый
+  local backend
+  backend=$(grep -E "^\s+$old\s+" "$SNI_CONF" 2>/dev/null | awk '{print $2}' | head -1)
+  if [[ -n "$backend" ]]; then
+    sni_map_remove "$old"; sni_map_add "$nd" "$backend"
+    log "  SNI-карта: $old → $nd (бэкенд $backend сохранён)"
+  else
+    sni_upstream_add "inb_${id}_backend" "$port"
+    sni_map_add "$nd" "inb_${id}_backend"
+    log "  SNI-карта: $nd → inb_${id}_backend (старой записи не было)"
+  fi
+  [[ "$xui_was" == 1 ]] && { systemctl start x-ui >/dev/null 2>&1 || true; sleep 2; }
+  nginx_reload || true
+  audit "inbound: смена домена #$id: $old → $nd"
+  echo
+  log "Готово: #$id теперь $nd. Проверь таблицу ниже — порт слушается, домен новый."
+  inbounds_live
+}
+
+# =====================================================================
 # САМОДИАГНОСТИКА (read-only health check): сервисы, порты, SNI, серты,
 # UFW, DNS. НИЧЕГО не меняет — только показывает проблемы и подсказки.
 # =====================================================================
@@ -5976,7 +6282,7 @@ stack_doctor() {
   fi
 
   echo -e "${B}— UFW —${N}"
-  if [[ "$(ufw status 2>/dev/null | head -1 | awk '{print $2}')" == "active" ]]; then
+  if ufw_is_active; then
     ok "UFW активен"
     ufw status 2>/dev/null | grep -qE "443/tcp\s+ALLOW" && ok "443/tcp разрешён" || bad "443/tcp НЕ разрешён"; hint "п.11"
     ufw status 2>/dev/null | grep -qE "${SSH_PORT:-22}/tcp\s+ALLOW" && ok "SSH (${SSH_PORT:-22}/tcp) разрешён" || warn2 "SSH-порт не помечен ALLOW — проверь, как подключаешься"
@@ -5984,7 +6290,104 @@ stack_doctor() {
     extra=$(ufw status 2>/dev/null | grep -E "ALLOW" | grep -E "/tcp" | grep -vE "443/tcp|${SSH_PORT:-22}/tcp" | head -5)
     [[ -n "$extra" ]] && { warn2 "лишние TCP-разрешения:"; echo "$extra" | sed 's/^/        /'; hint "п.11 → сброс (только SSH+443+UDP)"; }
   else
-    bad "UFW не активен"; hint "п.11"
+    bad "UFW не активен (или бинарь не найден — проверь: systemctl is-active ufw)"; hint "п.11"
+  fi
+
+  echo -e "${B}— fail2ban —${N}"
+  if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    ok "fail2ban активен"
+    fail2ban-client status decoy-login >/dev/null 2>&1 && ok "jail decoy-login работает" || bad "jail decoy-login НЕ работает"; hint "п.1/п.7"
+    fail2ban-client status recidive >/dev/null 2>&1 && ok "jail recidive работает (рецидивисты — бан на неделю)" || warn2 "recidive выключен (п.7 → вкл.)"
+  else
+    bad "fail2ban НЕ активен"; hint "systemctl restart fail2ban"
+  fi
+
+  echo -e "${B}— Decoy-страницы (что реально отвечает nginx) —${N}"
+  if [[ -f "$STACK_CONF" ]] && grep -q "^# >>> decoy " "$STACK_CONF" 2>/dev/null; then
+    local mline mport mdom mroot code body_md5 idx_md5 n_ok=0 n_bad=0
+    while IFS= read -r mline; do
+      mport=$(grep -oE 'port=[0-9]+'  <<<"$mline" | head -1 | cut -d= -f2)
+      mdom=$(grep  -oE 'domain=[^ ]+$' <<<"$mline" | head -1 | cut -d= -f2-)
+      mroot=$(grep -oE 'root=[^ ]+'   <<<"$mline" | head -1 | cut -d= -f2-)
+      [[ -z "$mdom" || -z "$mport" ]] && continue
+      # UA — браузерный: decoy с ua404=1 отдаёт curl'у 404, доктор должен видеть
+      # страницу глазами «человека»
+      code=$(curl -sk --max-time 5 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36" -o /tmp/.decoy_body -w '%{http_code}' -H "Host: $mdom" "https://127.0.0.1:$mport/" 2>/dev/null || echo 000)
+      if [[ "$code" == "200" || "$code" == "302" || "$code" == "401" ]]; then
+        if [[ "$code" == "200" && -f "$mroot/index.html" ]]; then
+          body_md5=$(md5sum /tmp/.decoy_body 2>/dev/null | awk '{print $1}')
+          idx_md5=$(md5sum "$mroot/index.html" 2>/dev/null | awk '{print $1}')
+          if [[ "$body_md5" == "$idx_md5" ]]; then ok "$mdom (:$mport): 200, контент = шаблон"; n_ok=$((n_ok+1))
+          else bad "$mdom (:$mport): 200, но контент НЕ совпадает с $mroot/index.html"; n_bad=$((n_bad+1)); fi
+        else
+          ok "$mdom (:$mport): HTTP $code (ожидаемо для redirect/locked)"; n_ok=$((n_ok+1))
+        fi
+      else
+        bad "$mdom (:$mport): ответ $code — decoy НЕ отвечает"; hint "п.4/пересборка decoy, systemctl restart nginx"; n_bad=$((n_bad+1))
+      fi
+    done < <(grep "^# >>> decoy " "$STACK_CONF")
+    rm -f /tmp/.decoy_body 2>/dev/null || true
+    [[ "$n_bad" -gt 0 ]] && problems=$((problems+n_bad))
+    [[ "$n_ok" -eq 0 && "$n_bad" -eq 0 ]] && warn2 "decoy-блоки не распарсились"
+  else
+    warn2 "decoy-блоков в stack.conf нет"
+  fi
+
+  echo -e "${B}— Порты инбаундов (быстро; подробно — п.21) —${N}"
+  if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+    local dead
+    dead=$(python3 - "$XUI_DB" <<'PYPORTS' 2>/dev/null
+import sqlite3, json, sys, subprocess, re
+UDP_PROTOS={"hysteria","hysteria2","qwdtt","csqtt","tuic","wireguard","amnezia","amneziawg","awg"}
+try:
+    con=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True,timeout=5)
+    rows=con.execute("SELECT id,protocol,port,COALESCE(listen,''),settings,stream_settings FROM inbounds WHERE enable=1").fetchall()
+except Exception: sys.exit(0)
+def listening(net,p):
+    if net=="tcp":
+        out=subprocess.run(["ss","-tln"],capture_output=True,text=True,timeout=5).stdout
+        return bool(re.search(rf":{p}(\s|$)",out))
+    out=subprocess.run(["ss","-ulan"],capture_output=True,text=True,timeout=5).stdout
+    if re.search(rf":{p}(\s|$)",out): return True
+    return False
+for iid,proto,port,listen,s1,s2 in rows:
+    try: se=json.loads(s1 or "{}")
+    except Exception: se={}
+    try: st=json.loads(s2 or "{}")
+    except Exception: st={}
+    try: p=int(se.get("port") or port or 0)
+    except Exception: p=int(port or 0)
+    if p<=0: continue
+    net="udp" if proto.lower() in UDP_PROTOS else (st.get("network") or "tcp")
+    if not listening(net,p): print(f"#{iid} {proto} {p}/{net}")
+PYPORTS
+)
+    if [[ -z "$dead" ]]; then
+      ok "все включённые инбаунды слушают свои порты"
+    else
+      local dl
+      while IFS= read -r dl; do [[ -z "$dl" ]] && continue; bad "не слушается: $dl"; done <<<"$dead"
+      hint "systemctl restart x-ui; если не помогло — п.21/логи xray"
+    fi
+  fi
+
+  echo -e "${B}— Ресурсы —${N}"
+  local duse
+  duse=$(df -Pm / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
+  if [[ -n "$duse" ]]; then
+    if (( duse >= 90 )); then bad "диск: занято ${duse}% — критично"; hint "почистить /root/stack-backups, /var/log"
+    elif (( duse >= 80 )); then warn2 "диск: занято ${duse}%"; else ok "диск: занято ${duse}%"; fi
+  fi
+  if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+    local dbsize nbak
+    dbsize=$(du -h "$XUI_DB" 2>/dev/null | awk '{print $1}')
+    nbak=$(ls -1 "$BACKUP_DIR"/stack-backup-*.tar.gz 2>/dev/null | wc -l)
+    ok "x-ui.db: ${dbsize:-?} · бэкапов: $nbak (свежий: $(ls -1t "$BACKUP_DIR"/stack-backup-*.tar.gz 2>/dev/null | head -1 | xargs -r basename))"
+    (( nbak == 0 )) && warn2 "бэкапов нет — п.8"
+  fi
+  if [[ -f /var/run/reboot-required ]]; then
+    bad "система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро/библиотеки)"
+    hint "reboot в удобное окно: стек поднимется сам (nginx/x-ui/AdGuard/fail2ban — systemd)"
   fi
 
   echo -e "${B}— DNS / домены стека —${N}"
@@ -6159,6 +6562,7 @@ PYLIVE
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
+  audit "menu:${1:-}"     # каждое обращение к пункту — в журнал действий
   case "$1" in
     1) initial_setup ;;
     2) add_inbound; pause ;;
@@ -6181,6 +6585,9 @@ run_menu_action() {
     19) update_self; pause ;;
     20) stack_doctor_menu; pause ;;
     21) inbounds_live; pause ;;
+    22) decoy_settpl_all ;;
+    23) inbound_export_links ;;
+    24) inbound_change_domain ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -6199,7 +6606,7 @@ main_menu() {
       echo "  AdGuard:  не найден"
     fi
     echo "  Nginx:    $(systemctl is-active nginx 2>/dev/null || echo -)  |  fail2ban: $(systemctl is-active fail2ban 2>/dev/null || echo -)"
-    echo "  UFW:      $(ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo unknown)"
+    echo "  UFW:      $(ufw_is_active && echo active || echo 'inactive/недоступен')"
     echo "  xray:     ${XRAY_BIN:-не найден}"
     line
     echo "   1) Первичная настройка SNI-роутера"
@@ -6223,6 +6630,9 @@ main_menu() {
     echo "  19) Обновить скрипт с GitHub"
     echo "  20) Самодиагностика (проверка стека)"
     echo "  21) Инбаунды: live-таблица (порты/серты/клиенты/трафик)"
+    echo "  22) Decoy: сменить шаблон всем блокам"
+    echo "  23) Экспорт ссылок инбаунда в файл"
+    echo "  24) Сменить домен инбаунда (без пересоздания)"
     echo "   0) Выход     (q в любом вопросе — выход в меню)"
     line
     local c="" rc
@@ -6532,6 +6942,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   check_os
   ensure_deps
   detect_env
+  [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — сервер работает не на свежем ядре. См. п.20 → «Ресурсы»."
   # Автобэкап x-ui.db + nginx-конфигов стека (последние 5 копий)
   auto_backup_stack
   # deploy-hook renew (сертиф. живут в live/, зеркала нет) + дедупликация
