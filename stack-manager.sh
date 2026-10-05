@@ -5509,7 +5509,9 @@ security_menu() {
 scan_ports() {
   {
     ss -tlnpH 2>/dev/null | awk '{print "tcp|" $4}'
-    ss -ulnpH 2>/dev/null | awk '{print "udp|" $4}'
+    # udp: только НАСТОЯЩИЕ слушатели (peer *:*); сокеты с конкретным peer —
+    # это исходящие сессии на ephemeral-портах, в UFW им делать нечего
+    ss -ulnpH 2>/dev/null | awk '$5 == "*:*" {print "udp|" $4}'
   } 2>/dev/null | while IFS='|' read -r proto bind; do
     [[ -z "$proto" || -z "$bind" ]] && continue
     echo "$proto|${bind##*:}|${bind%:*}"
@@ -6709,7 +6711,7 @@ stealth_audit() {
 
   echo; echo -e "${B}— 2. Слушающие UDP-порты (QUIC/крауты) —${N}"
   local any_udp=0
-  for p in $(ss -uln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; split($4,a,":"); print a[length(a)] }' | sort -un); do
+  for p in $(ss -uln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; if ($5 != "*:*") next; split($4,a,":"); print a[length(a)] }' | sort -un); do
     any_udp=1
     if ! stealth_vis "$p" udp; then
       ok "udp $p — закрыт UFW (невидим)"
@@ -6759,7 +6761,7 @@ stealth_audit() {
   fi
 
   echo; echo -e "${B}— 6. DNS :53 наружу —${N}"
-  local udp53; udp53=$(ss -uln 2>/dev/null | awk 'NR>1 && $4 ~ /:53$/ && $4 !~ /^127\./ && $4 !~ /^\[::1\]/ {c++} END {print c+0}')
+  local udp53; udp53=$(ss -uln 2>/dev/null | awk 'NR>1 && $4 ~ /:53$/ && $5 == "*:*" && $4 !~ /^127\./ && $4 !~ /^\[::1\]/ {c++} END {print c+0}')
   if [[ "$udp53" -eq 0 ]]; then
     ok "53 наружу не слушается ✓"
   elif ! stealth_vis "53" udp; then
