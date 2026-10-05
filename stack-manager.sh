@@ -14,6 +14,7 @@ G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'; B='\033[0;36m'; N='\033[0m'
 log()  { echo -e "${G}[+]${N} $*"; }
 warn() { echo -e "${Y}[!]${N} $*"; }
 err()  { echo -e "${R}[x]${N} $*" >&2; }
+ok()   { echo -e "${G}[✓]${N} $*"; }
 line() { echo -e "${B}────────────────────────────────────────────────────────${N}"; }
 
 # Аудит действий: каждая операция, меняющая систему, — строка в журнал.
@@ -6651,7 +6652,7 @@ EOF
 stealth_audit() {
   line; echo -e "${B}   СТЕЛС-АУДИТ (глазами сканера)${N}"; line
   local base="${WILDCARD_DOMAIN:-${PANEL_DOMAIN:-}}"
-  base="${base#*.}"; base="${base#*.}"
+  base="${base#*.}"   # *.vladufqaa.online → vladufqaa.online (одна обрезка!)
 
   local ufw_on=0
   ufw_is_active && ufw_on=1
