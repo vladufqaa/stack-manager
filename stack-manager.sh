@@ -6359,6 +6359,9 @@ for iid,proto,port,listen,s1,s2 in rows:
     except Exception: p=int(port or 0)
     if p<=0: continue
     net="udp" if proto.lower() in UDP_PROTOS else (st.get("network") or "tcp")
+    # xhttp/ws/grpc/httpupgrade — TCP-транспорты: наружу проверяем как tcp,
+    # иначе «не слушается» на живом инбаунде (панель при этом права)
+    if net!="udp": net="tcp"
     if not listening(net,p): print(f"#{iid} {proto} {p}/{net}")
 PYPORTS
 )
@@ -6379,10 +6382,13 @@ PYPORTS
     elif (( duse >= 80 )); then warn2 "диск: занято ${duse}%"; else ok "диск: занято ${duse}%"; fi
   fi
   if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
-    local dbsize nbak
+    local dbsize nbak nauto nman fresh
     dbsize=$(du -h "$XUI_DB" 2>/dev/null | awk '{print $1}')
-    nbak=$(ls -1 "$BACKUP_DIR"/stack-backup-*.tar.gz 2>/dev/null | wc -l)
-    ok "x-ui.db: ${dbsize:-?} · бэкапов: $nbak (свежий: $(ls -1t "$BACKUP_DIR"/stack-backup-*.tar.gz 2>/dev/null | head -1 | xargs -r basename))"
+    nauto=$(ls -1dt "$BACKUP_DIR"/auto-* 2>/dev/null | wc -l)              # автобэкап (старт скрипта)
+    nman=$(ls -1 "$BACKUP_DIR"/stack-backup-*.tar.gz 2>/dev/null | wc -l)  # ручные (п.8)
+    nbak=$((nauto + nman))
+    fresh=$(ls -1dt "$BACKUP_DIR"/auto-* "$BACKUP_DIR"/stack-backup-*.tar.gz 2>/dev/null | head -1 | xargs -r basename)
+    ok "x-ui.db: ${dbsize:-?} · бэкапов: $nbak (авто:$nauto/руками:$nman; свежий: $fresh)"
     (( nbak == 0 )) && warn2 "бэкапов нет — п.8"
   fi
   if [[ -f /var/run/reboot-required ]]; then
