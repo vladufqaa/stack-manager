@@ -6526,9 +6526,41 @@ auto_full_setup() {
 }
 
 # =====================================================================
+# CLI-хуки для веб-панели smg-web: неинтерактивный запуск готовых функций
+#   ./stack-manager.sh cli <команда>
+#   decoy-rebuild | decoy-outsider | decoy-stats | decoy-bans | backup | cert-sync
+# stdin у функций перенаправлен с /dev/null — pause() не ждёт Enter.
+# =====================================================================
+smg_cli() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    decoy-rebuild)  decoy_rebuild_all </dev/null ;;
+    decoy-outsider) decoy_outsider_check </dev/null ;;
+    decoy-stats)    decoy_stats </dev/null ;;
+    decoy-bans)     decoy_ban_watchers </dev/null ;;
+    backup)         auto_backup_stack </dev/null ;;
+    cert-sync)      cert_hook_install </dev/null; cert_sync_all </dev/null; sync_inbound_certs </dev/null ;;
+    "")
+      err "smg cli: укажи команду (decoy-rebuild|decoy-outsider|decoy-stats|decoy-bans|backup|cert-sync)"
+      return 2 ;;
+    *)
+      err "smg cli: неизвестная команда '$cmd'"
+      return 2 ;;
+  esac
+}
+
+# =====================================================================
 # ТОЧКА ВХОДА (только при прямом запуске; при source функции доступны для теста)
 # =====================================================================
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  # неинтерактивный режим панели — до всего остального (без ensure_deps/автобэкапа)
+  if [[ "${1:-}" == "cli" ]]; then
+    check_os
+    detect_env
+    shift
+    smg_cli "$@"
+    exit $?
+  fi
   check_os
   ensure_deps
   detect_env
