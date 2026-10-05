@@ -5148,10 +5148,7 @@ show_status() {
   grep -E '^\s+[a-zA-Z0-9.-]+\.|^upstream' "$SNI_CONF" 2>/dev/null | sed 's/^/  /' || true
   echo; echo "▸ Inbounds:"
   sqlite3 -header -column "$XUI_DB" "SELECT id, protocol, port, listen, enable, remark FROM inbounds ORDER BY id;" 2>/dev/null || true
-  echo; echo "▸ Забаненные IP:"
-  local ips=""
-  ips=$(fail2ban-client get decoy-login banip 2>/dev/null || true)
-  [[ -n "$ips" ]] && echo "$ips" | tr ' ' '\n' | sed 's/^/  /' || echo "  —"
+  # баны: в шапке меню — сумма по всем jail'ам, детали — в п.7; здесь не дублируем
   pause
 }
 
