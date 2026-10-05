@@ -6763,7 +6763,7 @@ stealth_audit() {
     log "базовый домен не определён — пропуск"
   else
     local ct
-    ct=$(curl -s -m 12 "https://crt.sh/?q=%25.${base}&output=json" 2>/dev/null | python3 -c '
+    ct=$(curl -s -m 25 --retry 2 --retry-delay 2 "https://crt.sh/?q=%25.${base}&output=json" 2>/dev/null | python3 -c '
 import json, sys
 try: d = json.load(sys.stdin)
 except Exception: sys.exit(0)
