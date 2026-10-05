@@ -3927,7 +3927,7 @@ initial_setup() {
   line; echo -e "${B}   ПЕРВИЧНАЯ НАСТРОЙКА SNI-РОУТЕРА${N}"; line
   # Предохранитель: стек уже собран? Повторный прогон может перезаписать
   # работающие настройки — по умолчанию отказываемся.
-  if [[ -f "$STACK_CONF" && -f /etc/nginx/streams-available/sni-router.conf ]]; then
+  if [[ -f "$STACK_CONF" ]] && { [[ -f /etc/nginx/streams-available/sni-router.conf ]] || [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; }; then
     warn "Похоже, первичная настройка уже выполнена:"
     echo "    ✓ $STACK_CONF"
     echo "    ✓ SNI-роутер (:443, streams-available/sni-router.conf)"
