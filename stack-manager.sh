@@ -455,9 +455,21 @@ suburi_build() {
 
 is_udp_proto() {
   case "$1" in
-    hysteria|hysteria2|wireguard|amnezia|amneziawg|awg|qwdtt|csqdtt|csqtt) return 0 ;;
+    hysteria|hysteria2|wireguard|amnezia|amneziawg|awg|qwdtt|csqdtt|csqtt|kroute|krout|krw) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Порты UDP-инбаундов из БД панели — ЕДИНСТВЕННЫЙ источник правды для файрвола.
+# Сокет-сканирование UDP не годится: xray и резолверы плодят несвязанные
+# sendto()-сокеты на ephemeral-портах, неотличимые по peer от слушателей.
+udp_inbound_ports() {
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
+  sqlite3 "$XUI_DB" "SELECT id, protocol, port FROM inbounds WHERE enable=1;" 2>/dev/null |
+  while IFS='|' read -r _id _pr _pt; do
+    [[ -z "$_pt" ]] && continue
+    is_udp_proto "$_pr" && echo "$_pt"
+  done | sort -un
 }
 
 proto_remark() {
@@ -5571,16 +5583,12 @@ firewall_menu() {
     # tcp/80 НЕ открываем: сертификаты — wildcard через DNS-хук (DNS-01),
     # HTTP-01 не нужен; при необходимости открыть разово: ufw allow 80/tcp
     systemctl is-active --quiet nginx 2>/dev/null && REQ["tcp:443"]="HTTPS/SNI"
-    while IFS='|' read -r proto port addr; do
-      [[ -z "$port" || -z "$proto" ]] && continue
-      # loopback в любом виде: 127.x, ::1, [::1], 127.0.0.53%lo (systemd-resolved)
-      case "$addr" in
-        127.*|::1|\[::1\]) continue;;
-      esac
-      [[ "$proto" == "tcp" ]] && continue   # доктрина 443: TCP наружу только SSH/443 (выше)
-      fw_port_locked "$port" && continue
-      REQ["$proto:$port"]="${REQ[$proto:$port]:-udp-listen}"
-    done < <(scan_ports 2>/dev/null || true)
+    # UDP — только инбаунды из БД панели (сокеты чрезмерно шумят: ephemeral)
+    local up
+    for up in $(udp_inbound_ports); do
+      fw_port_locked "$up" && continue
+      REQ["udp:$up"]="udp-инбаунд (панель)"
+    done
 
     echo "▸ Открытыми БУДУТ:"
     local k
@@ -6011,14 +6019,12 @@ firewall_apply() {
     ufw delete allow "${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
   fi
   fw_allow 443 tcp "HTTPS/SNI"
-  local proto port addr
-  while IFS="|" read -r proto port addr; do
-    [[ -z "$port" || -z "$proto" ]] && continue
-    case "$addr" in 127.*|::1*|\[::1\]*) continue;; esac
-    [[ "$proto" == "tcp" ]] && continue   # доктрина 443: TCP наружу только SSH/443
-    fw_port_locked "$port" && continue
-    fw_allow "$port" "$proto" "udp-listen"
-  done < <(scan_ports 2>/dev/null || true)
+  # UDP — только инбаунды из БД панели (скан-сокеты шумят ephemeral-мусором)
+  local up
+  for up in $(udp_inbound_ports); do
+    fw_port_locked "$up" && continue
+    fw_allow "$up" udp "udp-инбаунд"
+  done
   # доктрина 443: 11443 наружу никогда (TCP туннеля идёт через nginx:443,
   # UDP — это HTTP/3 caddy). Гасим, если правило когда-то засело.
   ufw delete allow 11443/tcp >/dev/null 2>&1 || true
