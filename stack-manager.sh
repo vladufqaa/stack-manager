@@ -2136,12 +2136,17 @@ HTML
 decoy_login_templates_init() {
   mkdir -p "$DECOY_LOGIN_DIR" 2>/dev/null || true
   local sig_before; sig_before=$(dir_sig "$DECOY_LOGIN_DIR")
-  # реплики 1:1 (окт 2026): старые шаблоны сносим, чтобы tpl_write записал новые
-  rm -f "$DECOY_LOGIN_DIR/adguard.html" "$DECOY_LOGIN_DIR/portainer.html" \
-        "$DECOY_LOGIN_DIR/pihole.html" "$DECOY_LOGIN_DIR/omv.html" \
-        "$DECOY_LOGIN_DIR/jellyfin.html" "$DECOY_LOGIN_DIR/homeassistant.html" \
-        "$DECOY_LOGIN_DIR/uptime-kuma.html" "$DECOY_LOGIN_DIR/hosting-panel.html" \
-        "$DECOY_LOGIN_DIR/shop.html" 2>/dev/null || true
+  # реплики 1:1 (окт 2026): по умолчанию НЕ сносим — шаблоны пишутся один раз
+  # (рандомная версия в футере фиксируется при установке; перегенерация при
+  # каждом старте только меняла блобы и шумела в логе). Принудительно
+  # обновить реплики из скрипта: SMG_FORCE_TPL=1 bash stack-manager.sh
+  if [[ "${SMG_FORCE_TPL:-0}" == "1" ]]; then
+    rm -f "$DECOY_LOGIN_DIR/adguard.html" "$DECOY_LOGIN_DIR/portainer.html" \
+          "$DECOY_LOGIN_DIR/pihole.html" "$DECOY_LOGIN_DIR/omv.html" \
+          "$DECOY_LOGIN_DIR/jellyfin.html" "$DECOY_LOGIN_DIR/homeassistant.html" \
+          "$DECOY_LOGIN_DIR/uptime-kuma.html" "$DECOY_LOGIN_DIR/hosting-panel.html" \
+          "$DECOY_LOGIN_DIR/shop.html" 2>/dev/null || true
+  fi
 
   local agv="0.107.$(( RANDOM % 25 + 40 ))"   # версия в футере — правдоподобная рандомизация
 
