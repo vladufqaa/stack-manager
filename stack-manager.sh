@@ -5970,34 +5970,6 @@ f2b_tail() {
   tail -n 30 -f "$f"
 }
 
-# Сменить шаблон ВСЕМ decoy-блокам: правка tpl= в маркерах stack.conf
-# (domain= остаётся последним ключом) → пересборка decoy_rebuild_all.
-decoy_settpl_all() {
-  line; echo -e "${B}   DECOY: СМЕНА ШАБЛОНА ВСЕМ БЛОКАМ${N}"; line
-  [[ -f "$STACK_CONF" ]] || { err "$STACK_CONF не найден"; return 1; }
-  grep -q "^# >>> decoy " "$STACK_CONF" || { warn "Decoy-блоков нет (п.1/п.4)"; return 0; }
-  local -a TPLS=()
-  local f
-  for f in "$DECOY_TPL_DIR"/*.html;  do [[ -f "$f" ]] && TPLS+=("$(basename "$f" .html)"); done
-  for f in "$DECOY_LOGIN_DIR"/*.html; do [[ -f "$f" ]] && TPLS+=("$(basename "$f" .html)"); done
-  TPLS+=("redirect" "locked")
-  echo "  Шаблоны:"
-  local i=1 t
-  for t in "${TPLS[@]}"; do printf "   %2d) %s\n" "$i" "$t"; i=$((i+1)); done
-  echo "       (redirect — 302 на google.com: свой URL в маркер не пишется и после пересборки сбросится)"
-  local sel=""
-  ask sel "Номер шаблона (0 — отмена)" "0" '^[0-9]+$'
-  [[ "$sel" == 0 ]] && return 0
-  local tpl="${TPLS[$((sel-1))]:-}"
-  [[ -z "$tpl" ]] && { err "Нет такого номера"; return 1; }
-  askyn go "Поставить «$tpl» во ВСЕ decoy-блоки и пересобрать их?" "n"
-  [[ "$go" == true ]] || return 0
-  # у legacy-маркеров без tpl= — вставляем после key= (перед ua404/domain)
-  sed -i -E "/^# >>> decoy /{ s/tpl=[^ ]+/tpl=$tpl/; /tpl=/! s/(key=[^ ]+ )/\1tpl=$tpl /; }" "$STACK_CONF"
-  audit "decoy: сменён шаблон на «$tpl» во всех блоках"
-  decoy_rebuild_all
-}
-
 # Экспорт ссылок доступа по инбаунду в файл (без QR; то, что показывают
 # подписки панели, в плоском виде для передачи клиенту).
 inbound_export_links() {
@@ -6614,9 +6586,8 @@ run_menu_action() {
     17) update_self; pause ;;
     18) stack_doctor_menu; pause ;;
     19) inbounds_live; pause ;;
-    20) decoy_settpl_all ;;
-    21) inbound_export_links ;;
-    22) inbound_change_domain ;;
+    20) inbound_export_links ;;
+    21) inbound_change_domain ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -6715,9 +6686,8 @@ main_menu() {
     echo -e "  ${B}17)${N} ⬇️  Обновить скрипт с GitHub"
     echo -e "  ${B}18)${N} 🩺 Самодиагностика (проверка стека)"
     echo -e "  ${B}19)${N} 📡 Инбаунды: live-таблица"
-    echo -e "  ${B}20)${N} 🎨 Decoy: сменить шаблон всем блокам"
-    echo -e "  ${B}21)${N} 📤 Экспорт ссылок инбаунда в файл"
-    echo -e "  ${B}22)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
+    echo -e "  ${B}20)${N} 📤 Экспорт ссылок инбаунда в файл"
+    echo -e "  ${B}21)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
