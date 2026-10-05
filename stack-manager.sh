@@ -3932,7 +3932,7 @@ initial_setup() {
     echo "    ✓ $STACK_CONF"
     echo "    ✓ SNI-роутер (:443, streams-available/sni-router.conf)"
     [[ -n "$XUI_DB" && -f "$XUI_DB" ]] && echo "    ✓ панель установлена (x-ui.db)"
-    echo "  Точечные изменения — через п.2/п.4 (инбаунды, decoy), п.11 (файрвол), п.22 (гигиена)."
+    echo "  Точечные изменения — через п.2/п.4 (инбаунды, decoy), п.11 (файрвол), п.21 (гигиена)."
     local rerun=""
     askyn rerun "Всё равно запустить первичную настройку заново?" "n"
     [[ "$rerun" == true ]] || { log "Отменено — конфигурация не тронута."; return 0; }
@@ -6008,7 +6008,7 @@ firewall_apply() {
 }
 
 # =====================================================================
-# ЗДОРОВЬЕ: UFW-fallback, recidive, живой лог, шаблоны decoy, экспорт
+# ЗДОРОВЬЕ: UFW-fallback, recidive, живой лог, шаблоны decoy
 # ссылок, смена домена инбаунда
 # =====================================================================
 
@@ -6056,91 +6056,6 @@ f2b_tail() {
   [[ -f "$f" ]] || { err "$f не найден"; return 1; }
   line; echo -e "${B}   FAIL2BAN — ЖИВОЙ ЛОГ (Ctrl+C — выход)${N}"; line
   tail -n 30 -f "$f"
-}
-
-# Экспорт ссылок доступа по инбаунду в файл (без QR; то, что показывают
-# подписки панели, в плоском виде для передачи клиенту).
-inbound_export_links() {
-  line; echo -e "${B}   ЭКСПОРТ ССЫЛОК ИНБАУНДА${N}"; line
-  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
-  inbounds_live
-  local id=""
-  ask id "ID инбаунда (0 — отмена)" "0" '^[0-9]+$'
-  [[ "$id" == 0 ]] && return 0
-  mkdir -p /root/exports 2>/dev/null || true
-  local out="/root/exports/inbound-$id-links.txt"
-  python3 - "$XUI_DB" "$id" "$out" <<'PYEXP' || { err "Экспорт не удался"; return 1; }
-import sqlite3, json, sys, os, urllib.parse
-db, iid, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
-row = con.execute("SELECT protocol,port,settings,stream_settings FROM inbounds WHERE id=?", (iid,)).fetchone()
-if not row:
-    print(f"[x] инбаунд #{iid} не найден"); sys.exit(1)
-proto, port, setts_s, stream_s = row
-se = json.loads(setts_s or "{}"); st = json.loads(stream_s or "{}")
-# адрес: hosts (подписочный) → settings.domain/hostname/sni → tls serverName → IP сервера
-host = ""
-try:
-    r = con.execute("SELECT address FROM hosts WHERE inbound_id=? AND port=443 LIMIT 1", (iid,)).fetchone()
-    host = (r[0] if r else "") or ""
-except Exception:
-    pass
-if not host:
-    host = se.get("domain") or se.get("hostname") or se.get("sni") \
-        or (st.get("tlsSettings") or {}).get("serverName") or ""
-sec = (st.get("security") or "").lower()
-rs  = st.get("realitySettings") or {}
-tls = st.get("tlsSettings") or {}
-net = st.get("network") or "tcp"
-lines = []
-name = f"in{iid}-{proto}-{port}"
-for c in (se.get("clients") or []):
-    uuid = c.get("id") or c.get("uuid") or ""
-    pwd  = c.get("password") or ""
-    user = c.get("username") or ""
-    flow = c.get("flow") or ""
-    cn   = c.get("email") or name
-    q = urllib.parse.quote(cn, safe="")
-    link = ""
-    if "vless" in proto.lower():
-        if not uuid: continue
-        p = []
-        if sec == "reality":
-            p += [f"security=reality", f"pbk={rs.get('publicKey','')}",
-                  f"sid={(rs.get('shortIds') or [''])[0]}", f"fp=chrome"]
-            sn = (rs.get("serverNames") or [""])[0]
-            if sn: p.append(f"sni={sn}")
-        elif sec == "tls":
-            p.append("security=tls")
-            if tls.get("serverName"): p.append(f"sni={tls['serverName']}")
-        else:
-            p.append("security=none")
-        p.append(f"type={net}")
-        if flow: p.append(f"flow={flow}")
-        link = f"vless://{urllib.parse.quote(uuid, safe='')}@{host}:{port}?{'&'.join(p)}#{q}"
-    elif proto.lower().startswith("hysteria"):
-        p = []
-        sn = (rs.get("serverNames") or [""])[0] if sec == "reality" else tls.get("serverName", "")
-        if sn: p.append(f"sni={sn}")
-        link = f"hysteria2://{urllib.parse.quote(pwd, safe='')}@{host}:{port}/?{'&'.join(p)}#{q}"
-    elif "tuic" in proto.lower():
-        link = f"tuic://{urllib.parse.quote(uuid, safe='')}:{urllib.parse.quote(pwd, safe='')}@{host}:{port}?congestion_control=bbr&alpn=h3#{q}"
-    elif "anytls" in proto.lower():
-        link = f"anytls://{urllib.parse.quote(pwd, safe='')}@{host}:{port}#{q}"
-    if link:
-        lines.append(link)
-    else:
-        lines.append(f"# {cn}: вручную — {proto} {host}:{port} {('id='+uuid) if uuid else ''} {('пароль='+pwd) if pwd else ''}")
-if not lines:
-    print("[x] клиентов нет или протокол не поддерживает ссылки"); sys.exit(1)
-fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w") as f:
-    f.write("\n".join(lines) + "\n")
-print(f"[+] {len(lines)} шт → {out}")
-PYEXP
-  [[ -f "$out" ]] && { log "Файл: $out (права 0600)"; sed 's/^/  /' "$out" | head -5; }
-  audit "inbound: экспорт ссылок #$id → $out"
-  pause
 }
 
 # Смена домена инбаунда без пересоздания: stop панели → правка JSON/hosts/
@@ -6753,9 +6668,8 @@ run_menu_action() {
     17) update_self; pause ;;
     18) stack_doctor_menu; pause ;;
     19) inbounds_live; pause ;;
-    20) inbound_export_links ;;
-    21) inbound_change_domain ;;
-    22) nginx_hygiene ;;
+    20) inbound_change_domain ;;
+    21) nginx_hygiene ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -6854,9 +6768,8 @@ main_menu() {
     echo -e "  ${B}17)${N} ⬇️  Обновить скрипт с GitHub"
     echo -e "  ${B}18)${N} 🩺 Самодиагностика (проверка стека)"
     echo -e "  ${B}19)${N} 📡 Инбаунды: live-таблица"
-    echo -e "  ${B}20)${N} 📤 Экспорт ссылок инбаунда в файл"
-    echo -e "  ${B}21)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
-    echo -e "  ${B}22)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
+    echo -e "  ${B}20)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
+    echo -e "  ${B}21)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
@@ -7175,7 +7088,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   # если серты появились позже установки — дозаписать пути в инбаунды
   sync_inbound_certs
   [[ -f "$WILDCARD_STATE" ]] && WILDCARD_DOMAIN=$(head -n 1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]' || true)
-  [[ -n "$WILDCARD_DOMAIN" ]] && log "Wildcard-сертификат: *.$WILDCARD_DOMAIN (используется для всех поддоменов)"
+  # wildcard виден в п.6/п.18 — на старте не шумим
 
   # ПОРЯДОК ВАЖЕН: сначала ПАНЕЛЬ + её сертификат, потом AdGuard
   # (AdGuard берёт сертификат панели/wildcard для своего https).
@@ -7202,7 +7115,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       detect_env
     fi
   else
-    log "AdGuard Home уже установлен (${ADG_SERVICE:-service})"
+    log "AdGuard Home: ${ADG_SERVICE:-service} найден"   # одна тихая строка состояния
   fi
 
   # чистая установка → авто: инбаунды + настройка + UFW + итоговая сводка
