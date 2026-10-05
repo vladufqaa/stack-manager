@@ -5560,7 +5560,12 @@ firewall_menu() {
     echo "  Статус: $(ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo unknown)"
     echo
     declare -A REQ=()
-    REQ["tcp:$SSH_PORT"]="SSH"
+    # SSH только через туннель? (sshd слушает loopback) — 22 наружу не открываем
+    if ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:22([[:space:]]|$)'; then
+      echo "  SSH: только через туннель (loopback) — 22 наружу не открываем"
+    else
+      REQ["tcp:$SSH_PORT"]="SSH"
+    fi
     # tcp/80 НЕ открываем: сертификаты — wildcard через DNS-хук (DNS-01),
     # HTTP-01 не нужен; при необходимости открыть разово: ufw allow 80/tcp
     systemctl is-active --quiet nginx 2>/dev/null && REQ["tcp:443"]="HTTPS/SNI"
@@ -5997,7 +6002,12 @@ firewall_apply() {
   ufw --force reset >/dev/null 2>&1 || true
   ufw default deny incoming >/dev/null 2>&1 || true
   ufw default allow outgoing >/dev/null 2>&1 || true
-  fw_allow "${SSH_PORT:-22}" tcp "SSH"
+  # SSH: если sshd слушает только loopback («через туннель») — 22 наружу не открываем
+  if ! ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:22([[:space:]]|$)'; then
+    fw_allow "${SSH_PORT:-22}" tcp "SSH"
+  else
+    ufw delete allow "${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
+  fi
   fw_allow 443 tcp "HTTPS/SNI"
   local proto port addr
   while IFS="|" read -r proto port addr; do
