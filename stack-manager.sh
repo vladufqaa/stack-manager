@@ -6657,7 +6657,7 @@ W = 58
 dot = lambda v: "🟢" if v == "1" else "🔴"
 cs = "—" if amin == "—" else (f"{R}{amin} дн{N}" if amin.isdigit() and int(amin) < 14 else f"{amin} дн")
 print(f"{B}╔{'═'*W}╗{N}")
-print(f"{B}{center('💜  STACK MANAGER', W)}{N}")
+print(f"{B}{center('STACK MANAGER', W)}{N}")
 print(f"{B}{center('SNI-роутер · LucX/x-ui · AdGuard · decoy', W)}{N}")
 print(f"{B}╚{'═'*W}╝{N}")
 print(f"{B}┌{'─'*W}┐{N}")
