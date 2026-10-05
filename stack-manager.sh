@@ -6722,17 +6722,25 @@ nginx_hygiene() {
   mkdir -p "$BACKUP_DIR" 2>/dev/null || true
   local changed=0
   # 1) server_tokens off — не показывать версию nginx
-  if grep -qE '^\s*server_tokens\s+off;' /etc/nginx/nginx.conf 2>/dev/null; then
-    log "server_tokens: уже выключен"
+  # (сначала снимаем возможный дубль от прежнего запуска; директива
+  #  может уже быть задана в любом регистре — тогда нормализуем к off)
+  cp -a /etc/nginx/nginx.conf "$BACKUP_DIR/nginx.conf.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+  if grep -q 'server_tokens off; # stack-manager' /etc/nginx/nginx.conf 2>/dev/null; then
+    sed -i '/server_tokens off; # stack-manager/d' /etc/nginx/nginx.conf
+    log "server_tokens: убран дубль от прошлого запуска"; changed=1
+  fi
+  if grep -qiE '^[[:space:]]*server_tokens[[:space:]]+' /etc/nginx/nginx.conf 2>/dev/null; then
+    sed -i -E 's/^([[:space:]]*server_tokens[[:space:]]+).*/\1off; # stack-manager/I' /etc/nginx/nginx.conf
+    log "server_tokens: уже был задан в nginx.conf — приведён к off"
   else
-    cp -a /etc/nginx/nginx.conf "$BACKUP_DIR/nginx.conf.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
     sed -i 's/^http {/http {\n    server_tokens off; # stack-manager/' /etc/nginx/nginx.conf
     if grep -q 'server_tokens off' /etc/nginx/nginx.conf; then
-      log "server_tokens off → включён (версия nginx больше не светится)"; audit "nginx: server_tokens off"; changed=1
+      log "server_tokens off → включён (версия nginx больше не светится)"
     else
       err "не нашёл 'http {' в nginx.conf — вставь 'server_tokens off;' вручную"
     fi
   fi
+  grep -qiE '^[[:space:]]*server_tokens[[:space:]]+off' /etc/nginx/nginx.conf 2>/dev/null && { audit "nginx: server_tokens off"; changed=1; }
   # 2) security-заголовки decoy: сниппет + вживление во все блоки stack.conf
   mkdir -p /etc/nginx/snippets
   cat > /etc/nginx/snippets/decoy-headers.conf <<'EOF'
