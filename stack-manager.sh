@@ -2562,8 +2562,10 @@ PYTP
       log "tg web proxy: мап обновлён → $tdom → tg_backend"
     fi
   fi
-  # доктрина «всё за 443»: 11443 наружу не открываем (и закрываем, если было)
+  # доктрина «всё за 443»: 11443 наружу не открываем (и закрываем, если было);
+  # UDP-порт здесь — HTTP/3 caddy, наружу не нужен и палится сканерами
   ufw delete allow 11443/tcp >/dev/null 2>&1 || true
+  ufw delete allow 11443/udp >/dev/null 2>&1 || true
   nginx -t >/dev/null 2>&1 && nginx_reload || true
   log "tg web proxy: https://$tdom/ — сайт-заглушка + веб-интерфейс прокси (ключи/ссылки в панели)"
 }
@@ -5531,6 +5533,8 @@ fw_port_locked() {
     6010|6011|6012|6013|6014|6015|6016|6017|6018|6019)
                              return 0;;  # X11 forwarding sshd
     46002)       return 0;;  # служебный web csqtt (46000+2) — только localhost
+    11443)       return 0;;  # tproxy (TG web-proxy): наружу ТОЛЬКО через 443;
+                             # UDP-сокет здесь — HTTP/3 caddy, светить нельзя
   esac
   return 1
 }
@@ -6003,6 +6007,10 @@ firewall_apply() {
     fw_port_locked "$port" && continue
     fw_allow "$port" "$proto" "udp-listen"
   done < <(scan_ports 2>/dev/null || true)
+  # доктрина 443: 11443 наружу никогда (TCP туннеля идёт через nginx:443,
+  # UDP — это HTTP/3 caddy). Гасим, если правило когда-то засело.
+  ufw delete allow 11443/tcp >/dev/null 2>&1 || true
+  ufw delete allow 11443/udp >/dev/null 2>&1 || true
   fw_deny_panel_ports
   ufw --force enable >/dev/null 2>&1 || true
   sleep 1
