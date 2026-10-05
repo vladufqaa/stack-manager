@@ -22,6 +22,13 @@ audit() {
   printf '%s root%s | %s\n' "$(date '+%F %T')" "${SUDO_USER:+ (sudo:$SUDO_USER)}" "$*" >> "$f" 2>/dev/null || true
 }
 
+# Сигнатура html-файлов каталога шаблонов — чтобы иниты печатали «готово»
+# только когда реально что-то создали, а не при каждом запуске.
+dir_sig() {
+  find "$1" -maxdepth 1 -type f -name '*.html' -print0 2>/dev/null \
+    | sort -z | xargs -0 -r md5sum 2>/dev/null | md5sum | awk '{print $1}'
+}
+
 [[ $EUID -eq 0 ]] || { err "Запустите от root (sudo $0)"; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 # Стабильный EN-вывод subprocess (ufw/systemctl/certbot): RU-локаль даёт
@@ -1991,6 +1998,7 @@ tpl_write() {
 
 decoy_templates_init() {
   mkdir -p "$DECOY_TPL_DIR" 2>/dev/null || true
+  local sig_before; sig_before=$(dir_sig "$DECOY_TPL_DIR")
 
   # honeypot-ссылки: невидимы для человека, но их парсят боты → путь /admin,
   # /wp-login.php, /.env → nginx отдаёт 404 в лог decoy-access → fail2ban банит
@@ -2119,7 +2127,7 @@ HTML
   # (сразу видно, что за доменом tg-прокси). Сайт tproxy получает нейтральный
   # blog (ensure_tproxy_site) — не совпадающий с corporate у reality-декоев.
 
-  log "Статические decoy-шаблоны готовы"
+  [[ "$sig_before" == "$(dir_sig "$DECOY_TPL_DIR")" ]] || log "Статические decoy-шаблоны готовы"
 }
 
 # =====================================================================
@@ -2127,6 +2135,7 @@ HTML
 # =====================================================================
 decoy_login_templates_init() {
   mkdir -p "$DECOY_LOGIN_DIR" 2>/dev/null || true
+  local sig_before; sig_before=$(dir_sig "$DECOY_LOGIN_DIR")
   # реплики 1:1 (окт 2026): старые шаблоны сносим, чтобы tpl_write записал новые
   rm -f "$DECOY_LOGIN_DIR/adguard.html" "$DECOY_LOGIN_DIR/portainer.html" \
         "$DECOY_LOGIN_DIR/pihole.html" "$DECOY_LOGIN_DIR/omv.html" \
@@ -2378,7 +2387,7 @@ button{background:#b3541e;color:#fff;border-radius:4px}
 HTML
 
   chown -R www-data:www-data "$DECOY_LOGIN_DIR" 2>/dev/null || true
-  log "9 login-шаблонов установлены"
+  [[ "$sig_before" == "$(dir_sig "$DECOY_LOGIN_DIR")" ]] || log "9 login-шаблонов установлены"
 }
 
 # =====================================================================
@@ -2630,8 +2639,60 @@ PYPASS
   return 0
 }
 
+# Read-only проверка: есть ли вообще, что чинить. Пустой вывод = все серты
+# на месте — тогда sync_inbound_certs не останавливает панель и молчит.
+sync_inbound_needs() {
+  python3 - "$XUI_DB" "${REALITY_TARGETS[@]}" <<'PYNEED' 2>/dev/null
+import sqlite3, json, sys, subprocess, re
+db = sys.argv[1]
+targets = set(a.lower() for a in sys.argv[2:])
+SKIP = {"qwdtt","csqdtt","csqtt","wireguard","amnezia","amneziawg","awg","mtproto","tun"}
+def listening(port):
+    try:
+        out = subprocess.run(["ss","-tln"],capture_output=True,text=True,timeout=5).stdout
+    except Exception:
+        return False
+    return bool(re.search(rf":{port}(\s|$)", out))
+try:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    rows = con.execute("SELECT id,protocol,settings,stream_settings FROM inbounds WHERE enable=1").fetchall()
+except Exception:
+    sys.exit(0)
+for iid, proto, s1, s2 in rows:
+    p = (proto or "").lower()
+    if p in SKIP: continue
+    try: se = json.loads(s1 or "{}")
+    except Exception: se = {}
+    try: st = json.loads(s2 or "{}")
+    except Exception: st = {}
+    rs = st.get("realitySettings") or {}
+    dom = se.get("domain") or se.get("hostname") or se.get("sni") \
+       or (st.get("tlsSettings") or {}).get("serverName") \
+       or (rs.get("serverNames") or [None])[0] or ""
+    dom = str(dom).strip()
+    if not dom: continue
+    if (st.get("security") or "").lower() == "reality":
+        dest = str(rs.get("dest") or rs.get("target") or "")
+        if dest and dest.split(":")[0] != "127.0.0.1": continue   # чужой reality
+        if dom.lower() in targets: continue                        # домен = цель
+        port = 4444 + iid
+        if re.search(r'"(?:dest|target)":\s*"127\.0\.0\.1:%d"' % port, s2 or "") and listening(port):
+            continue                                               # decoy жив
+    else:
+        cert = se.get("certFile") or ""
+        if not cert:
+            c = (st.get("tlsSettings") or {}).get("certificates") or []
+            if c: cert = c[0].get("certificateFile","")
+        if cert.startswith("/etc/letsencrypt/live/"): continue
+    print(f"{iid}\x1f{proto}\x1f{dom}\x1f{json.dumps(st, ensure_ascii=False)}")
+PYNEED
+}
+
 sync_inbound_certs() {
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 1
+  # Тихий проход: если самолечению нечего чинить — панель НЕ останавливаем
+  # и ничего не печатаем (раньше каждый запуск бил x-ui и сыпал «cert вписан»).
+  [[ -z "$(sync_inbound_needs)" ]] && return 0
   local cnt=0 id proto dom stream line cert key
   # x-ui держит inbounds в памяти и при рестарте сбрасывает её поверх БД —
   # поэтому ВСЕ правки inbounds делаем только при ОСТАНОВЛЕННОМ x-ui
