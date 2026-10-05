@@ -6607,8 +6607,9 @@ ensure_apex_decoy() {
     warn "  апекс-decoy: stream-конфиг с ssl_preread не найден — пропускаю"
     return 1
   fi
-  # серт: live-каталог базового домена, иначе первый из live/
-  local base="" cert_dir="" lbl=()
+  # серт: 1) live-каталог = базовому домену; 2) чей SAN содержит базу;
+  # 3) любой настоящий каталог сертов (в live/ лежит ещё и файл README — не серт!)
+  local base="" cert_dir="" lbl=() d
   [[ -n "${WILDCARD_DOMAIN:-}" ]] && base="$WILDCARD_DOMAIN"
   [[ -z "$base" && -n "${PANEL_DOMAIN:-}" ]] && base="$PANEL_DOMAIN"
   if [[ -n "$base" ]]; then
@@ -6616,9 +6617,21 @@ ensure_apex_decoy() {
     (( ${#lbl[@]} >= 2 )) && base="${lbl[-2]}.${lbl[-1]}"
   fi
   [[ -n "$base" && -d "/etc/letsencrypt/live/$base" ]] && cert_dir="/etc/letsencrypt/live/$base"
-  [[ -z "$cert_dir" ]] && cert_dir=$(ls -d /etc/letsencrypt/live/* 2>/dev/null | head -1)
+  if [[ -z "$cert_dir" && -n "$base" ]]; then
+    for d in /etc/letsencrypt/live/*/; do
+      [[ -f "$d/fullchain.pem" ]] || continue
+      if openssl x509 -in "$d/fullchain.pem" -noout -ext subjectAltName 2>/dev/null | grep -q -- "$base"; then
+        cert_dir="${d%/}"
+        break
+      fi
+    done
+  fi
   if [[ -z "$cert_dir" ]]; then
-    warn "  апекс-decoy: серт в /etc/letsencrypt/live не найден — пропускаю"
+    cert_dir=$(ls -d /etc/letsencrypt/live/*/ 2>/dev/null | grep -v '/README/' | head -1)
+    [[ -n "$cert_dir" ]] && cert_dir="${cert_dir%/}"
+  fi
+  if [[ -z "$cert_dir" || ! -f "$cert_dir/fullchain.pem" ]]; then
+    warn "  апекс-decoy: живой серт в /etc/letsencrypt/live не найден — пропускаю"
     return 1
   fi
 
