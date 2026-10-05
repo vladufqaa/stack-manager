@@ -3518,6 +3518,14 @@ mk_decoy() {
   done
   mkdir -p "$root" 2>/dev/null || true
 
+  # security-заголовки decoy: сниппет должен существовать до nginx -t
+  mkdir -p /etc/nginx/snippets 2>/dev/null || true
+  [[ -f /etc/nginx/snippets/decoy-headers.conf ]] || cat > /etc/nginx/snippets/decoy-headers.conf <<'EOF'
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-Frame-Options "SAMEORIGIN" always;
+add_header Referrer-Policy "no-referrer-when-downgrade" always;
+EOF
+
   # index.html: login-реплики из DECOY_LOGIN_DIR, статика из DECOY_TPL_DIR
   local tpl_src="$DECOY_TPL_DIR/$tpl.html"
   is_login_template "$tpl" && tpl_src="$DECOY_LOGIN_DIR/$tpl.html"
@@ -3554,6 +3562,7 @@ server {
     server_name $dom;
     ssl_certificate     $cert;
     ssl_certificate_key $key;
+    include /etc/nginx/snippets/decoy-headers.conf;
     root $root;
     index index.html;
     access_log $DECOY_LOG_ACCESS decoy_ext;
@@ -6562,6 +6571,148 @@ adguard_manage() {
   install_adguard_home
 }
 
+# =====================================================================
+# SSH: ключи вместо пароля — мастер с обязательной проверкой второй
+# сессией ДО запрета пароля (иначе можно отрезать себе вход).
+# =====================================================================
+ssh_keys_setup() {
+  line; echo -e "${B}   SSH: КЛЮЧИ ВМЕСТО ПАРОЛЯ${N}"; line
+  command -v sshd >/dev/null 2>&1 || { err "sshd не найден"; return 1; }
+  echo "  Текущее состояние:"
+  echo "    вход по паролю:  $(sshd -T 2>/dev/null | awk '/^passwordauthentication/{print $2}')"
+  echo "    root-вход:       $(sshd -T 2>/dev/null | awk '/^permitrootlogin/{print $2}')"
+  local ak=/root/.ssh/authorized_keys
+  if [[ -f "$ak" ]]; then echo "    ключей в authorized_keys: $(grep -c . "$ak")"; else echo "    authorized_keys: нет"; fi
+  echo
+  echo "  Шаг 1. Публичный ключ твоего компьютера."
+  echo "    Приватный уже есть (\$env:TEMP\\kd3)? Публичный к нему в PowerShell:"
+  echo "      ssh-keygen -y -f \"\$env:TEMP\\kd3\""
+  echo "    Ключа нет — создай: ssh-keygen -t ed25519  (Enter — всё по умолчанию)"
+  local pub=""
+  ask pub "Вставь строку публичного ключа (ssh-ed25519 AAAA…)" "" '^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521))[ ]+[A-Za-z0-9+/=]+'
+  [[ -z "$pub" ]] && return 0
+  mkdir -p /root/.ssh && chmod 700 /root/.ssh
+  touch "$ak" && chmod 600 "$ak"
+  if grep -qF "$pub" "$ak" 2>/dev/null; then
+    log "Этот ключ уже в authorized_keys"
+  else
+    printf '%s\n' "$pub" >> "$ak" && log "Ключ добавлен в $ak"
+  fi
+  echo
+  echo "  Шаг 2. ПРОВЕРКА (текущую сессию не закрывай!)."
+  echo "    В НОВОМ окне PowerShell подключись:"
+  echo "      ssh -i \"\$env:TEMP\\kd3\" root@$(hostname -I 2>/dev/null | awk '{print $1}' | cut -d. -f1).$(hostname -I 2>/dev/null | awk '{print $1}' | cut -d. -f2-)"
+  echo "    Если пускает БЕЗ пароля сервера — ключ работает."
+  local go=""
+  askyn go "Ключ проверен во второй сессии — запрещать вход по паролю?" "n"
+  [[ "$go" == true ]] || { warn "Парольный вход оставлен как есть (ключ уже работает — заходи им)."; return 0; }
+  # Шаг 3: hardening — бэкап → правка → sshd -t → рестарт; при ошибке откат
+  local bak="/root/stack-backups/pre-ssh-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$BACKUP_DIR" "$bak" 2>/dev/null || true
+  cp -a /etc/ssh/sshd_config "$bak/" 2>/dev/null || true
+  [[ -d /etc/ssh/sshd_config.d ]] && cp -a /etc/ssh/sshd_config.d "$bak/" 2>/dev/null || true
+  if grep -qE '^\s*Include\s+/etc/ssh/sshd_config.d' /etc/ssh/sshd_config 2>/dev/null; then
+    cat > /etc/ssh/sshd_config.d/99-stack-hardening.conf <<'EOF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+EOF
+  else
+    sed -i -E 's/^#?\s*PasswordAuthentication\s+.*/PasswordAuthentication no/; s/^#?\s*KbdInteractiveAuthentication\s+.*/KbdInteractiveAuthentication no/; s/^#?\s*PermitRootLogin\s+.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+    grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config || \
+      printf '\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' >> /etc/ssh/sshd_config
+  fi
+  if sshd -t 2>/dev/null; then
+    if systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; then
+      echo
+      log "Вход по паролю ЗАПРЕЩЁН, только ключи."
+      warn "Не закрывай ЭТУ сессию, пока не проверишь вход во второй!"
+      echo "    Откат: rm -f /etc/ssh/sshd_config.d/99-stack-hardening.conf && systemctl restart ssh"
+      audit "ssh: парольный вход запрещён (только ключи)"
+    else
+      err "ssh не перезапустился — верни конфиг из $bak и проверь systemctl status ssh"
+      return 1
+    fi
+  else
+    err "sshd -t не прошёл — откат!"
+    [[ -f "$bak/sshd_config" ]] && cp -a "$bak/sshd_config" /etc/ssh/sshd_config
+    rm -f /etc/ssh/sshd_config.d/99-stack-hardening.conf
+    sshd -t 2>&1 | tail -3
+    return 1
+  fi
+}
+
+# =====================================================================
+# Гигиена nginx и логов: server_tokens off, security-заголовки на decoy,
+# ротация decoy-логов (если не покрыта системным logrotate).
+# =====================================================================
+nginx_hygiene() {
+  line; echo -e "${B}   ГИГИЕНА NGINX И ЛОГОВ${N}"; line
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+  local changed=0
+  # 1) server_tokens off — не показывать версию nginx
+  if grep -qE '^\s*server_tokens\s+off;' /etc/nginx/nginx.conf 2>/dev/null; then
+    log "server_tokens: уже выключен"
+  else
+    cp -a /etc/nginx/nginx.conf "$BACKUP_DIR/nginx.conf.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    sed -i 's/^http {/http {\n    server_tokens off; # stack-manager/' /etc/nginx/nginx.conf
+    if grep -q 'server_tokens off' /etc/nginx/nginx.conf; then
+      log "server_tokens off → включён (версия nginx больше не светится)"; audit "nginx: server_tokens off"; changed=1
+    else
+      err "не нашёл 'http {' в nginx.conf — вставь 'server_tokens off;' вручную"
+    fi
+  fi
+  # 2) security-заголовки decoy: сниппет + вживление во все блоки stack.conf
+  mkdir -p /etc/nginx/snippets
+  cat > /etc/nginx/snippets/decoy-headers.conf <<'EOF'
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-Frame-Options "SAMEORIGIN" always;
+add_header Referrer-Policy "no-referrer-when-downgrade" always;
+EOF
+  if grep -q 'snippets/decoy-headers' "$STACK_CONF" 2>/dev/null; then
+    log "заголовки decoy: уже подключены"
+  elif [[ -f "$STACK_CONF" ]]; then
+    cp -a "$STACK_CONF" "$BACKUP_DIR/stack.conf.bak-hygiene-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    sed -i '/^    ssl_certificate_key /a\    include /etc/nginx/snippets/decoy-headers.conf;' "$STACK_CONF"
+    log "заголовки decoy: подключены ко всем блокам stack.conf"; audit "nginx: decoy-заголовки (nosniff/SAMEORIGIN/referrer)"; changed=1
+  fi
+  # 3) ротация decoy-логов (если не покрыта общим logrotate nginx)
+  if grep -rqs 'var/log/nginx' /etc/logrotate.d/ 2>/dev/null; then
+    log "ротация логов nginx: уже настроена (/etc/logrotate.d)"
+  else
+    cat > /etc/logrotate.d/stack-decoy <<'EOF'
+/var/log/nginx/decoy-access.log /var/log/nginx/decoy-error.log {
+    daily
+    rotate 14
+    size 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    postrotate
+        [ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid) 2>/dev/null || true
+    endscript
+}
+EOF
+    log "ротация decoy-логов: создана (день / 14 копий / сжатие)"; audit "logrotate: stack-decoy создан"; changed=1
+  fi
+  # 4) проверка и перезагрузка
+  if (( changed )); then
+    if nginx -t >/dev/null 2>&1; then
+      nginx_reload
+      log "Гигиена применена ✓"
+    else
+      err "nginx -t не прошёл — откат: $BACKUP_DIR/*.bak-hygiene-*"
+      nginx -t 2>&1 | tail -3
+      return 1
+    fi
+  else
+    log "Всё уже в порядке — менять нечего ✓"
+  fi
+  pause
+}
+
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
@@ -6588,6 +6739,8 @@ run_menu_action() {
     19) inbounds_live; pause ;;
     20) inbound_export_links ;;
     21) inbound_change_domain ;;
+    22) ssh_keys_setup ;;
+    23) nginx_hygiene ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -6688,6 +6841,8 @@ main_menu() {
     echo -e "  ${B}19)${N} 📡 Инбаунды: live-таблица"
     echo -e "  ${B}20)${N} 📤 Экспорт ссылок инбаунда в файл"
     echo -e "  ${B}21)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
+    echo -e "  ${B}22)${N} 🔐 SSH: ключи вместо пароля"
+    echo -e "  ${B}23)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
