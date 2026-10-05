@@ -6333,7 +6333,7 @@ stack_doctor() {
     warn2 "decoy-блоков в stack.conf нет"
   fi
 
-  echo -e "${B}— Порты инбаундов (быстро; подробно — п.21) —${N}"
+  echo -e "${B}— Порты инбаундов (быстро; подробно — п.19) —${N}"
   if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
     local dead
     dead=$(python3 - "$XUI_DB" <<'PYPORTS' 2>/dev/null
@@ -6370,7 +6370,7 @@ PYPORTS
     else
       local dl
       while IFS= read -r dl; do [[ -z "$dl" ]] && continue; bad "не слушается: $dl"; done <<<"$dead"
-      hint "systemctl restart x-ui; если не помогло — п.21/логи xray"
+      hint "systemctl restart x-ui; если не помогло — п.19/логи xray"
     fi
   fi
 
@@ -6453,7 +6453,7 @@ PYDOMS
   return 0
 }
 
-# п.20 с обёрткой: одиночный прогон или наблюдение каждые 10 сек
+# п.18 с обёрткой: одиночный прогон или наблюдение каждые 10 сек
 stack_doctor_menu() {
   stack_doctor
   local wm=""
@@ -6477,7 +6477,7 @@ fmt_bytes() {   # <bytes> → человекочитаемо
   else echo "${b} Б"; fi
 }
 
-# п.21: live-таблица по всем инбаундам — порт слушает?, серт (дней), клиенты, трафик
+# п.19: live-таблица по всем инбаундам — порт слушает?, серт (дней), клиенты, трафик
 inbounds_live() {
   line; echo -e "${B}   ИНБАУНДЫ — LIVE${N}"; line
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
@@ -6565,6 +6565,34 @@ PYLIVE
   return 0
 }
 
+# Единые пункты «установить/удалить»: смотрим текущее состояние и предлагаем
+# обратное действие — вместо двух отдельных пунктов меню.
+panel_manage() {
+  line; echo -e "${B}   ПАНЕЛЬ LUCX UI — УСТАНОВКА / УДАЛЕНИЕ${N}"; line
+  if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+    log "Панель уже установлена (x-ui.db: $XUI_DB)"
+    local go=""
+    askyn go "Удалить панель LucX UI со всеми данными?" "n"
+    [[ "$go" == true ]] && uninstall_panel_lucx
+    return 0
+  fi
+  log "Панель не найдена — установка."
+  install_lucx_panel
+}
+
+adguard_manage() {
+  line; echo -e "${B}   ADGUARD HOME — УСТАНОВКА / УДАЛЕНИЕ${N}"; line
+  if [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]]; then
+    log "AdGuard Home уже установлен (service: $ADG_SERVICE)"
+    local go=""
+    askyn go "Удалить AdGuard Home?" "n"
+    [[ "$go" == true ]] && uninstall_adguard
+    return 0
+  fi
+  log "AdGuard Home не найден — установка."
+  install_adguard_home
+}
+
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
@@ -6582,18 +6610,16 @@ run_menu_action() {
     10) certs_menu ;;
     11) firewall_menu ;;
     12) restore_firewall_state ;;
-    13) install_lucx_panel; pause ;;
-    14) install_adguard_home; pause ;;
+    13) panel_manage; pause ;;
+    14) adguard_manage; pause ;;
     15) sni_cleanup_stale; pause ;;
-    16) uninstall_adguard; pause ;;
-    17) uninstall_panel_lucx; pause ;;
-    18) change_admin_passwords; pause ;;
-    19) update_self; pause ;;
-    20) stack_doctor_menu; pause ;;
-    21) inbounds_live; pause ;;
-    22) decoy_settpl_all ;;
-    23) inbound_export_links ;;
-    24) inbound_change_domain ;;
+    16) change_admin_passwords; pause ;;
+    17) update_self; pause ;;
+    18) stack_doctor_menu; pause ;;
+    19) inbounds_live; pause ;;
+    20) decoy_settpl_all ;;
+    21) inbound_export_links ;;
+    22) inbound_change_domain ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -6639,7 +6665,7 @@ print(line(f"{dot(ngx)} nginx  {dot(xui)} x-ui  {adg} AdGuard  {dot(f2b)} f2b", 
 print(line(f"👥 инбаунды: {G}{nb}{N}   🔥 decoy-хиты: {Y}{att}{N}   ⛔ баны: {R}{bans}{N}", W))
 print(line(f"🔒 серты: мин. {cs}   💾 диск: {duse}%   📁 {db}", W))
 ufw = f"🧱 UFW {G}active{N}" if ufw_ok == "1" else f"🧱 UFW {R}down{N}"
-print(line(f"{ufw}   🩺 самодиагностика — п.20", W))
+print(line(f"{ufw}   🩺 самодиагностика — п.18", W))
 print(f"{B}└{'─'*W}┘{N}")
 print(f"{D}  └─ ◆ stack-manager · правка: {mtime}{N}")
 PYHDR
@@ -6680,18 +6706,16 @@ main_menu() {
     echo -e "  ${B}10)${N} 🔒 Управление сертификатами"
     echo -e "  ${B}11)${N} 🧱 Файрвол: только нужные порты"
     echo -e "  ${B}12)${N} 🧯 Восстановить состояние фаервола"
-    echo -e "  ${B}13)${N} 📥 Установить панель LucX UI"
-    echo -e "  ${B}14)${N} 🛰️  Установить AdGuard Home"
+    echo -e "  ${B}13)${N} 📥 Панель LucX UI: установить / удалить"
+    echo -e "  ${B}14)${N} 🛰️  AdGuard Home: установить / удалить"
     echo -e "  ${B}15)${N} 🧹 Очистка SNI: записи без инбаундов"
-    echo -e "  ${B}16)${N} ❌ Удалить AdGuard Home"
-    echo -e "  ${B}17)${N} ❌ Удалить панель LucX UI (x-ui)"
-    echo -e "  ${B}18)${N} 🔑 Сменить пароли admin (панель / AdGuard)"
-    echo -e "  ${B}19)${N} ⬇️  Обновить скрипт с GitHub"
-    echo -e "  ${B}20)${N} 🩺 Самодиагностика (проверка стека)"
-    echo -e "  ${B}21)${N} 📡 Инбаунды: live-таблица"
-    echo -e "  ${B}22)${N} 🎨 Decoy: сменить шаблон всем блокам"
-    echo -e "  ${B}23)${N} 📤 Экспорт ссылок инбаунда в файл"
-    echo -e "  ${B}24)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
+    echo -e "  ${B}16)${N} 🔑 Сменить пароли admin (панель / AdGuard)"
+    echo -e "  ${B}17)${N} ⬇️  Обновить скрипт с GitHub"
+    echo -e "  ${B}18)${N} 🩺 Самодиагностика (проверка стека)"
+    echo -e "  ${B}19)${N} 📡 Инбаунды: live-таблица"
+    echo -e "  ${B}20)${N} 🎨 Decoy: сменить шаблон всем блокам"
+    echo -e "  ${B}21)${N} 📤 Экспорт ссылок инбаунда в файл"
+    echo -e "  ${B}22)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
@@ -7001,7 +7025,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   check_os
   ensure_deps
   detect_env
-  [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — сервер работает не на свежем ядре. См. п.20 → «Ресурсы»."
+  [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — сервер работает не на свежем ядре. См. п.18 → «Ресурсы»."
   # Автобэкап x-ui.db + nginx-конфигов стека (последние 5 копий)
   auto_backup_stack
   # deploy-hook renew (сертиф. живут в live/, зеркала нет) + дедупликация
