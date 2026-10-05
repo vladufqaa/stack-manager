@@ -7114,9 +7114,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       install_adguard_home || warn "Установка не удалась — продолжаем без AdGuard."
       detect_env
     fi
-  else
-    log "AdGuard Home: ${ADG_SERVICE:-service} найден"   # одна тихая строка состояния
-  fi
+  fi   # установлен — молча (статус виден в шапке и п.6/п.18)
 
   # чистая установка → авто: инбаунды + настройка + UFW + итоговая сводка
   if [[ "$auto_full" == true ]]; then
