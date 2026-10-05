@@ -6592,52 +6592,100 @@ run_menu_action() {
   esac
 }
 
+# ─── Стиль меню: боксы со счётчиками (как RKN-GUARD) ─────────────────
+# Эмодзи занимают 2 ячейки терминала, поэтому для рамок считаем ширину
+# строки честно: ANSI-коды выкидываем, широкий Unicode = 2 ячейки.
+str_disp_width() {
+  local s w=0 i ch code
+  s=$(printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g')
+  for ((i=0; i<${#s}; i++)); do
+    ch="${s:i:1}"
+    printf -v code '%d' "'$ch" 2>/dev/null || code=63
+    if (( code == 65039 || code == 8205 )); then continue                      # FE0F / ZWJ
+    elif (( (code >= 127462 && code <= 129782) || (code >= 9728 && code <= 10175 && code != 10003) || code == 11014 || code == 11015 )); then
+      w=$((w+2))
+    else
+      w=$((w+1))
+    fi
+  done
+  echo "$w"
+}
+box_line()   { # │ текст, дополненный до ширины $2 │
+  local t=" $1" tw pad
+  tw=$(str_disp_width "$t"); pad=$(( $2 - tw )); (( pad < 0 )) && pad=0
+  printf '│%s%*s│' "$t" "$pad" ""
+}
+box_center() { # │ текст по центру ширины $2 │
+  local tw padl
+  tw=$(str_disp_width "$1"); padl=$(( ($2 - tw) / 2 )); (( padl < 0 )) && padl=0
+  printf '│%*s%s%*s│' "$padl" "" "$1" "$(( $2 - tw - padl ))" ""
+}
+svc_dot() { systemctl is-active --quiet "$1" 2>/dev/null && echo "🟢" || echo "🔴"; }
+
 main_menu() {
   decoy_full_init || true
+  local W=58
   while :; do
     clear
-    echo -e "${B}╔══════════════════════════════════════════════════════╗${N}"
-    echo -e "${B}║       STACK MANAGER — SNI-роутер + 3x-ui/LucX        ║${N}"
-    echo -e "${B}╚══════════════════════════════════════════════════════╝${N}"
-    echo "  x-ui.db:  ${XUI_DB:-не найден}"
-    if [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]]; then
-      echo "  AdGuard:  $(systemctl is-active "$ADG_SERVICE" 2>/dev/null || echo -)  ($ADG_SERVICE)"
-    else
-      echo "  AdGuard:  не найден"
-    fi
-    echo "  Nginx:    $(systemctl is-active nginx 2>/dev/null || echo -)  |  fail2ban: $(systemctl is-active fail2ban 2>/dev/null || echo -)"
-    echo "  UFW:      $(ufw_is_active && echo active || echo 'inactive/недоступен')"
-    echo "  xray:     ${XRAY_BIN:-не найден}"
-    line
-    echo "   1) Первичная настройка SNI-роутера"
-    echo "   2) Добавить / проверить inbound"
-    echo "   3) Удалить inbound"
-    echo "   4) Сменить decoy для SNI-домена"
-    echo "   5) Просмотр каталога decoy-шаблонов"
-    echo "   6) Показать статус"
-    echo "   7) Безопасность: баны, деко-логины, fail2ban"
-    echo "   8) Бэкап конфигурации"
-    echo "   9) Восстановить из бэкапа"
-    echo "  10) Управление сертификатами"
-    echo "  11) Файрвол: только нужные порты"
-    echo "  12) Восстановить состояние фаервола из снимка"
-    echo "  13) Установить панель LucX UI"
-    echo "  14) Установить AdGuard Home"
-    echo "  15) Очистка SNI: удалить записи без инбаундов"
-    echo "  16) Удалить AdGuard Home"
-    echo "  17) Удалить панель LucX UI (x-ui)"
-    echo "  18) Сменить пароли admin (панель / AdGuard)"
-    echo "  19) Обновить скрипт с GitHub"
-    echo "  20) Самодиагностика (проверка стека)"
-    echo "  21) Инбаунды: live-таблица (порты/серты/клиенты/трафик)"
-    echo "  22) Decoy: сменить шаблон всем блокам"
-    echo "  23) Экспорт ссылок инбаунда в файл"
-    echo "  24) Сменить домен инбаунда (без пересоздания)"
-    echo "   0) Выход     (q в любом вопросе — выход в меню)"
+    detect_env >/dev/null 2>&1 || true     # состояние для шапки
+    local b="" nb att bans amin duse adg_dot ufw_line crt d cd
+    printf -v b '═%.0s' $(seq 1 $W)
+    echo -e "${B}╔${b}╗${N}"
+    echo -e "${B}$(box_center "💜  STACK MANAGER" $W)${N}"
+    echo -e "${B}$(box_center "SNI-роутер · LucX/x-ui · AdGuard · decoy" $W)${N}"
+    echo -e "${B}╚${b}╝${N}"
+    echo -e "${B}┌$(printf '─%.0s' $(seq 1 $W))┐${N}"
+    adg_dot="➖"
+    [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && adg_dot=$(svc_dot "$ADG_SERVICE")
+    if ufw_is_active; then ufw_line="🧱 UFW ${G}active${N}"; else ufw_line="🧱 UFW ${R}down${N}"; fi
+    echo -e "${B}$(box_line "$(svc_dot nginx) nginx  $(svc_dot x-ui) x-ui  $adg_dot AdGuard  $(svc_dot fail2ban) f2b" $W)${N}"
+    nb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
+    att=$(tail -n 20000 "$DECOY_LOG_ACCESS" 2>/dev/null | grep -c "$(date +%d/%b/%Y)" 2>/dev/null); att=${att:-0}
+    bans=$(fail2ban-client get decoy-login banip 2>/dev/null | wc -w); bans=${bans// /}
+    echo -e "${B}$(box_line "👥 инбаунды: ${G}${nb:-0}${N}   🔥 decoy-хиты: ${Y}${att}${N}   ⛔ баны: ${R}${bans}${N}" $W)${N}"
+    amin=""
+    for crt in /etc/letsencrypt/live/*/fullchain.pem; do
+      [[ -f "$crt" ]] || continue
+      cd=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$crt" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+      [[ -z "$amin" || "$cd" -lt "$amin" ]] && amin=$cd
+    done
+    amin=${amin:-—}
+    if [[ "$amin" != "—" && "$amin" -lt 14 ]]; then amin="${R}${amin} дн${N}"; else amin="${amin} дн"; fi
+    duse=$(df -Pm / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
+    echo -e "${B}$(box_line "🔒 серты: мин. ${amin}   💾 диск: ${duse:-?}%   📁 $(basename "${XUI_DB:-нет}")" $W)${N}"
+    echo -e "${B}$(box_line "$ufw_line   🩺 самодиагностика — п.20" $W)${N}"
+    echo -e "${B}└$(printf '─%.0s' $(seq 1 $W))┘${N}"
+    echo -e "  ${Y}└─ ◆ stack-manager · правка: $(date -r "$0" '+%d.%m.%y %H:%M')${N}"
+    echo
+    echo -e "  ${B} 1)${N} 🧭 Первичная настройка SNI-роутера"
+    echo -e "  ${B} 2)${N} ➕ Добавить / проверить inbound"
+    echo -e "  ${B} 3)${N} 🗑️  Удалить inbound"
+    echo -e "  ${B} 4)${N} 🎭 Сменить decoy для SNI-домена"
+    echo -e "  ${B} 5)${N} 🖼️  Каталог decoy-шаблонов"
+    echo -e "  ${B} 6)${N} 📊 Показать статус"
+    echo -e "  ${B} 7)${N} 🛡️  Безопасность: баны, деко-логины, fail2ban"
+    echo -e "  ${B} 8)${N} 💾 Бэкап конфигурации"
+    echo -e "  ${B} 9)${N} ♻️  Восстановить из бэкапа"
+    echo -e "  ${B}10)${N} 🔒 Управление сертификатами"
+    echo -e "  ${B}11)${N} 🧱 Файрвол: только нужные порты"
+    echo -e "  ${B}12)${N} 🧯 Восстановить состояние фаервола"
+    echo -e "  ${B}13)${N} 📥 Установить панель LucX UI"
+    echo -e "  ${B}14)${N} 🛰️  Установить AdGuard Home"
+    echo -e "  ${B}15)${N} 🧹 Очистка SNI: записи без инбаундов"
+    echo -e "  ${B}16)${N} ❌ Удалить AdGuard Home"
+    echo -e "  ${B}17)${N} ❌ Удалить панель LucX UI (x-ui)"
+    echo -e "  ${B}18)${N} 🔑 Сменить пароли admin (панель / AdGuard)"
+    echo -e "  ${B}19)${N} ⬇️  Обновить скрипт с GitHub"
+    echo -e "  ${B}20)${N} 🩺 Самодиагностика (проверка стека)"
+    echo -e "  ${B}21)${N} 📡 Инбаунды: live-таблица"
+    echo -e "  ${B}22)${N} 🎨 Decoy: сменить шаблон всем блокам"
+    echo -e "  ${B}23)${N} 📤 Экспорт ссылок инбаунда в файл"
+    echo -e "  ${B}24)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
+    echo
+    echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
     local c="" rc
-    read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
-    detect_env >/dev/null 2>&1 || true     # освежить состояние после прошлого пункта
+    read -rp "$(echo -e "${Y}👉${N} Ваш выбор: ")" c || c="0"
     case "$c" in
       0) exit 0 ;;
       q|quit|exit|выход) exit 0 ;;
