@@ -6661,7 +6661,7 @@ print(f"{B}┌{'─'*W}┐{N}")
 print(line(f"{dot(ngx)} nginx  {dot(xui)} x-ui  {adg} AdGuard  {dot(f2b)} f2b", W))
 print(line(f"👥 инбаунды: {G}{nb}{N}   🔥 decoy-хиты: {Y}{att}{N}   ⛔ баны: {R}{bans}{N}", W))
 print(line(f"🔒 серты: мин. {cs}   💾 диск: {duse}%   📁 {db}", W))
-ufw = f"🧱 UFW {G}active{N}" if ufw_ok == "1" else f"🧱 UFW {R}down{N}"
+ufw = f"🚧 UFW {G}active{N}" if ufw_ok == "1" else f"🚧 UFW {R}down{N}"
 print(line(f"{ufw}   🩺 самодиагностика — п.18", W))
 print(f"{B}└{'─'*W}┘{N}")
 print(f"{D}  └─ ◆ stack-manager · правка: {mtime}{N}")
