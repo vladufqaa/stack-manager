@@ -6682,7 +6682,12 @@ main_menu() {
     ufw_ok=0; ufw_is_active && ufw_ok=1
     nb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
     att=$(tail -n 20000 "$DECOY_LOG_ACCESS" 2>/dev/null | grep -c "$(date +%d/%b/%Y)" 2>/dev/null); att=${att:-0}
-    bans=$(fail2ban-client get decoy-login banip 2>/dev/null | wc -w); bans=${bans// /}
+    # баны по ВСЕМ jail'ам (decoy-login + sshd + recidive…), не только decoy
+    bans=0
+    for j in $(fail2ban-client status 2>/dev/null | sed -n 's/^.*Jail list:\s*//p' | tr ',' ' '); do
+      n=$(fail2ban-client get "$j" banip 2>/dev/null | wc -w)
+      bans=$((bans + ${n:-0}))
+    done
     for crt in /etc/letsencrypt/live/*/fullchain.pem; do
       [[ -f "$crt" ]] || continue
       cd=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$crt" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
