@@ -6660,8 +6660,7 @@ EOF
 stealth_audit() {
   line; echo -e "${B}   СТЕЛС-АУДИТ (глазами сканера)${N}"; line
   local base="${WILDCARD_DOMAIN:-${PANEL_DOMAIN:-}}"
-  base="${base#*.}"   # *.vladufqaa.online → vladufqaa.online
-  # на случай «голого» домена/поддомена берём последние два лейбла
+  # последние два лейбла: *.vladufqaa.online / vladufqaa.online / panel.vladufqaa.online → vladufqaa.online
   local _p
   IFS='.' read -r -a _p <<<"$base"
   local _n=${#_p[@]}
@@ -6675,15 +6674,16 @@ stealth_audit() {
   else
     warn "UFW не активен — ВСЕ слушающие порты видны интернету!"
   fi
-  stealth_vis() {   # порт виден миру? (ufw off → виден всё)
+  stealth_vis() {   # порт/протокол виден миру? (ufw off → виден всё)
     [[ "$ufw_on" == 1 ]] || return 0
-    grep -qE "^${1}/" <<<"$allowed" || grep -qx "$1" <<<"$allowed"
+    grep -qE "^${1}/${2}([[:space:]]|$)" <<<"$allowed" \
+      || grep -qE "^${1}([[:space:]]|$)" <<<"$allowed"
   }
 
   echo; echo -e "${B}— 1. Слушающие TCP-порты —${N}"
   local p
   for p in $(ss -tln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; split($4,a,":"); print a[length(a)] }' | sort -un); do
-    if ! stealth_vis "$p"; then
+    if ! stealth_vis "$p" tcp; then
       ok "порт $p — слушается, но закрыт UFW (сканерам невидим)"
     elif [[ "$p" == "443" ]]; then
       ok "порт 443 — SNI-роутер (decoy-доктрина)"
@@ -6701,7 +6701,7 @@ stealth_audit() {
   local any_udp=0
   for p in $(ss -uln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; split($4,a,":"); print a[length(a)] }' | sort -un); do
     any_udp=1
-    if ! stealth_vis "$p"; then
+    if ! stealth_vis "$p" udp; then
       ok "udp $p — закрыт UFW (невидим)"
     elif [[ "$p" == "53" ]]; then
       warn "udp 53 — DNS; если отвечает наружу — open resolver (см. раздел 5)"
@@ -6729,7 +6729,7 @@ stealth_audit() {
   fi
 
   echo; echo -e "${B}— 4. HTTP :80 —${N}"
-  if ! stealth_vis "80"; then
+  if ! stealth_vis "80" tcp; then
     ok "80 закрыт UFW — невидим (ACME п.4 временно открывает сам)"
   else
     local code; code=$(curl -s -o /dev/null -w '%{http_code}' -m 6 http://127.0.0.1/ 2>/dev/null)
@@ -6741,7 +6741,7 @@ stealth_audit() {
   fi
 
   echo; echo -e "${B}— 5. SSH :22 —${N}"
-  if ! stealth_vis "22"; then
+  if ! stealth_vis "22" tcp; then
     ok "22 закрыт UFW для мира — сканерам невиден"
   else
     warn "22 открыт: host key Shodan связывает все твои IP (переезд не помогает)."
@@ -6752,7 +6752,7 @@ stealth_audit() {
   local udp53; udp53=$(ss -uln 2>/dev/null | awk 'NR>1 && $4 ~ /:53$/ && $4 !~ /^127\./ && $4 !~ /^\[::1\]/ {c++} END {print c+0}')
   if [[ "$udp53" -eq 0 ]]; then
     ok "53 наружу не слушается ✓"
-  elif ! stealth_vis "53"; then
+  elif ! stealth_vis "53" udp; then
     ok "53 слушается, но закрыт UFW ✓"
   else
     err "53 открыт миру — open resolver (абьюз + палево)! Закрой в UFW (п.11)."
