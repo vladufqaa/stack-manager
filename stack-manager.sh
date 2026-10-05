@@ -6593,34 +6593,51 @@ run_menu_action() {
 }
 
 # ─── Стиль меню: боксы со счётчиками (как RKN-GUARD) ─────────────────
-# Эмодзи занимают 2 ячейки терминала, поэтому для рамок считаем ширину
-# строки честно: ANSI-коды выкидываем, широкий Unicode = 2 ячейки.
-str_disp_width() {
-  local s w=0 i ch code
-  s=$(printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g')
-  for ((i=0; i<${#s}; i++)); do
-    ch="${s:i:1}"
-    printf -v code '%d' "'$ch" 2>/dev/null || code=63
-    if (( code == 65039 || code == 8205 )); then continue                      # FE0F / ZWJ
-    elif (( (code >= 127462 && code <= 129782) || (code >= 9728 && code <= 10175 && code != 10003) || code == 11014 || code == 11015 )); then
-      w=$((w+2))
-    else
-      w=$((w+1))
-    fi
-  done
-  echo "$w"
-}
-box_line()   { # │ текст, дополненный до ширины $2 │
-  local t=" $1" tw pad
-  tw=$(str_disp_width "$t"); pad=$(( $2 - tw )); (( pad < 0 )) && pad=0
-  printf '│%s%*s│' "$t" "$pad" ""
-}
-box_center() { # │ текст по центру ширины $2 │
-  local tw padl
-  tw=$(str_disp_width "$1"); padl=$(( ($2 - tw) / 2 )); (( padl < 0 )) && padl=0
-  printf '│%*s%s%*s│' "$padl" "" "$1" "$(( $2 - tw - padl ))" ""
-}
+# Рамки с эмодзи считает python3 (unicodedata): под LC_ALL=C баш итерирует
+# строку по БАЙТАМ и ломает выравнивание, поэтому ширина — не его работа.
 svc_dot() { systemctl is-active --quiet "$1" 2>/dev/null && echo "🟢" || echo "🔴"; }
+menu_header() { # <ngx> <xui> <adg> <f2b> <ufw_ok> <nb> <att> <bans> <amin> <duse> <db> <mtime>
+  python3 - "$@" <<'PYHDR'
+import sys, unicodedata, re
+G,R,Y,B,D,N = "\033[0;32m","\033[0;31m","\033[1;33m","\033[0;36m","\033[90m","\033[0m"
+ngx,xui,adg,f2b,ufw_ok,nb,att,bans,amin,duse,db,mtime = sys.argv[1:13]
+def w(s):
+    s = re.sub(r"\x1b\[[0-9;]*m", "", s)          # ANSI-коды не видны — не ширина
+    total, prev = 0, 0
+    for ch in s:
+        total += wch(ord(ch), prev)
+        prev = ord(ch)
+    return total
+def wch(cp, prev):
+    if cp == 0xFE0F:
+        return 1 if 0x2B00 <= prev <= 0x2BFF else 0   # ⬇️/➡️ становятся широкими
+    if cp == 0x200D:
+        return 0
+    wide = unicodedata.east_asian_width(chr(cp)) in ('W','F') \
+        or 0x1F000 <= cp <= 0x1FAFF or 0x2600 <= cp <= 0x27BF
+    return 2 if wide else 1
+def line(s, W):
+    return "│" + s + " " * max(W - w(s), 0) + "│"
+def center(s, W):
+    pad = max(W - w(s), 0); l = pad // 2
+    return "│" + " " * l + s + " " * (pad - l) + "│"
+W = 58
+dot = lambda v: "🟢" if v == "1" else "🔴"
+cs = "—" if amin == "—" else (f"{R}{amin} дн{N}" if amin.isdigit() and int(amin) < 14 else f"{amin} дн")
+print(f"{B}╔{'═'*W}╗{N}")
+print(f"{B}{center('💜  STACK MANAGER', W)}{N}")
+print(f"{B}{center('SNI-роутер · LucX/x-ui · AdGuard · decoy', W)}{N}")
+print(f"{B}╚{'═'*W}╝{N}")
+print(f"{B}┌{'─'*W}┐{N}")
+print(line(f"{dot(ngx)} nginx  {dot(xui)} x-ui  {adg} AdGuard  {dot(f2b)} f2b", W))
+print(line(f"👥 инбаунды: {G}{nb}{N}   🔥 decoy-хиты: {Y}{att}{N}   ⛔ баны: {R}{bans}{N}", W))
+print(line(f"🔒 серты: мин. {cs}   💾 диск: {duse}%   📁 {db}", W))
+ufw = f"🧱 UFW {G}active{N}" if ufw_ok == "1" else f"🧱 UFW {R}down{N}"
+print(line(f"{ufw}   🩺 самодиагностика — п.20", W))
+print(f"{B}└{'─'*W}┘{N}")
+print(f"{D}  └─ ◆ stack-manager · правка: {mtime}{N}")
+PYHDR
+}
 
 main_menu() {
   decoy_full_init || true
@@ -6628,34 +6645,22 @@ main_menu() {
   while :; do
     clear
     detect_env >/dev/null 2>&1 || true     # состояние для шапки
-    local b="" nb att bans amin duse adg_dot ufw_line crt d cd
-    printf -v b '═%.0s' $(seq 1 $W)
-    echo -e "${B}╔${b}╗${N}"
-    echo -e "${B}$(box_center "💜  STACK MANAGER" $W)${N}"
-    echo -e "${B}$(box_center "SNI-роутер · LucX/x-ui · AdGuard · decoy" $W)${N}"
-    echo -e "${B}╚${b}╝${N}"
-    echo -e "${B}┌$(printf '─%.0s' $(seq 1 $W))┐${N}"
-    adg_dot="➖"
+    local adg_dot="➖" nb att bans amin="" cd crt duse ufw_ok
     [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && adg_dot=$(svc_dot "$ADG_SERVICE")
-    if ufw_is_active; then ufw_line="🧱 UFW ${G}active${N}"; else ufw_line="🧱 UFW ${R}down${N}"; fi
-    echo -e "${B}$(box_line "$(svc_dot nginx) nginx  $(svc_dot x-ui) x-ui  $adg_dot AdGuard  $(svc_dot fail2ban) f2b" $W)${N}"
+    ufw_ok=0; ufw_is_active && ufw_ok=1
     nb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
     att=$(tail -n 20000 "$DECOY_LOG_ACCESS" 2>/dev/null | grep -c "$(date +%d/%b/%Y)" 2>/dev/null); att=${att:-0}
     bans=$(fail2ban-client get decoy-login banip 2>/dev/null | wc -w); bans=${bans// /}
-    echo -e "${B}$(box_line "👥 инбаунды: ${G}${nb:-0}${N}   🔥 decoy-хиты: ${Y}${att}${N}   ⛔ баны: ${R}${bans}${N}" $W)${N}"
-    amin=""
     for crt in /etc/letsencrypt/live/*/fullchain.pem; do
       [[ -f "$crt" ]] || continue
       cd=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$crt" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
       [[ -z "$amin" || "$cd" -lt "$amin" ]] && amin=$cd
     done
     amin=${amin:-—}
-    if [[ "$amin" != "—" && "$amin" -lt 14 ]]; then amin="${R}${amin} дн${N}"; else amin="${amin} дн"; fi
     duse=$(df -Pm / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
-    echo -e "${B}$(box_line "🔒 серты: мин. ${amin}   💾 диск: ${duse:-?}%   📁 $(basename "${XUI_DB:-нет}")" $W)${N}"
-    echo -e "${B}$(box_line "$ufw_line   🩺 самодиагностика — п.20" $W)${N}"
-    echo -e "${B}└$(printf '─%.0s' $(seq 1 $W))┘${N}"
-    echo -e "  ${Y}└─ ◆ stack-manager · правка: $(date -r "$0" '+%d.%m.%y %H:%M')${N}"
+    menu_header "$(svc_dot nginx)" "$(svc_dot x-ui)" "$adg_dot" "$(svc_dot fail2ban)" \
+      "$ufw_ok" "${nb:-0}" "${att:-0}" "${bans:-0}" "$amin" "${duse:-?}" \
+      "$(basename "${XUI_DB:-нет}")" "$(date -r "$0" '+%d.%m.%y %H:%M')"
     echo
     echo -e "  ${B} 1)${N} 🧭 Первичная настройка SNI-роутера"
     echo -e "  ${B} 2)${N} ➕ Добавить / проверить inbound"
