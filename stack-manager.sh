@@ -6650,8 +6650,18 @@ ssh_keys_setup() {
   echo "      ssh-keygen -y -f \"\$env:TEMP\\kd3\""
   echo "    Ключа нет — создай: ssh-keygen -t ed25519  (Enter — всё по умолчанию)"
   local pub=""
-  ask pub "Вставь строку публичного ключа (ssh-ed25519 AAAA…)" "" '^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521))[ ]+[A-Za-z0-9+/=]+'
+  ask pub "Вставь строку публичного ключа (можно только AAAA… — тип определю сам)" "" '^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521))[ ]+[A-Za-z0-9+/=]+|^AAAA[A-Za-z0-9+/=]+$'
   [[ -z "$pub" ]] && return 0
+  # тело ключа без префикса типа — дополняем по шапке base64-блоба
+  if [[ "$pub" != *" "* ]]; then
+    case "$pub" in
+      AAAAC3NzaC1lZDI1NTE5*) pub="ssh-ed25519 $pub" ;;
+      AAAAB3NzaC1yc2*)       pub="ssh-rsa $pub" ;;
+      AAAAE2VjZHNh*)         pub="ecdsa-sha2-nistp256 $pub" ;;
+      *) err "Строка не похожа на публичный ключ OpenSSH (нет типа и шапка не ssh-блоб)"; return 1 ;;
+    esac
+    log "Тип ключа определён: ${pub%% *}"
+  fi
   mkdir -p /root/.ssh && chmod 700 /root/.ssh
   touch "$ak" && chmod 600 "$ak"
   if grep -qF "$pub" "$ak" 2>/dev/null; then
