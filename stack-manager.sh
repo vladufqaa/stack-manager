@@ -6596,6 +6596,80 @@ adguard_manage() {
 # Гигиена nginx и логов: server_tokens off, security-заголовки на decoy,
 # ротация decoy-логов (если не покрыта системным logrotate).
 # =====================================================================
+# Апекс/catch-all decoy: неизвестный SNI и основной домен показывают заглушку,
+# а не стоковую страницу nginx. 443 — stream-роутер (map $ssl_preread_server_name):
+# его default и запись апекса направляются на decoy-бекенд 127.0.0.1:8443 —
+# обычный decoy-блок stack.conf с маркером (управляется п.4/п.5, домен «_»).
+ensure_apex_decoy() {
+  local stream_conf=""
+  stream_conf=$(grep -rls 'map \$ssl_preread_server_name' /etc/nginx/streams-enabled/ /etc/nginx/streams-available/ 2>/dev/null | head -1)
+  if [[ -z "$stream_conf" ]]; then
+    warn "  апекс-decoy: stream-конфиг с ssl_preread не найден — пропускаю"
+    return 1
+  fi
+  # серт: live-каталог базового домена, иначе первый из live/
+  local base="" cert_dir="" lbl=()
+  [[ -n "${WILDCARD_DOMAIN:-}" ]] && base="$WILDCARD_DOMAIN"
+  [[ -z "$base" && -n "${PANEL_DOMAIN:-}" ]] && base="$PANEL_DOMAIN"
+  if [[ -n "$base" ]]; then
+    IFS='.' read -r -a lbl <<<"$base"
+    (( ${#lbl[@]} >= 2 )) && base="${lbl[-2]}.${lbl[-1]}"
+  fi
+  [[ -n "$base" && -d "/etc/letsencrypt/live/$base" ]] && cert_dir="/etc/letsencrypt/live/$base"
+  [[ -z "$cert_dir" ]] && cert_dir=$(ls -d /etc/letsencrypt/live/* 2>/dev/null | head -1)
+  if [[ -z "$cert_dir" ]]; then
+    warn "  апекс-decoy: серт в /etc/letsencrypt/live не найден — пропускаю"
+    return 1
+  fi
+
+  # 1) бекенд: mk_decoy умеет upsert; создаю только если блока для «_» ещё нет,
+  #    чтобы не перетирать шаблон, выбранный через п.4
+  local root="/var/www/decoy-apex" created=0
+  if ! grep -q '^# >>> decoy .* domain=_$' "$STACK_CONF" 2>/dev/null; then
+    [[ -f "$root/index.html" ]] || {
+      mkdir -p "$root"
+      cp -f "$DECOY_TPL_DIR/default.html" "$root/index.html" 2>/dev/null || true
+      chown -R www-data:www-data "$root" 2>/dev/null || true
+    }
+    mk_decoy 8443 "_" "$cert_dir/fullchain.pem" "$cert_dir/privkey.pem" "$root" "default" "ua404=1"
+    created=1
+    log "апекс-decoy: бекенд 127.0.0.1:8443 создан (шаблон default)"
+  fi
+
+  # 2) stream-маршрутизация: default и запись апекса → 8443
+  local sed_base=""; [[ -n "$base" ]] && sed_base="${base//./\\.}"
+  local stream_changed=0
+  if ! grep -Eq '^[[:space:]]*default[[:space:]]+127\.0\.0\.1:8443;' "$stream_conf" \
+     || { [[ -n "$sed_base" ]] && ! grep -Eq "^[[:space:]]*$sed_base[[:space:]]+127\.0\.0\.1:8443;" "$stream_conf"; }; then
+    cp -a "$stream_conf" "${stream_conf}.bak-apex-$(date +%Y%m%d-%H%M%S)"
+    # default → 8443 (только внутри блока map)
+    sed -i -E '/map \$ssl_preread_server_name/,/^[}]/ { s#^([[:space:]]*default[[:space:]]+)[^;]+;#\1 127.0.0.1:8443;# }' "$stream_conf"
+    # запись апекса → 8443 (кроме случая, когда апекс и есть домен панели)
+    if [[ -n "$sed_base" && "$base" != "${PANEL_DOMAIN:-}" ]]; then
+      sed -i -E "/map \$ssl_preread_server_name/,/^[}]/ { s#^([[:space:]]*$sed_base[[:space:]]+)[^;]+;#\1 127.0.0.1:8443;# }" "$stream_conf"
+    fi
+    stream_changed=1
+  fi
+
+  (( created || stream_changed )) || { log "апекс-decoy: уже настроен"; return 0; }
+
+  if ! nginx -t >/dev/null 2>&1; then
+    err "апекс-decoy: nginx -t не прошёл, откатываю stream-конфиг:"
+    nginx -t 2>&1 | tail -4 | sed 's/^/    /'
+    [[ $stream_changed -eq 1 ]] && {
+      local bak; bak=$(ls -t "${stream_conf}".bak-apex-* 2>/dev/null | head -1)
+      [[ -n "$bak" ]] && cp -a "$bak" "$stream_conf"
+    }
+    (( created )) && stack_del_decoy "_"
+    return 1
+  fi
+  nginx_reload || true
+  audit "nginx: апекс/catch-all → decoy 127.0.0.1:8443 ($stream_conf)"
+  log "апекс-decoy: активен — неизвестный SNI и основной домен показывают заглушку"
+  warn "  сменить шаблон апекса: п.4, домен вводи как «_»"
+  return 0
+}
+
 nginx_hygiene() {
   line; echo -e "${B}   ГИГИЕНА NGINX И ЛОГОВ${N}"; line
   mkdir -p "$BACKUP_DIR" 2>/dev/null || true
@@ -6634,6 +6708,8 @@ EOF
     sed -i '/^    ssl_certificate_key /a\    include /etc/nginx/snippets/decoy-headers.conf;' "$STACK_CONF"
     log "заголовки decoy: подключены ко всем блокам stack.conf"; audit "nginx: decoy-заголовки (nosniff/SAMEORIGIN/referrer)"; changed=1
   fi
+  # 2b) апекс/catch-all decoy: безымянные SNI и основной домен — заглушка
+  ensure_apex_decoy || true
   # 3) ротация decoy-логов (если не покрыта общим logrotate nginx)
   if grep -rqs 'var/log/nginx' /etc/logrotate.d/ 2>/dev/null; then
     log "ротация логов nginx: уже настроена (/etc/logrotate.d)"
