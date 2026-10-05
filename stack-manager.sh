@@ -6598,8 +6598,10 @@ adguard_manage() {
 # =====================================================================
 # Апекс/catch-all decoy: неизвестный SNI и основной домен показывают заглушку,
 # а не стоковую страницу nginx. 443 — stream-роутер (map $ssl_preread_server_name):
-# его default и запись апекса направляются на decoy-бекенд 127.0.0.1:8443 —
-# обычный decoy-блок stack.conf с маркером (управляется п.4/п.5, домен «_»).
+# его default и запись апекса направляются на decoy-бекенд — обычный decoy-блок
+# stack.conf с маркером (управляется п.4/п.5, домен «_»). Порт бекенда выбирается
+# из свободных: 8443 бывает занят инбаундом (anytls) — тогда nginx при reload
+# МОЛЧА откатывается к старому конфигу, поэтому после reload проверяем слушателя.
 ensure_apex_decoy() {
   local stream_conf=""
   stream_conf=$(grep -rls 'map \$ssl_preread_server_name' /etc/nginx/streams-enabled/ /etc/nginx/streams-available/ 2>/dev/null | head -1)
@@ -6635,36 +6637,66 @@ ensure_apex_decoy() {
     return 1
   fi
 
-  # 1) бекенд: mk_decoy умеет upsert; создаю только если блока для «_» ещё нет,
-  #    чтобы не перетирать шаблон, выбранный через п.4
+  # 0) свободный порт для бекенда: не locked, никем не слушается, не порт инбаунда
+  local aport="" c
+  for c in 8443 8448 9443 10443; do
+    fw_port_locked "$c" && continue
+    ss -tln 2>/dev/null | grep -q ":$c " && continue
+    if [[ -n "${XUI_DB:-}" && -f "$XUI_DB" ]]; then
+      [[ "$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1 AND port=$c;" 2>/dev/null)" == "0" ]] || continue
+    fi
+    aport=$c; break
+  done
+  if [[ -z "$aport" ]]; then
+    warn "  апекс-decoy: не нашёл свободный порт — пропускаю"
+    return 1
+  fi
+
+  # 1) бекенд: если блок «_» уже есть на занятом/другом порту — мигрирую,
+  #    сохраняя шаблон, root и серт, выбранные ранее (п.4 их меняет дальше)
   local root="/var/www/decoy-apex" created=0
-  if ! grep -q '^# >>> decoy .* domain=_$' "$STACK_CONF" 2>/dev/null; then
+  local ml; ml=$(grep '^# >>> decoy .* domain=_$' "$STACK_CONF" 2>/dev/null | head -1)
+  if [[ -z "$ml" ]]; then
     [[ -f "$root/index.html" ]] || {
       mkdir -p "$root"
       cp -f "$DECOY_TPL_DIR/default.html" "$root/index.html" 2>/dev/null || true
       chown -R www-data:www-data "$root" 2>/dev/null || true
     }
-    mk_decoy 8443 "_" "$cert_dir/fullchain.pem" "$cert_dir/privkey.pem" "$root" "default" "ua404=1"
+    mk_decoy "$aport" "_" "$cert_dir/fullchain.pem" "$cert_dir/privkey.pem" "$root" "default" "ua404=1"
     created=1
-    log "апекс-decoy: бекенд 127.0.0.1:8443 создан (шаблон default)"
+    log "апекс-decoy: бекенд 127.0.0.1:$aport создан (шаблон default)"
+  else
+    local mport; mport=$(sed -E 's/^# >>> decoy port=([0-9]+).*/\1/' <<<"$ml")
+    if [[ "$mport" != "$aport" ]]; then
+      local mroot mcert mkey mtpl mua
+      mroot=$(sed -E 's/.*[[:space:]]root=([^ ]+).*/\1/' <<<"$ml")
+      mcert=$(sed -E 's/.*[[:space:]]cert=([^ ]+).*/\1/' <<<"$ml")
+      mkey=$(sed -E 's/.*[[:space:]]key=([^ ]+).*/\1/' <<<"$ml")
+      mtpl=$(sed -E 's/.*[[:space:]]tpl=([^ ]+).*/\1/' <<<"$ml")
+      mua=$(sed -E 's/.*[[:space:]]ua404=([^ ]+).*/\1/' <<<"$ml")
+      stack_del_decoy "_"
+      mk_decoy "$aport" "_" "${mcert:-$cert_dir/fullchain.pem}" "${mkey:-$cert_dir/privkey.pem}" "${mroot:-$root}" "${mtpl:-default}" "ua404=${mua:-1}"
+      created=1
+      log "апекс-decoy: порт $mport занят — бекенд мигрировал на 127.0.0.1:$aport (шаблон ${mtpl:-default} сохранён)"
+    fi
   fi
+  aport=$(grep '^# >>> decoy .* domain=_$' "$STACK_CONF" 2>/dev/null | head -1 | sed -E 's/^# >>> decoy port=([0-9]+).*/\1/')
+  [[ -z "$aport" ]] && { warn "  апекс-decoy: маркер «_» не найден — пропускаю"; return 1; }
 
-  # 2) stream-маршрутизация: default и запись апекса → 8443
+  # 2) stream-маршрутизация: default и запись апекса → порт бекенда
   local sed_base=""; [[ -n "$base" ]] && sed_base="${base//./\\.}"
   local stream_changed=0
-  if ! grep -Eq '^[[:space:]]*default[[:space:]]+127\.0\.0\.1:8443;' "$stream_conf" \
-     || { [[ -n "$sed_base" ]] && ! grep -Eq "^[[:space:]]*$sed_base[[:space:]]+127\.0\.0\.1:8443;" "$stream_conf"; }; then
+  if ! grep -Eq "^[[:space:]]*default[[:space:]]+127\.0\.0\.1:$aport;" "$stream_conf" \
+     || { [[ -n "$sed_base" ]] && ! grep -Eq "^[[:space:]]*$sed_base[[:space:]]+127\.0\.0\.1:$aport;" "$stream_conf"; }; then
     cp -a "$stream_conf" "${stream_conf}.bak-apex-$(date +%Y%m%d-%H%M%S)"
-    # default → 8443 (только внутри блока map)
-    sed -i -E '/map \$ssl_preread_server_name/,/^[}]/ { s#^([[:space:]]*default[[:space:]]+)[^;]+;#\1 127.0.0.1:8443;# }' "$stream_conf"
-    # запись апекса → 8443 (кроме случая, когда апекс и есть домен панели)
+    sed -i -E "/map \$ssl_preread_server_name/,/^[}]/ { s#^([[:space:]]*default[[:space:]]+)[^;]+;#\1 127.0.0.1:$aport;# }" "$stream_conf"
     if [[ -n "$sed_base" && "$base" != "${PANEL_DOMAIN:-}" ]]; then
-      sed -i -E "/map \$ssl_preread_server_name/,/^[}]/ { s#^([[:space:]]*$sed_base[[:space:]]+)[^;]+;#\1 127.0.0.1:8443;# }" "$stream_conf"
+      sed -i -E "/map \$ssl_preread_server_name/,/^[}]/ { s#^([[:space:]]*$sed_base[[:space:]]+)[^;]+;#\1 127.0.0.1:$aport;# }" "$stream_conf"
     fi
     stream_changed=1
   fi
 
-  (( created || stream_changed )) || { log "апекс-decoy: уже настроен"; return 0; }
+  (( created || stream_changed )) || { log "апекс-decoy: уже настроен (порт $aport)"; return 0; }
 
   if ! nginx -t >/dev/null 2>&1; then
     err "апекс-decoy: nginx -t не прошёл, откатываю stream-конфиг:"
@@ -6677,7 +6709,14 @@ ensure_apex_decoy() {
     return 1
   fi
   nginx_reload || true
-  audit "nginx: апекс/catch-all → decoy 127.0.0.1:8443 ($stream_conf)"
+  # ВЕРИФИКАЦИЯ: reload может «пройти», а bind — упасть (порт занят): тогда
+  # nginx молча продолжает по старому конфигу. Порт обязан слушать nginx.
+  sleep 0.4
+  if ! ss -tlnp 2>/dev/null | grep ":$aport " | grep -q 'nginx'; then
+    err "апекс-decoy: reload не применился — 127.0.0.1:$aport НЕ слушается nginx'ом (порт занят другим процессом?)"
+    return 1
+  fi
+  audit "nginx: апекс/catch-all → decoy 127.0.0.1:$aport ($stream_conf)"
   log "апекс-decoy: активен — неизвестный SNI и основной домен показывают заглушку"
   warn "  сменить шаблон апекса: п.4, домен вводи как «_»"
   return 0
