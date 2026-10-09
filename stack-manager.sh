@@ -5600,7 +5600,7 @@ reality_ext_hide() {
 }
 
 configure_sni_for_inbound() {
-  local id="$1" proto="$2" port="$3" panel_domain="$4" pre_domain="${5:-}" pre_tpl="${6:-default}"
+  local id="$1" proto="$2" port="$3" panel_domain="$4" pre_domain="${5:-}" pre_tpl="${6:-}"
   is_udp_proto "$proto" && { warn "UDP ($proto) не маршрутизируется через SNI."; return 0; }
   [[ ! -f "$SNI_CONF" ]] && { err "$SNI_CONF не найден — сначала выполните 'Первичную настройку SNI-роутера' (пункт 1)."; return 1; }
   sni_used_load
@@ -5638,7 +5638,9 @@ configure_sni_for_inbound() {
       fi
       if [[ -n "$cp_line" ]]; then
         c="${cp_line%% *}"; k="${cp_line##* }"
-        mk_decoy "$tls_port" "$existing_domain" "$c" "$k" "/var/www/decoy-$id" "default"
+        local _dtpl=""
+        [[ -t 0 ]] && decoy_template_choose _dtpl "Decoy-заглушка для $existing_domain" "corporate"
+        mk_decoy "$tls_port" "$existing_domain" "$c" "$k" "/var/www/decoy-$id" "${_dtpl:-default}"
         reality_set_dest "$id" "$tls_port" "$existing_domain"
         nginx_reload || true
         systemctl restart x-ui >/dev/null 2>&1 || true
@@ -5735,10 +5737,16 @@ configure_sni_for_inbound() {
     fi
     local tls_port=$(( 4444 + id ))
     while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
+    # шаблон заглушки: мастер создания передаёт его явно (pre_tpl); при ручной
+    # настройке п.2 — спрашиваем здесь
+    if [[ -z "$pre_tpl" && -t 0 ]]; then
+      decoy_template_choose pre_tpl "Decoy-заглушка для $domain (страница на SNI-домене)" "corporate"
+    fi
+    pre_tpl="${pre_tpl:-default}"
     mk_decoy "$tls_port" "$domain" "$cert" "$key" "/var/www/decoy-$id" "$pre_tpl"
     reality_set_dest "$id" "$tls_port" "$domain"   # dest = внутренний IP decoy nginx + serverNames = домен
     systemctl restart x-ui >/dev/null 2>&1 || true   # панель сразу подхватит новый dest
-    log "  + decoy (Reality) на порту $tls_port${pre_tpl:+ ($pre_tpl)}"
+    log "  + decoy (Reality) на порту $tls_port ($pre_tpl)"
   fi
 
   # vless/trojan + TLS (не reality): заглушка для пробоев — не-протокольный
@@ -5748,11 +5756,18 @@ configure_sni_for_inbound() {
     local has_fb=""
     has_fb=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     if [[ -z "$has_fb" || "$has_fb" == "[]" || "$has_fb" == "null" ]]; then
-      systemctl stop x-ui >/dev/null 2>&1 || true
-      if sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":80}]') WHERE id=$id;" 2>/dev/null; then
-        log "  + заглушка vless/tls: fallback → 127.0.0.1:80 (пробой браузером увидит сайт)"
+      # заглушка включается по желанию (в не-TTY — по умолчанию да)
+      local want_fb=true
+      [[ -t 0 ]] && askyn want_fb "Заглушка для #$id ($domain): пробой браузером → сайт на :80?" "y"
+      if [[ "$want_fb" == true ]]; then
+        systemctl stop x-ui >/dev/null 2>&1 || true
+        if sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":80}]') WHERE id=$id;" 2>/dev/null; then
+          log "  + заглушка vless/tls: fallback → 127.0.0.1:80 (пробой браузером увидит сайт)"
+        fi
+        systemctl start x-ui >/dev/null 2>&1 || true
+      else
+        log "  заглушка vless/tls отключена по выбору"
       fi
-      systemctl start x-ui >/dev/null 2>&1 || true
     fi
   fi
 
@@ -7151,58 +7166,136 @@ decoy_ensure_all() {
   pause
 }
 
+# ── Выборочный decoy: выбрать SNI-инбаунд → его заглушка ────────────────
+#   Свой Reality     → выбор шаблона (создать/сменить), dest обновится
+#   VLESS/Trojan+TLS → вкл/выкл fallback на 127.0.0.1:80
+#   TG WEB-PROXY     → отказ (инбаунд сам проксирует живую цель)
+#   Чужой Reality    → отказ (спрятан за SNI цели)
+#   naive/anytls/trusttunnel  → отказ: TLS терминирует sidecar LucX,
+#       nginx-декой в цепочку не вставить (сломает протокол)
+decoy_pick_inbound() {
+  stack_ensure
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
+  local -a L=()
+  local dom be id proto port mark
+  echo
+  echo -e "${B}▸ SNI-инбаунды:${N}"
+  while IFS='|' read -r dom be; do
+    [[ "$be" =~ ^inb_([0-9]+)_backend$ ]] || continue
+    id="${BASH_REMATCH[1]}"
+    proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
+    [[ -z "$proto" ]] && continue
+    port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    mark="декоя нет"
+    stack_decoy_meta "$dom" >/dev/null 2>&1 && mark="декой есть"
+    L+=("$dom|$id|$proto|$port")
+    printf "  %2d) #%-3s %-30s %-9s :%-5s %s\n" "${#L[@]}" "$id" "$dom" "$proto" "$port" "$mark"
+  done < <(awk '
+    /^map / { inmap=1; next }
+    inmap && /^}/ { inmap=0 }
+    inmap && /^[[:space:]]/ && NF >= 2 {
+      dom = $1; sub(/;$/, "", dom); be = $2; sub(/;$/, "", be)
+      if (dom != "" && dom != "default" && be ~ /_backend$/ && be !~ /^(panel|agh)_backend$/) print dom "|" be
+    }' "$SNI_CONF" 2>/dev/null)
+  [[ ${#L[@]} -eq 0 ]] && { warn "SNI-инбаундов не найдено — сначала п.2"; pause; return 1; }
+  echo
+  local pick=""
+  ask pick "Номер инбаунда (0 — отмена)" "0" '^[0-9]+$'
+  [[ "$pick" == "0" ]] && return 0
+  (( pick > ${#L[@]} )) && { err "Нет такого номера"; pause; return 1; }
+  IFS='|' read -r dom id proto port <<<"${L[$((pick-1))]}"
+  local st
+  st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  local dest
+  dest=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),json_extract(stream_settings,'\$.realitySettings.target'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  dest="${dest%%:*}"
+  if [[ "$proto" == "tproxy" ]]; then
+    warn "TG WEB-PROXY ($dom): decoy не ставится — инбаунд сам проксирует живую цель."
+    pause; return 0
+  fi
+  if [[ -n "$dest" && "$dest" != "127.0.0.1" ]]; then
+    warn "Чужой Reality ($dom → $dest): decoy не нужен — домен спрятан за SNI цели."
+    pause; return 0
+  fi
+  if [[ "$proto" == "vless" ]] && grep -qi '"security": *"reality"' <<<"$st"; then
+    local tpl="" meta dport="" c="" k="" root=""
+    decoy_template_choose tpl "Decoy для #$id ($dom)" "corporate"
+    meta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
+    if [[ -n "$meta" ]]; then
+      read -r dport root c k <<<"$meta"
+      mk_decoy "$dport" "$dom" "$c" "$k" "$root" "$tpl"
+    else
+      local cp_line
+      cp_line=$(cert_paths "$dom") || true
+      [[ -z "$cp_line" ]] && { cert_issue "$dom" || true; cp_line=$(cert_paths "$dom") || true; }
+      [[ -z "$cp_line" ]] && { err "Серта $dom нет — decoy отложен (п.10, затем повторить)"; pause; return 1; }
+      c="${cp_line%% *}"; k="${cp_line##* }"
+      dport=$(( 4444 + id ))
+      while ss -tlnH "sport = :$dport" 2>/dev/null | grep -q .; do dport=$((dport+1)); done
+      mk_decoy "$dport" "$dom" "$c" "$k" "/var/www/decoy-$id" "$tpl"
+    fi
+    db_protect_suspend reality_set_dest "$id" "$dport" "$dom"
+    nginx_reload || true
+    log "Decoy #$id ($dom): «$tpl» на 127.0.0.1:$dport"
+    pause; return 0
+  fi
+  if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$st"; then
+    local has_fb want=""
+    has_fb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    if [[ -z "$has_fb" || "$has_fb" == "[]" || "$has_fb" == "null" ]]; then
+      askyn want "Включить заглушку для #$id ($dom): пробой браузером → сайт на :80?" "y"
+      if [[ "$want" == true ]]; then
+        db_protect_suspend sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":80}]') WHERE id=$id;"
+        systemctl restart x-ui >/dev/null 2>&1 || true
+        log "Fallback включен: посторонний видит сайт :80, клиенты — VLESS."
+      fi
+    else
+      askyn want "Fallback уже включен — убрать его у #$id ($dom)?" "n"
+      if [[ "$want" == true ]]; then
+        db_protect_suspend sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_remove(settings,'\$.fallbacks') WHERE id=$id;"
+        systemctl restart x-ui >/dev/null 2>&1 || true
+        log "Fallback убран."
+      fi
+    fi
+    pause; return 0
+  fi
+  case "$proto" in
+    naive|anytls|trusttunnel|trust-tunnel|hy2|hysteria)
+      warn "$proto ($dom): TLS терминирует sidecar LucX — nginx-декой в цепочку не вставить (сломает протокол)."
+      warn "Посторонний вид уже даёт сам sidecar (отвечает, а не молчит)."
+      ;;
+    *)
+      warn "$proto ($dom): decoy-механика для этого протокола не применяется."
+      ;;
+  esac
+  pause; return 0
+}
+
 change_decoy() {
   line; echo -e "${B}   DECOY ДЛЯ SNI-ДОМЕНОВ${N}"; line
   stack_ensure
   echo "  1) Раздать decoy всем SNI-инбаундам (кроме TG WEB-PROXY)"
-  echo "  2) Сменить decoy конкретного домена"
+  echo "  2) Выбрать инбаунд → назначить/сменить его decoy"
+  echo "  3) Сменить decoy домена панели"
   echo "  0) Назад"
   local m=""
-  ask m "Выбор" "2" '^[0-2]$'
+  ask m "Выбор" "2" '^[0-3]$'
   case "$m" in
     1) decoy_ensure_all; return 0 ;;
+    2) decoy_pick_inbound; return 0 ;;
     0) return 0 ;;
   esac
-  local mline mport mdom
-  local -a DOM_LIST=()
+  # ── 3) decoy домена панели ──
   local panel_conf="$STACK_CONF"
   local panel_dom=""
   panel_dom=$(xui_get subDomain 2>/dev/null || true)
+  [[ -z "$panel_dom" || "$panel_dom" == "null" ]] && panel_dom=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$panel_dom" || "$panel_dom" == "null" ]] && { err "Домен панели не найден — сначала п.1"; pause; return 1; }
+  local domain="$panel_dom"
+  log "Домен панели: $domain"
 
-  # ── Блок 1: домены инбаундов (из маркеров stack.conf)
-  echo -e "${B}▸ Домены инбаундов (SNI):${N}"
-  while IFS= read -r mline; do
-    [[ "$mline" != "# >>> decoy "* ]] && continue
-    mport=$(grep -oE 'port=[0-9]+'   <<<"$mline" | head -1 | cut -d= -f2)
-    mdom=$(grep  -oE 'domain=[^ ]+$' <<<"$mline" | head -1 | cut -d= -f2-)
-    [[ -z "$mdom" ]] && continue
-    # панельный домен в маркерах не показываем (он пойдёт во второй блок)
-    [[ -n "$panel_dom" && "$mdom" == "$panel_dom" ]] && continue
-    DOM_LIST+=("$mdom")
-    printf "  %2s) %-32s порт %s\n" "${#DOM_LIST[@]}" "$mdom" "$mport"
-  done < "$STACK_CONF"
-  [[ ${#DOM_LIST[@]} -eq 0 ]] && echo "  (нет)"
-
-  # ── Блок 2: домен панели (отдельно, чтобы не путать с инбаундами)
-  if [[ -n "$panel_dom" ]]; then
-    echo
-    echo -e "${B}▸ Домен панели:${N}"
-    DOM_LIST+=("$panel_dom")
-    printf "  %2s) %-32s порт 4443 [панель]\n" "${#DOM_LIST[@]}" "$panel_dom"
-  fi
-
-  [[ ${#DOM_LIST[@]} -eq 0 ]] && { err "SNI-домены не найдены — сначала п.1"; pause; return 1; }
-  echo
-  local pick=""
-  ask pick "Номер домена (1-${#DOM_LIST[@]}, 0 — отмена)" "0" '^[0-9]+$'
-  [[ "$pick" == "0" ]] && return 0
-  (( pick > ${#DOM_LIST[@]} )) && { err "Нет такого номера"; pause; return 1; }
-  local domain="${DOM_LIST[$((pick-1))]}"
-  log "Выбран: $domain"
-  log "Выбран: $domain"
-
-  # --- смена decoy для домена панели ---
-  if [[ -n "$panel_dom" && "$domain" == "$panel_dom" ]]; then
+  if true; then
     # Корень панели = прокси на AdGuard? Шаблон ставить НЕЛЬЗЯ: перестанут
     # открываться AdGuard UI и работать DoH.
     # ВАЖНО: в блоке 4443 ЕСТЬ и другие proxy_pass (панель, подписки) —
@@ -7255,92 +7348,6 @@ change_decoy() {
     pause; return 0
   fi
 
-  local meta port="" root_old="" cert="" key=""
-  meta=$(stack_decoy_meta "$domain")
-  if [[ -z "$meta" ]]; then
-    err "Decoy-блок для $domain не найден в $STACK_CONF."
-    grep "# >>> decoy" "$STACK_CONF" 2>/dev/null | sed 's/^/    /' || warn "    (ни одного)"
-    pause; return 1
-  fi
-  read -r port root_old cert key <<<"$meta"
-
-  local tpl=""
-  decoy_template_choose tpl "Новый decoy" "default"
-  [[ -z "$tpl" ]] && { warn "Шаблон не определён — применяю default"; tpl="default"; }
-
-  # opts для mk_decoy: redirect — спросить URL; остальным — UA-свитч для ботов
-  local opts=""
-  if [[ "$tpl" == "redirect" ]]; then
-    local rurl=""
-    ask rurl "Куда редиректить (URL)" "https://www.google.com/" '^https?://[A-Za-z0-9.-]+'
-    opts="redir=$rurl"
-  elif [[ "$tpl" != "locked" ]]; then
-    local ub="true"
-    askyn ub "Прятать сайт от ботов/сканеров (404 по User-Agent)?" "y"
-    [[ "$ub" == true ]] && opts="ua404=1" || opts="ua404=0"
-  fi
-
-  local final_root="$root_old"
-  if [[ "$tpl" == custom:* ]]; then
-    final_root="${tpl#custom:}"
-  elif [[ "$root_old" != /var/www/decoy-* ]]; then
-    local safe
-    safe=$(echo "$domain" | tr -c "a-z0-9" "_")
-    final_root="/var/www/decoy-${safe}"
-    mkdir -p "$final_root" 2>/dev/null || true
-    log "Каталог $root_old оставляю нетронутым (custom-папка)"
-    log "  Шаблон «$tpl» -> $final_root"
-  fi
-  mk_decoy "$port" "$domain" "$cert" "$key" "$final_root" "$tpl" "$opts"
-
-  # Перечитать НОВЫЙ root из маркера: для custom он отличается от старого
-  local meta_new="" root_new=""
-  meta_new=$(stack_decoy_meta "$domain") || meta_new=""
-  [[ -n "$meta_new" ]] && read -r _p root_new _c _k <<<"$meta_new"
-
-  if ! nginx -t >/dev/null 2>&1; then
-    err "nginx -t не прошёл после смены decoy:"
-    nginx -t 2>&1 | tail -5 | sed 's/^/    /'
-    pause; return 1
-  fi
-  nginx_reload || true
-
-  # Живая проверка: что реально отдаёт nginx под этим доменом
-  local live_code="" live_md5="" idx_md5="" verdict=""
-  live_code=$(curl -sk -o /tmp/.decoy_check -w '%{http_code}' --max-time 6 \
-    -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36" \
-    -H "Host: $domain" "https://127.0.0.1:$port/" 2>/dev/null || echo 000)
-  case "$tpl" in
-    custom:*)
-      idx_md5=$(md5sum "${tpl#custom:}/index.html" 2>/dev/null | awk '{print $1}')
-      live_md5=$(md5sum /tmp/.decoy_check 2>/dev/null | awk '{print $1}')
-      if [[ "$live_code" == "200" && -n "$idx_md5" && "$live_md5" == "$idx_md5" ]]; then
-        verdict="HTTP 200, контент = ${tpl#custom:}/index.html ✓"
-      elif [[ "$live_code" == "200" && -z "$idx_md5" ]]; then
-        verdict="HTTP 200, но ${tpl#custom:}/index.html НЕ найден (nginx мог отдать другой файл)"
-      elif [[ "$live_code" == "200" ]]; then
-        verdict="HTTP 200, но контент ОТЛИЧАЕТСЯ от ${tpl#custom:}/index.html"
-      else
-        verdict="HTTP $live_code — nginx не может отдать файл (права / try_files)"
-      fi
-      ;;
-    redirect|locked)
-      verdict="HTTP $live_code (ожидаемо для redirect/locked)"
-      ;;
-    *)
-      if [[ "$live_code" == "200" ]]; then verdict="HTTP 200 — decoy «$tpl» отдаётся ✓"
-      else verdict="HTTP $live_code — decoy не отвечает"; fi
-      ;;
-  esac
-  rm -f /tmp/.decoy_check 2>/dev/null || true
-
-  log "Decoy применён: «$tpl» (root=${root_new:-${root_old:-?}})"
-  echo "    Проверка nginx: $verdict"
-  case "$live_code" in
-    200|302|401) ;;
-    *) warn "Смотри /var/log/nginx/error.log и права www-data на ${root_new:-$root_old}" ;;
-  esac
-  warn "Если в браузере всё ещё старая страница — Ctrl+F5 (кэш браузера, не сервера)"
   pause
 }
 
