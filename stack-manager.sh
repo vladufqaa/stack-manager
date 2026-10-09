@@ -5131,7 +5131,7 @@ change_decoy() {
       warn "Смена на шаблон ЗАПРЕЩЕНА: перестанет открываться AdGuard UI и работать DoH."
       warn "Варианты:"
       warn "  • п.1 «Первичная настройка» → другой режим AdGuard (отдельный SNI-домен / локально),"
-      warn "  • п.16 «Удалить AdGuard Home», затем п.4 — выбрать шаблон."
+      warn "  • п.14 «AdGuard Home: установить / удалить», затем п.4 — выбрать шаблон."
       pause; return 0
     fi
     mkdir -p "$PANEL_DECOY_DIR" 2>/dev/null || true
