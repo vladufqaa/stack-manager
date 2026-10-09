@@ -511,11 +511,14 @@ frozen() {
 #   Панель при правке инбаунда сохраняет свою копию JSON целиком и может
 #   затереть вписанные скриптом пути сертов / reality-dest / hostname.
 #   Триггер AFTER UPDATE возвращает защищённые ключи, если панель их снесла
-#   (первичная запись при пустом OLD проходит свободно). hosts защищается
-#   теневой таблицей hosts_shadow: самолечение возвращает снесённые строки.
+#   (первичная запись при пустом OLD проходит свободно). hosts защищён
+#   мгновенно: триггер на DELETE сразу возвращает строку из тени hosts_shadow,
+#   а если следом панель вставляет свою (схема delete-all+insert) — дедуп
+#   убирает нашу временную (sm_pending), оставляя только её. Самолечение —
+#   страховка на случай, если триггеры были выключены.
 #   Свои правки скрипт делает через db_protect_suspend (триггеры роняются,
 #   тень сохраняется; RETURN-ловушка возвращает всё на место).
-#   SQL валидирован тестами (json_patch-вложение, без null-ключей).
+#   SQL валидирован тестами на мок-БД и на реальной копии x-ui.db.
 # =====================================================================
 db_protect_on() {
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
@@ -581,21 +584,43 @@ END;
         ins_cols = [c for c in cols if c != "id"]
         cl = ",".join('"%s"' % c for c in ins_cols)
         pk = ", PRIMARY KEY(inbound_id,port)" if ("inbound_id" in cols and "port" in cols) else ""
-        cur.execute('CREATE TABLE IF NOT EXISTS hosts_shadow (%s%s)' % (cl, pk))
-        cur.execute('INSERT OR REPLACE INTO hosts_shadow (%s) SELECT %s FROM hosts' % (cl, cl))
+        # сначала роняем hosts-триггеры (старые ссылаются на тень), затем
+        # пересобираем тень заново из живых hosts (база — актуальные строки)
+        for _t in ("sm_hosts_ins", "sm_hosts_upd", "sm_hosts_del", "sm_hosts_clean"):
+            cur.execute('DROP TRIGGER IF EXISTS %s' % _t)
+        cur.execute('DROP TABLE IF EXISTS hosts_shadow')
+        cur.execute('CREATE TABLE hosts_shadow (%s%s)' % (cl, pk))
+        cur.execute('INSERT INTO hosts_shadow (%s) SELECT %s FROM hosts' % (cl, cl))
+        cur.execute('CREATE TABLE IF NOT EXISTS sm_pending (rid INTEGER PRIMARY KEY, inbound_id INTEGER NOT NULL, port INTEGER NOT NULL)')
+        cur.execute('DELETE FROM sm_pending')
         cur.executescript("""
 DROP TRIGGER IF EXISTS sm_hosts_ins;
 CREATE TRIGGER sm_hosts_ins AFTER INSERT ON hosts BEGIN
+  -- дедуп: если перед этим мгновенно вернули строку из тени, а теперь панель
+  -- вставляет свою — убираем нашу временную, остаётся только новая
+  DELETE FROM hosts WHERE rowid IN (SELECT rid FROM sm_pending WHERE inbound_id=NEW.inbound_id AND port=NEW.port) AND rowid <> NEW.rowid;
+  DELETE FROM sm_pending WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
   DELETE FROM hosts_shadow WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
   INSERT INTO hosts_shadow ({cl}) SELECT {cl} FROM hosts WHERE inbound_id=NEW.inbound_id AND port=NEW.port; END;
 DROP TRIGGER IF EXISTS sm_hosts_upd;
 CREATE TRIGGER sm_hosts_upd AFTER UPDATE ON hosts BEGIN
   DELETE FROM hosts_shadow WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
   INSERT INTO hosts_shadow ({cl}) SELECT {cl} FROM hosts WHERE inbound_id=NEW.inbound_id AND port=NEW.port; END;
+DROP TRIGGER IF EXISTS sm_hosts_del;
+-- мгновенный возврат: панель снесла строку живого инбаунда, в тени она есть,
+  -- других строк с таким ключом не осталось → вставляем сразу и помечаем rowid;
+  -- если следом панель вставит свою (схема delete-all+insert) — sm_hosts_ins уберёт нашу
+CREATE TRIGGER sm_hosts_del AFTER DELETE ON hosts
+WHEN EXISTS(SELECT 1 FROM inbounds WHERE id=OLD.inbound_id AND enable=1)
+  AND EXISTS(SELECT 1 FROM hosts_shadow WHERE inbound_id=OLD.inbound_id AND port=OLD.port)
+  AND NOT EXISTS(SELECT 1 FROM hosts WHERE inbound_id=OLD.inbound_id AND port=OLD.port)
+BEGIN
+  INSERT INTO hosts ({cl}) SELECT {cl} FROM hosts_shadow WHERE inbound_id=OLD.inbound_id AND port=OLD.port;
+  INSERT INTO sm_pending(rid, inbound_id, port) VALUES (last_insert_rowid(), OLD.inbound_id, OLD.port); END;
 DROP TRIGGER IF EXISTS sm_hosts_clean;
 CREATE TRIGGER sm_hosts_clean AFTER DELETE ON hosts
 WHEN NOT EXISTS(SELECT 1 FROM inbounds WHERE id=OLD.inbound_id AND enable=1)
-BEGIN DELETE FROM hosts_shadow WHERE inbound_id=OLD.inbound_id; END;
+BEGIN DELETE FROM hosts_shadow WHERE inbound_id=OLD.inbound_id; DELETE FROM sm_pending WHERE inbound_id=OLD.inbound_id; END;
 """.replace("{cl}", cl))
     con.commit()
 except Exception:
@@ -603,18 +628,22 @@ except Exception:
 PYPROT
 }
 
-db_protect_off() {   # мягкое выключение: триггеры роняются, hosts_shadow живёт
+db_protect_off() {   # мягкое выключение: триггеры роняются, тень живёт
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
   local t
-  for t in sm_prot_inb sm_hosts_ins sm_hosts_upd sm_hosts_clean; do
+  for t in sm_prot_inb sm_hosts_ins sm_hosts_upd sm_hosts_del sm_hosts_clean; do
     sqlite3 "$XUI_DB" "DROP TRIGGER IF EXISTS $t;" 2>/dev/null || true
   done
 }
 
-db_protect_remove() {   # полное выключение (п.25): триггеры + теневая таблица
+db_protect_remove() {   # полное выключение (п.25): триггеры + тень + служебная
   db_protect_off
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
-  sqlite3 "$XUI_DB" "DROP TABLE IF EXISTS hosts_shadow;" 2>/dev/null || true
+  local t
+  for t in sm_hosts_ins sm_hosts_upd sm_hosts_del sm_hosts_clean; do
+    sqlite3 "$XUI_DB" "DROP TRIGGER IF EXISTS $t;" 2>/dev/null || true
+  done
+  sqlite3 "$XUI_DB" "DROP TABLE IF EXISTS hosts_shadow; DROP TABLE IF EXISTS sm_pending;" 2>/dev/null || true
 }
 
 db_protect_state() {
@@ -3040,7 +3069,8 @@ for iid, proto, setts_s, stream_s in rows:
     print(f"{iid}\x1f{proto}\x1f{dom}\x1f{json.dumps(st, ensure_ascii=False)}")
 PYROWS
   )
-  # hosts: панель снесла строки — вернём из теневой копии (защита БД, п.25);
+  # hosts: страховка на случай выключенных триггеров — вернём из тени, если
+  # строка всё ещё отсутствует (мгновенный возврат делает sm_hosts_del);
   # x-ui ещё остановлен — окно для правок; тень живёт даже при suspend
   if [[ -n "$(sqlite3 "$XUI_DB" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts_shadow' LIMIT 1;" 2>/dev/null)" ]]; then
     local hid haddr hsni
@@ -8409,7 +8439,7 @@ freeze_menu() {
   echo "  Автопочинка (stack-heal, 2 мин) и авто-выпуск сертов НЕ трогают то,"
   echo "  что заморожено здесь. Ручные действия через меню работают как раньше."
   if db_protect_state; then
-    echo -e "  ${G}Защита БД: ВКЛ${N} — панель не затирает серты/dest/hostname (hosts — тень+восстановление)"
+    echo -e "  ${G}Защита БД: ВКЛ${N} — панель не затирает серты/dest/hostname; hosts — мгновенный возврат"
   else
     echo "  Защита БД: выкл (панель может затирать серты/dest при правках инбаундов)"
   fi
@@ -8476,7 +8506,7 @@ freeze_menu() {
         log "Защита БД выключена"
       else
         local on1=""
-        askyn on1 "Включить защиту БД? (серты/dest/hostname переживают правки панели; hosts — тень)" "y"
+        askyn on1 "Включить защиту БД? (серты/dest/hostname переживают правки панели; hosts — мгновенный возврат)" "y"
         [[ "$on1" == true ]] || return 0
         systemctl stop x-ui >/dev/null 2>&1 || true
         if db_protect_on; then
