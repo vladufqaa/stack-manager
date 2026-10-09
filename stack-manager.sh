@@ -45,8 +45,20 @@ WILDCARD_DOMAIN=""
 WILDCARD_STATE="/root/stack-backups/wildcard-domain"
 CF_CREDS="/root/.secrets/cloudflare.ini"
 FROZEN_FILE="/root/stack-frozen.txt"   # заморозка самолечения: cert:<domain> / inbound:<id> / ALL-CERTS
-MULTI_CERT_NAME="stack-multi"                    # имя SAN-линии мультисерта (live/stack-multi)
-MULTI_CERT_FILE="/root/stack-multi-cert-domains.txt"   # список доменов мультисерта (по одному в строке)
+CERT_DOMAINS_FILE="/etc/letsencrypt/stack-domains.txt"
+# Режим выпуска сертификатов (A/B): файл + переменная (см. cert_mode_*)
+CERT_MODE=""
+CERT_MODE_FILE="/root/stack-backups/cert-mode"
+# Файлы линий сертификатов (для режима B — несколько линий)
+#   /root/stack-backups/cert-lines.txt              → список имён линий
+#   /root/stack-backups/cert-line-<имя>.domains     → SAN этой линии (по строке)
+CERT_LINES_FILE="/root/stack-backups/cert-lines.txt"
+CERT_LINE_FILE_PREFIX="/root/stack-backups/cert-line-"
+declare -a CERT_LINES=()
+CERT_MULTI_NAME=""           # динамически = домен панели (cert_multi_name_resolve)
+CERT_DEFER=0
+CERT_BATCH_ENABLED=1
+declare -a CERT_DOMAINS=()
 
 # Сохранение email Let's Encrypt (переживает перезапуски скрипта)
 LE_EMAIL_FILE="/root/stack-backups/le-email"
@@ -3217,6 +3229,10 @@ heal_once() {
   {
     echo "[$(date '+%F %T')] обнаружены правки панели — автопочинка:"
     sync_inbound_certs
+    if ! frozen "ALL-CERTS"; then
+      CERT_DEFER=0
+      cert_batch_flush >/dev/null 2>&1 || true
+    fi
   } >> "$hlog" 2>&1
 }
 
@@ -3277,7 +3293,908 @@ le_email_forget() {
   EMAIL=""
 }
 
+# --- Режим выпуска сертификатов (A/B) -----------------------------------
+#   A = одна линия на всё (имя = домен панели, SAN = все домены)
+#   B = линия на базовый домен (разные базовые → разные линии)
+# Логика выпуска по режиму реализуется поэтапно; пока режим только хранится.
+# Совместимость со старым мультисертом (live/stack-multi): домены → stack-domains.txt
+cert_multi_compat_migrate() {
+  [[ -s "/root/stack-multi-cert-domains.txt" ]] || return 0
+  local d
+  while IFS= read -r d; do
+    d="$(printf '%s' "$d" | tr -d '[:space:]')"
+    [[ -z "$d" ]] && continue
+    cert_domains_add "$d"
+  done < "/root/stack-multi-cert-domains.txt"
+  mv "/root/stack-multi-cert-domains.txt" "/root/stack-multi-cert-domains.txt.migrated" 2>/dev/null || true
+  log "Старый мультисписок перенесён в $CERT_DOMAINS_FILE (линия live/stack-multi не тронута — уберёт п.10.13)"
+}
+
+cert_mode_load() {
+  CERT_MODE=""
+  if [[ -f "$CERT_MODE_FILE" ]]; then
+    CERT_MODE=$(head -n1 "$CERT_MODE_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [[ "$CERT_MODE" == "A" || "$CERT_MODE" == "B" ]]; then
+      return 0
+    fi
+    CERT_MODE=""
+  fi
+  # Автоопределение для существующего стека: есть stack-domains.txt →
+  # значит работала одна линия → режим A. Пишем молча.
+  if [[ -s "$CERT_DOMAINS_FILE" ]]; then
+    CERT_MODE="A"
+    mkdir -p "$(dirname "$CERT_MODE_FILE")" 2>/dev/null || true
+    printf '%s\n' "$CERT_MODE" > "$CERT_MODE_FILE" 2>/dev/null || true
+    chmod 600 "$CERT_MODE_FILE" 2>/dev/null || true
+  fi
+  cert_multi_compat_migrate
+  return 0
+}
+
+cert_mode_save() {
+  local m="${1:-$CERT_MODE}"
+  [[ "$m" != "A" && "$m" != "B" ]] && return 1
+  mkdir -p "$(dirname "$CERT_MODE_FILE")" 2>/dev/null || true
+  printf '%s\n' "$m" > "$CERT_MODE_FILE" 2>/dev/null || return 1
+  chmod 600 "$CERT_MODE_FILE" 2>/dev/null || true
+  CERT_MODE="$m"
+  return 0
+}
+
+# Краткое описание режимов (для меню)
+cert_mode_describe() {
+  echo
+  echo -e "${B}  A) Одна линия на всё${N}"
+  echo "     Имя: <домен панели>. SAN: домен панели + ВСЕ домены инбаундов."
+  echo -e "     ${G}+${N} Проще: одна линия, один список"
+  echo -e "     ${R}-${N} Если один домен не валидируется - ВЕСЬ перевыпуск падает"
+  echo -e "     ${R}-${N} Лимит 100 SAN на серт"
+  echo -e "     ${R}-${N} Разные DNS-провайдеры (Cloudflare + Route53) - сложнее"
+  echo
+  echo -e "${B}  B) Линия на базовый домен${N} ${Y}(рекомендуется)${N}"
+  echo "     Имя: <домен панели> для доменов той же базы."
+  echo "     Домены других баз - отдельные линии (имя = сам домен)."
+  echo -e "     ${G}+${N} Устойчиво: битый домен не валит остальные"
+  echo -e "     ${G}+${N} Разные DNS-провайдеры - естественно"
+  echo -e "     ${G}+${N} Нет риска упереться в лимит SAN"
+  echo -e "     ${R}-${N} Сложнее: несколько линий, разные сроки обновления"
+  echo
+}
+
+# Интерактивный вопрос про режим. В не-TTY сразу выходит.
+# $1 == "force" — спрашивать, даже если уже задан.
+cert_mode_ask() {
+  local force="${1:-}"
+  [[ -t 0 ]] || return 0
+  cert_mode_load
+  if [[ -n "$CERT_MODE" && "$force" != "force" ]]; then
+    return 0
+  fi
+  echo
+  echo -e "${B}+- Логика выпуска сертификатов -+${N}"
+  cert_mode_describe
+  local cur="${CERT_MODE:-B}"
+  local m=""
+  ask m "Выбор [A/B]" "$cur" '^[ABab]$'
+  m="${m^^}"
+  cert_mode_save "$m"
+  log "Режим: $m"
+  if [[ "$m" == "B" ]]; then
+    warn "Режим B будет реализован в следующих обновлениях - пока работает как A."
+  fi
+  return 0
+}
+
+cert_mode_menu() {
+  cert_mode_load
+  line; echo -e "${B}   ЛОГИКА ВЫПУСКА СЕРТИФИКАТОВ${N}"; line
+  echo "  Текущий режим: ${CERT_MODE:-<не задан>}"
+  cert_mode_ask force
+  pause
+}
+
+cert_multi_name_resolve() {
+  [[ -n "$CERT_MULTI_NAME" ]] && return 0
+  local pd="${PANEL_DOMAIN:-}"
+  [[ -z "$pd" && -n "$XUI_DB" && -f "$XUI_DB" ]] && pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && return 1
+  CERT_MULTI_NAME="$pd"
+  return 0
+}
+
+sync_panel_certs_menu() {
+  local _wd _cur_wc _cur_sc _cp _newcert _newkey
+  _wd="${PANEL_DOMAIN:-$(xui_get webDomain 2>/dev/null || true)}"
+  [[ -z "$_wd" ]] && return 0
+
+  _cur_wc=$(xui_get webCertFile 2>/dev/null || true)
+  _cur_sc=$(xui_get subCertFile 2>/dev/null || true)
+
+  # Ищем подходящий серт для домена панели (live/<домен>/ или SAN покрывающий)
+  _cp=$(cert_paths "$_wd") || _cp=""
+  if [[ -z "$_cp" ]]; then
+    warn "Серт для $_wd не найден в live/ — будет выпущен позже в этом прогоне"
+    return 0
+  fi
+  _newcert="${_cp%% *}"; _newkey="${_cp##* }"
+
+  echo
+  echo -e "${B}▸ Сертификаты панели и подписок${N}"
+  echo "  домен панели:  $_wd"
+  echo "  найден серт:   $_newcert"
+
+  # ── Панель (web UI) ──
+  if [[ "$_cur_wc" == "$_newcert" ]]; then
+    log "  Серт панели в БД уже актуален — менять нечего"
+  else
+    echo "  в панели сейч.: ${_cur_wc:-<пусто>}"
+    local _go=""
+    askyn _go "  Обновить серт ПАНЕЛИ в настройках x-ui?" "y"
+    if [[ "$_go" == true ]]; then
+      systemctl stop x-ui 2>/dev/null || true
+      xui_set_setting webCertFile "$_newcert"
+      xui_set_setting webKeyFile  "$_newkey"
+      systemctl start x-ui 2>/dev/null || true
+      log "  ✓ Серт панели в БД обновлён: $_newcert"
+    else
+      warn "  Серт панели не тронут"
+    fi
+  fi
+
+  # ── Подписки ──
+  if [[ "$_cur_sc" == "$_newcert" ]]; then
+    log "  Серт подписок в БД уже актуален"
+  else
+    echo "  в подписках:   ${_cur_sc:-<пусто>}"
+    local _go2=""
+    askyn _go2 "  Обновить серт ПОДПИСОК в настройках x-ui?" "y"
+    if [[ "$_go2" == true ]]; then
+      systemctl stop x-ui 2>/dev/null || true
+      xui_set_setting subCertFile "$_newcert"
+      xui_set_setting subKeyFile  "$_newkey"
+      systemctl start x-ui 2>/dev/null || true
+      log "  ✓ Серт подписок в БД обновлён: $_newcert"
+    else
+      warn "  Серт подписок не тронут"
+    fi
+  fi
+}
+
+# =====================================================================
+# ФАЙЛЫ ЛИНИЙ СЕРТИФИКАТОВ (для режима B — несколько линий)
+# =====================================================================
+# В режиме A — одна линия, имя = домен панели, SAN = stack-domains.txt.
+# В режиме B — несколько линий: cert-lines.txt (список имён) + файл на каждую.
+# Для совместимости: cert_lines_load() в режиме A возвращает одну линию,
+# читая домены из stack-domains.txt.
+
+cert_line_file() {   # <line-name> → путь к файлу SAN этой линии
+  printf '%s%s.domains' "$CERT_LINE_FILE_PREFIX" "$1"
+}
+
+# Загрузка списка линий в массив CERT_LINES
+cert_lines_load() {
+  CERT_LINES=()
+  cert_mode_load >/dev/null 2>&1 || true
+  if [[ "${CERT_MODE:-A}" == "A" ]]; then
+    # Режим A: одна линия (имя = домен панели) — вычисляем при необходимости
+    local nm=""
+    nm=$(cert_multi_name_resolve >/dev/null 2>&1; printf '%s' "${CERT_MULTI_NAME:-}")
+    [[ -z "$nm" ]] && nm=$(xui_get webDomain 2>/dev/null || true)
+    [[ -n "$nm" && "$nm" != "null" ]] && CERT_LINES=("$nm")
+    return 0
+  fi
+  # Режим B: список из файла
+  [[ -f "$CERT_LINES_FILE" ]] || return 0
+  local l
+  while IFS= read -r l; do
+    l="$(printf '%s' "$l" | tr -d '[:space:]')"
+    [[ -z "$l" ]] && continue
+    [[ " ${CERT_LINES[*]} " == *" $l "* ]] && continue
+    CERT_LINES+=("$l")
+  done < "$CERT_LINES_FILE"
+  return 0
+}
+
+cert_lines_save() {
+  mkdir -p "$(dirname "$CERT_LINES_FILE")" 2>/dev/null || true
+  if [[ ${#CERT_LINES[@]} -eq 0 ]]; then
+    : > "$CERT_LINES_FILE"
+    return 0
+  fi
+  printf '%s\n' "${CERT_LINES[@]}" > "$CERT_LINES_FILE" 2>/dev/null || true
+  chmod 600 "$CERT_LINES_FILE" 2>/dev/null || true
+}
+
+cert_lines_add() {   # <line-name>
+  local n="$1"
+  [[ -z "$n" ]] && return 0
+  cert_lines_load
+  [[ " ${CERT_LINES[*]} " == *" $n "* ]] && return 0
+  CERT_LINES+=("$n")
+  cert_lines_save
+}
+
+cert_lines_remove() {   # <line-name>
+  local n="$1"
+  [[ -z "$n" ]] && return 0
+  cert_lines_load
+  local -a out=() x
+  for x in "${CERT_LINES[@]}"; do
+    [[ "$x" == "$n" ]] && continue
+    out+=("$x")
+  done
+  if [[ ${#out[@]} -ne ${#CERT_LINES[@]} ]]; then
+    CERT_LINES=("${out[@]}")
+    cert_lines_save
+  fi
+  # Удаляем и файл SAN этой линии
+  rm -f "$(cert_line_file "$n")" 2>/dev/null || true
+}
+
+# Загрузка SAN линии в массив CERT_LINE_DOMAINS
+# В режиме A для главной линии SAN = stack-domains.txt
+declare -a CERT_LINE_DOMAINS=()
+cert_line_domains_load() {   # <line-name>
+  CERT_LINE_DOMAINS=()
+  local n="$1"
+  [[ -z "$n" ]] && return 0
+  local f=""
+  # Режим A: главная линия → читаем stack-domains.txt
+  if [[ "${CERT_MODE:-A}" == "A" ]]; then
+    local pn=""
+    pn=$(xui_get webDomain 2>/dev/null || true)
+    if [[ -n "$pn" && "$n" == "$pn" && -f "$CERT_DOMAINS_FILE" ]]; then
+      f="$CERT_DOMAINS_FILE"
+    fi
+  fi
+  [[ -z "$f" ]] && f=$(cert_line_file "$n")
+  [[ -f "$f" ]] || return 0
+  local d
+  while IFS= read -r d; do
+    d="$(printf '%s' "$d" | tr -d '[:space:]')"
+    [[ -z "$d" ]] && continue
+    [[ " ${CERT_LINE_DOMAINS[*]} " == *" $d "* ]] && continue
+    CERT_LINE_DOMAINS+=("$d")
+  done < "$f"
+  return 0
+}
+
+cert_line_domains_save() {   # <line-name>  (использует CERT_LINE_DOMAINS)
+  local n="$1"
+  [[ -z "$n" ]] && return 0
+  # Режим A: главная линия → сохраняем в stack-domains.txt
+  if [[ "${CERT_MODE:-A}" == "A" ]]; then
+    local pn=""
+    pn=$(xui_get webDomain 2>/dev/null || true)
+    if [[ -n "$pn" && "$n" == "$pn" ]]; then
+      mkdir -p "$(dirname "$CERT_DOMAINS_FILE")" 2>/dev/null || true
+      if [[ ${#CERT_LINE_DOMAINS[@]} -eq 0 ]]; then
+        : > "$CERT_DOMAINS_FILE"
+      else
+        printf '%s\n' "${CERT_LINE_DOMAINS[@]}" > "$CERT_DOMAINS_FILE" 2>/dev/null || true
+      fi
+      return 0
+    fi
+  fi
+  # Режим B / обычный случай → отдельный файл
+  local f; f=$(cert_line_file "$n")
+  mkdir -p "$(dirname "$f")" 2>/dev/null || true
+  if [[ ${#CERT_LINE_DOMAINS[@]} -eq 0 ]]; then
+    : > "$f"
+  else
+    printf '%s\n' "${CERT_LINE_DOMAINS[@]}" > "$f" 2>/dev/null || true
+  fi
+  chmod 600 "$f" 2>/dev/null || true
+}
+
+cert_line_domains_add() {   # <line-name> <domain>
+  local n="$1" d="$2"
+  [[ -z "$n" || -z "$d" ]] && return 0
+  cert_lines_add "$n"
+  cert_line_domains_load "$n"
+  [[ " ${CERT_LINE_DOMAINS[*]} " == *" $d "* ]] && return 0
+  CERT_LINE_DOMAINS+=("$d")
+  cert_line_domains_save "$n"
+}
+
+cert_line_domains_remove() {   # <line-name> <domain>
+  local n="$1" d="$2"
+  [[ -z "$n" || -z "$d" ]] && return 0
+  cert_line_domains_load "$n"
+  local -a out=() x
+  for x in "${CERT_LINE_DOMAINS[@]}"; do
+    [[ "$x" == "$d" ]] && continue
+    out+=("$x")
+  done
+  if [[ ${#out[@]} -ne ${#CERT_LINE_DOMAINS[@]} ]]; then
+    CERT_LINE_DOMAINS=("${out[@]}")
+    cert_line_domains_save "$n"
+  fi
+}
+
+# Определяет имя линии, которая должна содержать домен $1.
+# В режиме A: всегда домен панели (одна линия).
+# В режиме B:
+#   - если домен в зоне базы панели → имя = домен панели (главная линия);
+#   - если домен вне зоны → имя = all.<базовый-домен-домена> (доп. линия);
+#     для доменов вида a.b.c.com «база» = b.c.com (последние две метки? нет —
+#     база = две последние метки: c.com). Для доменов вида panel.a.com → a.com.
+# То есть: главная линия = домен панели; доп. линии именуются all.<base>,
+# где base = последние две метки домена (или весь домен, если меток меньше 3).
+cert_line_for() {   # <domain> → печатает имя линии
+  local d="$1"
+  [[ -z "$d" ]] && return 1
+  cert_mode_load >/dev/null 2>&1 || true
+  local pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
+  if [[ -z "$pd" ]]; then
+    # домен панели неизвестен → главной линии нет, вычислим по базе домена
+    cert_mode_line_base "$d"
+    return 0
+  fi
+  if [[ "${CERT_MODE:-A}" == "A" ]]; then
+    printf '%s' "$pd"
+    return 0
+  fi
+  # Режим B
+  local pbase="${pd#*.}"
+  [[ "$pbase" != *.* ]] && pbase="$pd"
+  # домен панели сам (panel.mediadok.xyz) → база mediadok.xyz
+  # домен в базе панели?
+  if [[ "$d" == "$pd" || "$d" == *."$pbase" ]]; then
+    printf '%s' "$pd"
+    return 0
+  fi
+  # вне зоны панели → отдельная линия all.<base>
+  cert_mode_line_base "$d"
+}
+
+# Вычисляет all.<base> для домена (base = последние две метки)
+cert_mode_line_base() {   # <domain> → печатает all.<base>
+  local d="$1"
+  local IFS='.'
+  local -a p
+  read -r -a p <<<"$d"
+  local n=${#p[@]}
+  local base=""
+  if (( n >= 3 )); then
+    base="${p[n-2]}.${p[n-1]}"
+  elif (( n == 2 )); then
+    base="$d"
+  else
+    base="$d"
+  fi
+  printf 'all.%s' "$base"
+}
+
+# Миграция: разложить текущий stack-domains.txt по линиям (для B).
+# В режиме A — оставляем как есть.
+cert_lines_migrate_to_mode() {
+  local target="${1:-$CERT_MODE}"
+  local pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && return 1
+  if [[ "$target" == "A" ]]; then
+    # Собрать все домены из всех линий → stack-domains.txt; удалить файлы линий
+    local -a all=()
+    cert_lines_load
+    local ln d
+    for ln in "${CERT_LINES[@]}"; do
+      cert_line_domains_load "$ln"
+      for d in "${CERT_LINE_DOMAINS[@]}"; do
+        [[ " ${all[*]} " == *" $d "* ]] && continue
+        all+=("$d")
+      done
+    done
+    # Собрать из старых файлов (если их нет в массиве — добавить с диска)
+    for f in "$CERT_LINE_FILE_PREFIX"*.domains; do
+      [[ -f "$f" ]] || continue
+      while IFS= read -r d; do
+        d="$(printf '%s' "$d" | tr -d '[:space:]')"
+        [[ -z "$d" ]] && continue
+        [[ " ${all[*]} " == *" $d "* ]] && continue
+        all+=("$d")
+      done < "$f"
+    done
+    [[ -z "${all[*]}" ]] && return 0
+    mkdir -p "$(dirname "$CERT_DOMAINS_FILE")" 2>/dev/null || true
+    printf '%s\n' "${all[@]}" > "$CERT_DOMAINS_FILE" 2>/dev/null || true
+    chmod 600 "$CERT_DOMAINS_FILE" 2>/dev/null || true
+    # Удаляем файлы линий и список
+    rm -f "$CERT_LINES_FILE" 2>/dev/null || true
+    for f in "$CERT_LINE_FILE_PREFIX"*.domains; do
+      [[ -f "$f" ]] && rm -f "$f" 2>/dev/null || true
+    done
+    log "cert-lines: миграция → A (одна линия $pd, ${#all[@]} дом.)"
+    return 0
+  fi
+  # target == B
+  local -a domains=()
+  if [[ -f "$CERT_DOMAINS_FILE" ]]; then
+    while IFS= read -r d; do
+      d="$(printf '%s' "$d" | tr -d '[:space:]')"
+      [[ -z "$d" ]] && continue
+      domains+=("$d")
+    done < "$CERT_DOMAINS_FILE"
+  fi
+  [[ ${#domains[@]} -eq 0 ]] && return 0
+  # Разложить по базам
+  local pbase="${pd#*.}"
+  [[ "$pbase" != *.* ]] && pbase="$pd"
+  : > "$CERT_LINES_FILE"
+  local d line
+  for d in "${domains[@]}"; do
+    if [[ "$d" == "$pd" || "$d" == *."$pbase" ]]; then
+      line="$pd"
+    else
+      line=$(cert_mode_line_base "$d")
+    fi
+    cert_lines_add "$line"
+    cert_line_domains_add "$line" "$d"
+  done
+  # Очищаем stack-domains.txt (его роль теперь — только в A)
+  : > "$CERT_DOMAINS_FILE"
+  log "cert-lines: миграция → B (${#CERT_LINES[@]} линий)"
+  return 0
+}
+
+# Показать все линии с их SAN (для аудита/меню)
+cert_lines_show() {
+  cert_lines_load
+  if [[ ${#CERT_LINES[@]} -eq 0 ]]; then
+    warn "Линии сертов не найдены (режим ${CERT_MODE:-?}, домен панели не определён?)"
+    return 0
+  fi
+  local ln d n
+  for ln in "${CERT_LINES[@]}"; do
+    cert_line_domains_load "$ln"
+    n=${#CERT_LINE_DOMAINS[@]}
+    echo "  - $ln  (${n} дом.)"
+    for d in "${CERT_LINE_DOMAINS[@]}"; do
+      echo "      $d"
+    done
+  done
+}
+
+# =====================================================================
+# ДОМЕН + СЕРТИФИКАТ ПАНЕЛИ СРАЗУ ПОСЛЕ ЧИСТОЙ УСТАНОВКИ
+# =====================================================================
+cert_domains_load() {
+  CERT_DOMAINS=()
+  [[ -f "$CERT_DOMAINS_FILE" ]] || return 0
+  local d
+  while IFS= read -r d; do
+    d="$(printf '%s' "$d" | tr -d '[:space:]')"
+    [[ -z "$d" ]] && continue
+    [[ " ${CERT_DOMAINS[*]} " == *" $d "* ]] && continue
+    CERT_DOMAINS+=("$d")
+  done < "$CERT_DOMAINS_FILE"
+}
+cert_domains_save() {
+  mkdir -p "$(dirname "$CERT_DOMAINS_FILE")" 2>/dev/null || true
+  if [[ ${#CERT_DOMAINS[@]} -eq 0 ]]; then
+    : > "$CERT_DOMAINS_FILE"
+    return 0
+  fi
+  printf '%s\n' "${CERT_DOMAINS[@]}" > "$CERT_DOMAINS_FILE" 2>/dev/null || true
+}
+cert_domains_add() {
+  local d="$1" force="${2:-0}"
+  [[ -z "$d" ]] && return 0
+  cert_mode_load >/dev/null 2>&1 || true
+  # ── В режиме B добавляем в правильную линию (автоопределение по базе) ──
+  if [[ "${CERT_MODE:-A}" == "B" ]]; then
+    local _line=""
+    _line=$(cert_line_for "$d")
+    if [[ -z "$_line" ]]; then
+      # домен панели неизвестен — некуда класть, пишем в общий (best effort)
+      warn "cert_domains_add: домен панели не определён — «$d» не привязан к линии"
+      return 1
+    fi
+    cert_line_domains_add "$_line" "$d"
+    return 0
+  fi
+  # ── Режим A — без фильтра: одна линия (имя = домен панели) ──
+  cert_domains_load
+  [[ " ${CERT_DOMAINS[*]} " == *" $d "* ]] && return 0
+  CERT_DOMAINS+=("$d")
+  cert_domains_save
+}
+cert_domains_remove() {
+  local d="$1"
+  [[ -z "$d" ]] && return 0
+  cert_mode_load >/dev/null 2>&1 || true
+  # панельный домен = имя главной линии, нельзя убрать
+  cert_multi_name_resolve >/dev/null 2>&1 || true
+  [[ -n "$CERT_MULTI_NAME" && "$d" == "$CERT_MULTI_NAME" ]] && return 0
+  # ── В режиме B убираем из той линии, где он лежит ──
+  if [[ "${CERT_MODE:-A}" == "B" ]]; then
+    local _line=""
+    _line=$(cert_line_for "$d")
+    [[ -z "$_line" ]] && return 0
+    cert_line_domains_remove "$_line" "$d"
+    # если линия опустела и она НЕ главная — удалить её
+    local pd=""
+    pd=$(xui_get webDomain 2>/dev/null || true)
+    if [[ -n "$pd" && "$_line" != "$pd" ]]; then
+      cert_line_domains_load "$_line"
+      if [[ ${#CERT_LINE_DOMAINS[@]} -eq 0 ]]; then
+        cert_lines_remove "$_line"
+        log "  линия $_line удалена (пустая)"
+      fi
+    fi
+    return 0
+  fi
+  # ── Режим A ──
+  cert_domains_load
+  local -a newlist=() x
+  for x in "${CERT_DOMAINS[@]}"; do
+    [[ "$x" == "$d" ]] && continue
+    newlist+=("$x")
+  done
+  if [[ ${#newlist[@]} -ne ${#CERT_DOMAINS[@]} ]]; then
+    CERT_DOMAINS=("${newlist[@]}")
+    cert_domains_save
+  fi
+}
+cert_domains_rename() {
+  local old="$1" new="$2"
+  cert_domains_remove "$old"
+  cert_domains_add "$new"
+}
+
+# Выпуск единого мультисерта: stack-multi покрывает ВСЕ домены из
+# /etc/letsencrypt/stack-domains.txt. Перевыпуск — только при изменении SAN
+# или истечении ≤30 дн. Файл-список — источник истины.
+# Универсальный выпуск одной линии: cert_issue_line <line-name>
+#   • line = имя линии (в A совпадает с доменом панели; в B может быть all.<base>)
+#   • Домены SAN берутся из cert_line_domains_load (A: stack-domains.txt;
+#     B: cert-line-<имя>.domains).
+#   • Первый -d = CN. Для главной линии (имя == домен панели) CN = имя линии.
+#     Для доп. линий CN = первый домен из SAN (имя all.<base> не является доменом).
+#   • DNS-фильтр: в TTY при невалидном домене — откат + сообщение + ожидание
+#     Enter; в не-TTY — исключение невалидных с warn (для таймеров).
+#   • Идемпотентно: если SAN совпадает и срок > 30 дн — выпуск не выполняется.
+cert_issue_line() {
+  local line="$1"
+  [[ -z "$line" ]] && { err "cert_issue_line: пустое имя линии"; return 1; }
+
+  cert_mode_load >/dev/null 2>&1 || true
+  cert_line_domains_load "$line"
+  [[ ${#CERT_LINE_DOMAINS[@]} -eq 0 ]] && { warn "Линия $line пуста — выпуск не нужен"; return 0; }
+
+  # CN
+  local cn="" pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
+  if [[ -n "$pd" && "$line" == "$pd" ]]; then
+    cn="$pd"
+  else
+    cn="${CERT_LINE_DOMAINS[0]}"
+  fi
+
+  # ── DNS-фильтр ──
+  local -a _valid=() _invalid=()
+  local _d2 _a4 _a6 _x
+  for _d2 in "${CERT_LINE_DOMAINS[@]}"; do
+    _a4=$(dig +short A "$_d2" @1.1.1.1 2>/dev/null | grep -E '^[0-9.]+$' | head -1 || true)
+    [[ -z "$_a4" ]] && _a4=$(dig +short A "$_d2" @8.8.8.8 2>/dev/null | grep -E '^[0-9.]+$' | head -1 || true)
+    _a6=$(dig +short AAAA "$_d2" @1.1.1.1 2>/dev/null | grep ':' | head -1 || true)
+    if [[ -n "$_a4" || -n "$_a6" ]]; then
+      _valid+=("$_d2")
+    else
+      _invalid+=("$_d2")
+    fi
+  done
+
+  if [[ ${#_invalid[@]} -gt 0 ]]; then
+    if [[ -t 0 ]]; then
+      echo
+      err "Линия «$line»: следующие домены НЕ резолвятся (A/AAAA):"
+      for _x in "${_invalid[@]}"; do
+        err "  - $_x"
+      done
+      err "Перевыпуск ОТМЕНЁН — исправь DNS и запусти снова."
+      read -rp "$(echo -e "${B}Нажмите Enter чтобы продолжить${N}")" _ || true
+      return 1
+    fi
+    warn "Линия «$line»: исключаю невалидные домены (не-TTY):"
+    for _x in "${_invalid[@]}"; do warn "  - $_x"; done
+    CERT_LINE_DOMAINS=("${_valid[@]}")
+    cert_line_domains_save "$line"
+  fi
+  [[ ${#CERT_LINE_DOMAINS[@]} -eq 0 ]] && { warn "Линия «$line»: все домены исключены"; return 1; }
+
+  # Email LE
+  le_email_load || true
+  if [[ -z "$EMAIL" ]]; then
+    EMAIL=$(certbot show_account 2>/dev/null | grep -iE 'Email' | awk -F: '{print $2}' | tr -d ' ' | head -1 || true)
+  fi
+  if [[ -z "$EMAIL" ]]; then
+    local eb="${cn#*.}"
+    [[ "$eb" != *.* ]] && eb="$cn"
+    EMAIL="admin@$eb"
+    [[ "$EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]] || { err "cert: EMAIL='$EMAIL' не похож на адрес"; return 1; }
+  fi
+  le_email_save "$EMAIL" || true
+
+  # Идемпотентность: если SAN совпадает и срок > 30 дн — не выпускаем
+  local ldir="/etc/letsencrypt/live/$line"
+  if [[ -f "$ldir/fullchain.pem" ]]; then
+    local cur_san want_san left
+    cur_san=$(openssl x509 -noout -ext subjectAltName -in "$ldir/fullchain.pem" 2>/dev/null \
+              | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr -d ' ' | sort | tr '\n' ',')
+    want_san=$(printf '%s\n' "${CERT_LINE_DOMAINS[@]}" | sort -u | tr '\n' ',')
+    if [[ "${cur_san%,}" == "${want_san%,}" ]]; then
+      left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+      if (( left > 30 )); then
+        log "Линия «$line» актуальна (${#CERT_LINE_DOMAINS[@]} дм., ~$left дн)"
+        return 0
+      fi
+    fi
+  fi
+
+  # Аргументы -d: CN первым
+  local -a cargs=()
+  cargs+=(-d "$cn")
+  local d
+  for d in "${CERT_LINE_DOMAINS[@]}"; do
+    [[ "$d" == "$cn" ]] && continue
+    cargs+=(-d "$d")
+  done
+
+  log "Выпуск линии «$line» (CN=$cn, ${#CERT_LINE_DOMAINS[@]} дм.)…"
+  mkdir -p /var/www/html 2>/dev/null || true
+  mkdir -p /var/www/html/.well-known/acme-challenge 2>/dev/null || true
+  chown -R www-data:www-data /var/www/html/.well-known 2>/dev/null || true
+  chmod 755 /var/www/html /var/www/html/.well-known /var/www/html/.well-known/acme-challenge 2>/dev/null || true
+
+  local ufw_80=false
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    if ! ufw status 2>/dev/null | grep -qE "^80/tcp[[:space:]]+ALLOW"; then
+      ufw allow 80/tcp comment "acme-temp" >/dev/null 2>&1 || true
+      ufw_80=true
+    fi
+  fi
+
+  local out=""
+  out=$(certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos \
+        --email "$EMAIL" --cert-name "$line" --force-renewal \
+        "${cargs[@]}" 2>&1 || true)
+
+  if [[ ! -f "$ldir/fullchain.pem" || ! -f "$ldir/privkey.pem" ]]; then
+    local nginx_was=""
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+      nginx_was=1; systemctl stop nginx 2>/dev/null || true
+    fi
+    out="$out
+$(certbot certonly --standalone --non-interactive --agree-tos \
+        --email "$EMAIL" --cert-name "$line" --force-renewal \
+        "${cargs[@]}" 2>&1 || true)"
+    [[ -n "$nginx_was" ]] && systemctl start nginx 2>/dev/null || true
+  fi
+
+  [[ "$ufw_80" == true ]] && ufw delete allow 80/tcp >/dev/null 2>&1 || true
+
+  if [[ -f "$ldir/fullchain.pem" && -f "$ldir/privkey.pem" ]]; then
+    log "Линия «$line» готова: $ldir"
+    return 0
+  fi
+  err "Линия «$line» НЕ выпущена:"
+  echo "$out" | tail -10 | sed 's/^/    /'
+  [[ -t 0 ]] && read -rp "$(echo -e "${B}Нажмите Enter${N}")" _ || true
+  return 1
+}
+
+cert_multi_issue() {
+  cert_mode_load >/dev/null 2>&1 || true
+
+  # ── Режим A: одна линия ──
+  if [[ "${CERT_MODE:-A}" == "A" ]]; then
+    cert_multi_name_resolve || { err "cert_multi_issue: домен панели неизвестен"; return 1; }
+    cert_domains_add "$CERT_MULTI_NAME"
+    cert_domains_load
+    [[ ${#CERT_DOMAINS[@]} -eq 0 ]] && return 0
+    local -a _final=("$CERT_MULTI_NAME") _x
+    for _x in "${CERT_DOMAINS[@]}"; do
+      [[ "$_x" == "$CERT_MULTI_NAME" ]] && continue
+      _final+=("$_x")
+    done
+    CERT_DOMAINS=("${_final[@]}")
+    cert_domains_save
+    cert_issue_line "$CERT_MULTI_NAME"
+    return $?
+  fi
+
+  # ── Режим B: обход всех линий ──
+  local pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
+  if [[ -n "$pd" ]]; then
+    cert_lines_add "$pd"
+    cert_line_domains_add "$pd" "$pd"
+  fi
+  cert_lines_load
+  [[ ${#CERT_LINES[@]} -eq 0 ]] && { warn "cert_multi_issue: нет линий"; return 0; }
+  local rc=0 ln
+  for ln in "${CERT_LINES[@]}"; do
+    cert_issue_line "$ln" || rc=1
+  done
+  return $rc
+}
+
+# Идемпотентный выпуск: если SAN мультисерта совпадает с файлом доменов и
+# срок > 30 дн — ничего не делает. Безопасно звать в конце любой операции.
+# Синхронизация: пройтись по SNI-карте и добавить пропущенные домены
+# в stack-domains.txt / в линии. Нужно, если инбаунд был привязан к SNI
+# напрямую (минуя cert_domains_add) — тогда домен есть в карте, но не в списке.
+# Безопасно: чужие цели (REALITY_TARGETS), panel_backend и agh_backend не трогаем.
+cert_domains_sync_from_sni() {
+  [[ -f "$SNI_CONF" ]] || return 0
+  cert_mode_load >/dev/null 2>&1 || true
+
+  # Собираем домены из map-блока с их backend
+  local -a rows=()
+  local ln
+  while IFS= read -r ln; do
+    [[ -z "$ln" ]] && continue
+    rows+=("$ln")
+  done < <(awk '
+    /^map / { inmap=1; next }
+    inmap && /^}/ { inmap=0 }
+    inmap && /^[[:space:]]/ && NF >= 2 {
+      dom = $1; sub(/;$/, "", dom); be = $2; sub(/;$/, "", be)
+      if (dom != "" && dom != "default") print dom "|" be
+    }
+  ' "$SNI_CONF")
+
+  [[ ${#rows[@]} -eq 0 ]] && return 0
+
+  local -a added=()
+  local row dom be t skip is_target
+  for row in "${rows[@]}"; do
+    IFS='|' read -r dom be <<<"$row"
+    [[ -z "$dom" ]] && continue
+    # пропускаем служебные backend'ы
+    case "$be" in
+      panel_backend|agh_backend) continue ;;
+    esac
+    # пропускаем чужие цели reality
+    is_target=0
+    for t in "${REALITY_TARGETS[@]}"; do
+      [[ "$dom" == "$t" ]] && { is_target=1; break; }
+    done
+    [[ "$is_target" == "1" ]] && continue
+    # уже в списке?
+    if [[ "${CERT_MODE:-A}" == "A" ]]; then
+      cert_domains_load
+      [[ " ${CERT_DOMAINS[*]} " == *" $dom "* ]] && continue
+      cert_domains_add "$dom"
+    else
+      # режим B: проверяем в правильной линии
+      local _line=""
+      _line=$(cert_line_for "$dom")
+      [[ -z "$_line" ]] && continue
+      cert_line_domains_load "$_line"
+      [[ " ${CERT_LINE_DOMAINS[*]} " == *" $dom "* ]] && continue
+      cert_line_domains_add "$_line" "$dom"
+    fi
+    added+=("$dom")
+  done
+
+  if [[ ${#added[@]} -gt 0 ]]; then
+    log "cert-domains-sync: добавлены в список: ${added[*]}"
+  fi
+  return 0
+}
+
+# Идемпотентная пересборка сертов.
+#   • Режим A — одна линия (имя = домен панели).
+#   • Режим B — обход всех линий (главная + доп. all.<base>).
+#   • Если SAN совпадает и срок > 30 дн — перевыпуск не запускается.
+#   • Выводит состояние каждой линии.
+cert_batch_flush() {
+  cert_mode_load >/dev/null 2>&1 || true
+  # Перед перевыпуском — синхронизировать список с SNI-картой (могут быть
+  # пропущенные домены, если инбаунд когда-то был привязан к SNI напрямую).
+  cert_domains_sync_from_sni >/dev/null 2>&1 || true
+
+  # ── Режим A ──
+  if [[ "${CERT_MODE:-A}" == "A" ]]; then
+    cert_multi_name_resolve || { warn "cert_batch_flush: домен панели неизвестен"; return 0; }
+    cert_domains_load
+    if [[ ${#CERT_DOMAINS[@]} -eq 0 ]]; then
+      warn "Список доменов (stack-domains.txt) пуст — перевыпуск не требуется"
+      return 0
+    fi
+    local ldir="/etc/letsencrypt/live/$CERT_MULTI_NAME"
+    if [[ -f "$ldir/fullchain.pem" ]]; then
+      local cur_san want_san left
+      cur_san=$(openssl x509 -noout -ext subjectAltName -in "$ldir/fullchain.pem" 2>/dev/null \
+                | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr -d ' ' | sort | tr '\n' ',')
+      want_san=$(printf '%s\n' "${CERT_DOMAINS[@]}" | sort -u | tr '\n' ',')
+      if [[ "${cur_san%,}" == "${want_san%,}" ]]; then
+        left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+        if (( left > 30 )); then
+          log "Линия «$CERT_MULTI_NAME» актуальна: ${#CERT_DOMAINS[@]} дом., ~$left дн — перевыпуск не нужен"
+          echo "      SAN: ${cur_san%,}"
+          return 0
+        fi
+        warn "Линия «$CERT_MULTI_NAME»: срок ~$left дн (<=30) — обновляю"
+      else
+        warn "Линия «$CERT_MULTI_NAME»: SAN изменился"
+        echo "      было:  ${cur_san%,}"
+        echo "      стало: ${want_san%,}"
+      fi
+    else
+      log "Линия «$CERT_MULTI_NAME»: серта нет — выпускаю"
+      echo "      SAN: $(printf '%s\\n' "${CERT_DOMAINS[@]}" | sort -u | tr '\\n' ',')"
+    fi
+    cert_multi_issue
+    return $?
+  fi
+
+  # ── Режим B: обход линий ──
+  local pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
+  if [[ -n "$pd" ]]; then
+    cert_lines_add "$pd"
+    cert_line_domains_add "$pd" "$pd"
+  fi
+  cert_lines_load
+  if [[ ${#CERT_LINES[@]} -eq 0 ]]; then
+    warn "cert_batch_flush: нет линий (режим B)"
+    return 0
+  fi
+  log "Режим B: линий — ${#CERT_LINES[@]}"
+  local rc=0 ln d
+  for ln in "${CERT_LINES[@]}"; do
+    cert_line_domains_load "$ln"
+    if [[ ${#CERT_LINE_DOMAINS[@]} -eq 0 ]]; then
+      warn "  Линия «$ln» пуста — пропуск"
+      continue
+    fi
+    cert_issue_line "$ln" || rc=1
+  done
+  return $rc
+}
+
+# Просмотр: список доменов + сведения о сертах
 certs_view() {
+  cert_multi_name_resolve >/dev/null 2>&1 || true
+  line; echo -e "${B}   СЕРТИФИКАТЫ — ОБЗОР${N}"; line
+  echo "  Имя серта (= домен панели): ${CERT_MULTI_NAME:-<домен панели не задан>}"
+  echo -e "${B}▸ Домены в SAN-списке ($CERT_DOMAINS_FILE):${N}"
+  if [[ -s "$CERT_DOMAINS_FILE" ]]; then
+    local i=1 d
+    while IFS= read -r d; do
+      d="$(printf '%s' "$d" | tr -d '[:space:]')"
+      [[ -z "$d" ]] && continue
+      printf "  %2d) %s\n" "$i" "$d"; i=$((i+1))
+    done < "$CERT_DOMAINS_FILE"
+  else
+    echo "  (пусто — мультисписок ещё не создан)"
+  fi
+  echo
+  local ldir="/etc/letsencrypt/live/$CERT_MULTI_NAME"
+  if [[ -f "$ldir/fullchain.pem" ]]; then
+    echo -e "${B}▸ Сертификат панели / мультисерт «$CERT_MULTI_NAME»:${N}"
+    echo "  Путь:  $ldir"
+    local subj end left
+    subj=$(openssl x509 -noout -subject -in "$ldir/fullchain.pem" 2>/dev/null | sed 's/^subject= *//')
+    end=$(openssl x509 -noout -enddate -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)
+    left=$(( ($(date -d "$end" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+    echo "  Subject: $subj"
+    echo "  Истекает: $end (~$left дн)"
+    echo "  SAN:"
+    openssl x509 -noout -ext subjectAltName -in "$ldir/fullchain.pem" 2>/dev/null \
+      | tail -n +2 | tr ',' '\n' | sed 's/^ */    /' || true
+  else
+    echo -e "${B}▸ Мультисерт $CERT_MULTI_NAME:${N}  НЕ выпущен"
+  fi
   echo
   echo -e "${B}▸ Все сертификаты в /etc/letsencrypt/live/:${N}"
   certbot certificates 2>/dev/null | sed 's/^/  /' || true
@@ -3570,122 +4487,525 @@ cert_paths() {
 # Сосуществует с wildcard: cert_paths/find_covering_cert сами выберут wildcard
 # для его зоны, а для остальных доменов найдут SAN в линии stack-multi.
 # cert_issue при виде домена из списка тоже переиспользует SAN (find_covering_cert).
-multi_cert_list() {
-  [[ -f "$MULTI_CERT_FILE" ]] && grep -vE '^\s*(#|$)' "$MULTI_CERT_FILE" 2>/dev/null || true
+# Добавить домен в мультисписок вручную
+certs_domain_add_manual() {
+  cert_domains_load
+  local newd=""
+  ask newd "Домен для добавления" "" '^[a-zA-Z0-9.-]+$'
+  [[ -z "$newd" ]] && { warn "Отменено"; return 0; }
+  if [[ " ${CERT_DOMAINS[*]} " == *" $newd "* ]]; then
+    log "Домен $newd уже в списке"; return 0
+  fi
+  cert_domains_add "$newd" 1
+  log "Добавлен в мультисписок: $newd"
+  local r=""
+  askyn r "Перевыпустить мультисерт сейчас?" "y"
+  [[ "$r" == true ]] && { CERT_DEFER=0; cert_batch_flush; }
+  pause
 }
 
-multi_cert_rebuild() {
-  frozen "ALL-CERTS" && { warn "мультисерт: серты заморожены (ALL-CERTS) — п.25"; return 1; }
-  le_email_load || true
-  if [[ -z "$EMAIL" ]]; then
-    ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
-    le_email_save "$EMAIL"
+# Удалить домен из мультисписка вручную
+certs_domain_remove_manual() {
+  cert_domains_load
+  cert_multi_name_resolve >/dev/null 2>&1 || true
+  [[ ${#CERT_DOMAINS[@]} -eq 0 ]] && { warn "Мультисписок пуст"; pause; return 0; }
+  echo
+  echo "Домены в мультисписке:"
+  local i=1 d
+  for d in "${CERT_DOMAINS[@]}"; do
+    local mark=""
+    [[ -n "$CERT_MULTI_NAME" && "$d" == "$CERT_MULTI_NAME" ]] && mark=" [домен панели — удалять нельзя]"
+    printf "  %2d) %s%s\n" "$i" "$d" "$mark"
+    i=$((i+1))
+  done
+  echo
+  local pick=""
+  ask pick "Номер для удаления (0 — отмена)" "0" '^[0-9]+$'
+  [[ "$pick" == "0" ]] && return 0
+  (( pick < 1 || pick > ${#CERT_DOMAINS[@]} )) && { err "Нет такого номера"; pause; return 1; }
+  local target="${CERT_DOMAINS[$((pick-1))]}"
+  if [[ -n "$CERT_MULTI_NAME" && "$target" == "$CERT_MULTI_NAME" ]]; then
+    err "Это домен панели (CN серта) — удалить нельзя. Смени домен панели в п.1."
+    pause; return 1
   fi
-  local -a doms=()
-  local d
-  while IFS= read -r d; do
-    d="$(printf '%s' "$d" | tr -d '[:space:]')"
-    [[ -z "$d" ]] && continue
-    frozen "cert:$d" && { warn "мультисерт: «$d» в заморозке — пропущен"; continue; }
-    doms+=("-d" "$d")
-  done < <(multi_cert_list)
-  [[ ${#doms[@]} -gt 0 ]] || { err "список доменов пуст ($MULTI_CERT_FILE)"; return 1; }
+  cert_domains_remove "$target"
+  log "Удалён из мультисписка: $target"
+  local r=""
+  askyn r "Перевыпустить мультисерт сейчас (без удалённого домена)?" "y"
+  [[ "$r" == true ]] && { CERT_DEFER=0; cert_batch_flush; }
+  pause
+}
 
-  local dir="/etc/letsencrypt/live/$MULTI_CERT_NAME"
-  log "  выпуск SAN-серта «$MULTI_CERT_NAME»: $(multi_cert_list | tr '\n' ' ')"
-  local out="" nginx_was_active=false
-  systemctl is-active --quiet nginx 2>/dev/null && nginx_was_active=true
-  # 80 закрыт UFW — для HTTP-01 открываем временно (как в cert_issue)
-  local ufw_80_temp=false
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-    if ! ufw status 2>/dev/null | grep -qE "^80/tcp[[:space:]]+ALLOW"; then
-      ufw allow 80/tcp comment "acme-temp" >/dev/null 2>&1 || true
-      ufw_80_temp=true
-      log "  UFW: 80/tcp временно открыт для ACME"
-    fi
+
+# =====================================================================
+# ОЧИСТКА СИРОТ И ДУБЛЕЙ СЕРТОВ
+# =====================================================================
+
+# Возвращает список «известных» линий (для проверки, что линия в live/
+# действительно нужна). Печатает по строке.
+cert_known_lines() {
+  cert_mode_load >/dev/null 2>&1 || true
+  # Главная линия (домен панели)
+  local pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
+  [[ -n "$pd" ]] && echo "$pd"
+  # Линии из cert-lines.txt (режим B)
+  if [[ -f "$CERT_LINES_FILE" ]]; then
+    local l
+    while IFS= read -r l; do
+      l="$(printf '%s' "$l" | tr -d '[:space:]')"
+      [[ -n "$l" ]] && echo "$l"
+    done < "$CERT_LINES_FILE"
   fi
-  mkdir -p /var/www/html 2>/dev/null || true
-  if [[ "$nginx_was_active" == true ]]; then
-    out=$(certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos --keep-until-expiring --email "$EMAIL" --cert-name "$MULTI_CERT_NAME" "${doms[@]}" 2>&1 || true)
-    if [[ ! -f "$dir/fullchain.pem" || ! -f "$dir/privkey.pem" ]]; then
-      warn "  webroot не сработал, пробуем standalone (nginx кратко остановим)"
-      systemctl stop nginx 2>/dev/null || true
-      out="$out
-$(certbot certonly --standalone --non-interactive --agree-tos --keep-until-expiring --email "$EMAIL" --cert-name "$MULTI_CERT_NAME" "${doms[@]}" 2>&1 || true)"
-      systemctl start nginx 2>/dev/null || true
-    fi
-  else
-    out=$(certbot certonly --standalone --non-interactive --agree-tos --keep-until-expiring --email "$EMAIL" --cert-name "$MULTI_CERT_NAME" "${doms[@]}" 2>&1 || true)
-  fi
-  if [[ "$ufw_80_temp" == true ]]; then
-    ufw delete allow 80/tcp >/dev/null 2>&1 || true
-    log "  UFW: 80/tcp закрыт обратно"
-  fi
-  if [[ -f "$dir/fullchain.pem" && -f "$dir/privkey.pem" ]]; then
-    log "  OK: SAN-серт «$MULTI_CERT_NAME» покрывает: $(multi_cert_list | tr '\n' ' ')"
-    openssl x509 -noout -enddate -in "$dir/cert.pem" 2>/dev/null | sed 's/^/    /'
+  # Wildcard
+  [[ -f "$WILDCARD_STATE" ]] && head -n1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]'
+}
+
+# Проверяет, используется ли имя линии где-нибудь:
+#   - в БД x-ui (webCertFile / subCertFile / в настройках инбаундов)
+#   - в nginx (stack.conf, adguard-tls)
+#   - в списке известных линий (cert_known_lines)
+# Возвращает 0 если используется, иначе 1.
+cert_line_is_used() {
+  local name="$1"
+  [[ -z "$name" ]] && return 1
+  # Известные линии
+  if cert_known_lines | grep -qxF "$name"; then
     return 0
   fi
-  err "  certbot отказал:"
-  echo "$out" | tail -8 | sed 's/^/    /'
+  # БД x-ui
+  if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+    local cnt
+    cnt=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+      "SELECT COUNT(*) FROM settings WHERE value LIKE '%/live/$name/%';" 2>/dev/null || echo 0)
+    [[ "$cnt" != "0" ]] && return 0
+    cnt=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+      "SELECT COUNT(*) FROM inbounds WHERE settings LIKE '%/live/$name/%' OR stream_settings LIKE '%/live/$name/%';" 2>/dev/null || echo 0)
+    [[ "$cnt" != "0" ]] && return 0
+  fi
+  # nginx
+  if [[ -f "$STACK_CONF" ]] && grep -q "/live/$name/" "$STACK_CONF" 2>/dev/null; then
+    return 0
+  fi
+  if [[ -f /opt/AdGuardHome/AdGuardHome.yaml ]] && grep -q "/live/$name/" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; then
+    return 0
+  fi
   return 1
 }
 
-multi_cert_menu() {
-  line; echo -e "${B}   МУЛЬТИСЕРТ (SAN) — один серт на несколько доменов${N}"; line
-  echo "  Wildcard покрывает СВОЮ зону сам; SAN нужен для доменов ДРУГИХ зон."
-  echo "  Резолвер сам выбирает серт: точный → wildcard → SAN (stack-multi)."
+# Очистка дублей -0001 / -0002.
+# Если есть <base> и <base>-0001:
+#   • Если <base> — живая линия (используется) → удаляем <base>-0001.
+#   • Если <base> пустая (нет fullchain.pem или его symlink битый) → удаляем
+#     <base>, переименовываем <base>-0001 в <base> (через certbot? нет —
+#     через mv live/archive + правку renewal.conf).
+#   • Если обе живые и не совпадают SAN — показать, не трогать.
+cert_dedup_0001() {
+  line; echo -e "${B}   ОЧИСТКА ДУБЛЕЙ -0001${N}"; line
+  local -a suffix_lines=()
+  local ld name base
+  for ld in /etc/letsencrypt/live/*/; do
+    [[ -d "$ld" ]] || continue
+    name=$(basename "$ld")
+    [[ "$name" =~ -[0-9]{4}$ ]] && suffix_lines+=("$name")
+  done
+  if [[ ${#suffix_lines[@]} -eq 0 ]]; then
+    log "Дублей -0001 в live/ не найдено"
+    pause; return 0
+  fi
+  echo "Найдены линии с суффиксом:"
+  for name in "${suffix_lines[@]}"; do echo "  - $name"; done
   echo
-  echo "  Домены в списке:"
-  if [[ -n "$(multi_cert_list)" ]]; then multi_cert_list | sed 's/^/    • /'; else echo "    (пусто)"; fi
+  local did=0
+  for name in "${suffix_lines[@]}"; do
+    base="${name%-[0-9][0-9][0-9][0-9]}"
+    local base_live="/etc/letsencrypt/live/$base"
+    local suffix_live="/etc/letsencrypt/live/$name"
+
+    # Случай 1: <base> не существует или пустая → переименовать <base>-NNNN в <base>
+    if [[ ! -d "$base_live" ]] || [[ ! -f "$base_live/fullchain.pem" ]]; then
+      echo "  ─ $name: базовая линия $base отсутствует → переименовываю"
+      local sure=""
+      askyn sure "Переименовать $name → $base?" "y"
+      if [[ "$sure" == true ]]; then
+        # Переименовать live/
+        [[ -d "$base_live" ]] && rm -rf "$base_live"
+        mv "$suffix_live" "$base_live" 2>/dev/null || true
+        # Переименовать archive/
+        [[ -d "/etc/letsencrypt/archive/$base" ]] && rm -rf "/etc/letsencrypt/archive/$base"
+        [[ -d "/etc/letsencrypt/archive/$name" ]] && mv "/etc/letsencrypt/archive/$name" "/etc/letsencrypt/archive/$base" 2>/dev/null || true
+        # Поправить renewal.conf
+        local rf="/etc/letsencrypt/renewal/$name.conf"
+        if [[ -f "$rf" ]]; then
+          sed -i "s|/etc/letsencrypt/live/$name|/etc/letsencrypt/live/$base|g; s|/etc/letsencrypt/archive/$name|/etc/letsencrypt/archive/$base|g; s|cert = $name|cert = $base|; s|^archive_dir = .*$|archive_dir = /etc/letsencrypt/archive/$base|" "$rf" 2>/dev/null || true
+          mv "$rf" "/etc/letsencrypt/renewal/$base.conf" 2>/dev/null || true
+        fi
+        log "    переименовано: $name → $base"
+        did=$((did+1))
+      fi
+      continue
+    fi
+
+    # Случай 2: обе линии живые → сравнить SAN
+    local san_base san_suffix
+    san_base=$(openssl x509 -noout -ext subjectAltName -in "$base_live/fullchain.pem" 2>/dev/null \
+               | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr -d ' ' | sort | tr '\n' ',')
+    san_suffix=$(openssl x509 -noout -ext subjectAltName -in "$suffix_live/fullchain.pem" 2>/dev/null \
+                 | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr -d ' ' | sort | tr '\n' ',')
+    echo "  ─ $name"
+    echo "      $base        SAN: ${san_base%,}"
+    echo "      $name  SAN: ${san_suffix%,}"
+    if [[ "${san_base%,}" == "${san_suffix%,}" ]]; then
+      local sure=""
+      askyn sure "SAN совпадают — удалить дубль $name?" "y"
+      if [[ "$sure" == true ]]; then
+        certbot delete --cert-name "$name" --non-interactive 2>/dev/null || true
+        log "    удалено: $name"
+        did=$((did+1))
+      fi
+    else
+      warn "    SAN РАЗНЫЕ — не трогаю (разберись вручную)"
+    fi
+  done
+  [[ $did -eq 0 ]] && log "Ничего не изменено."
+  pause
+}
+
+# Автоочистка сирот: линии в live/, которые не используются.
+# Показывает список, спрашивает по каждой, удаляет по certbot delete.
+cert_lines_cleanup() {
+  line; echo -e "${B}   ОЧИСТКА СИРОТ (линии, которые нигде не используются)${N}"; line
+  [[ -d /etc/letsencrypt/live ]] || { warn "Нет /etc/letsencrypt/live"; pause; return 0; }
+
+  local -a orphans=()
+  local ld name
+  for ld in /etc/letsencrypt/live/*/; do
+    [[ -d "$ld" ]] || continue
+    name=$(basename "$ld")
+    [[ "$name" =~ -[0-9]{4}$ ]] && continue   # -0001 обрабатывает cert_dedup_0001
+    if ! cert_line_is_used "$name"; then
+      orphans+=("$name")
+    fi
+  done
+
+  if [[ ${#orphans[@]} -eq 0 ]]; then
+    log "Сирот не найдено — всё используется"
+    pause; return 0
+  fi
+
+  echo "Найдены сироты (не используются нигде):"
+  local n=0
+  for name in "${orphans[@]}"; do
+    n=$((n+1))
+    local fc="/etc/letsencrypt/live/$name/fullchain.pem"
+    local san="—" exp="—"
+    if [[ -f "$fc" ]]; then
+      san=$(openssl x509 -noout -ext subjectAltName -in "$fc" 2>/dev/null \
+            | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr -d ' ' | tr '\n' ',' | sed 's/,$//')
+      exp=$(openssl x509 -noout -enddate -in "$fc" 2>/dev/null | cut -d= -f2)
+    fi
+    printf "  %2d) %s\n" "$n" "$name"
+    echo "      SAN: $san"
+    echo "      Истекает: $exp"
+  done
   echo
-  echo "   1) Показать серт (SAN + срок)"
-  echo "   2) Добавить домен в список"
-  echo "   3) Убрать домен из списка"
-  echo "   4) Пересобрать серт по списку"
-  echo "   5) Удалить серт stack-multi целиком"
-  echo "   0) Назад"
-  local a=""; ask a "Выбор" "0" '^[0-9]+$'
-  local d=""
-  case "$a" in
+  echo "  1) Удалить ВСЕ найденные сироты (с подтверждением)"
+  echo "  2) Выбрать по одной"
+  echo "  0) Отмена"
+  line
+  local c=""
+  read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
+  case "$c" in
     1)
-      local mdir="/etc/letsencrypt/live/$MULTI_CERT_NAME"
-      if [[ -f "$mdir/cert.pem" ]]; then
-        openssl x509 -noout -subject -enddate -ext subjectAltName -in "$mdir/cert.pem" 2>/dev/null | sed 's/^/  /'
-      else warn "серт stack-multi ещё не выпущен — добавь домены и пересобери (п.4)"; fi
+      local sure=""
+      ask sure "Удалить ВСЕ сироты (${#orphans[@]} шт.)? Введи YES" "" '^YES$'
+      [[ "$sure" == "YES" ]] || { log "Отменено"; pause; return 0; }
+      for name in "${orphans[@]}"; do
+        log "Удаляю $name …"
+        certbot delete --cert-name "$name" --non-interactive 2>&1 | tail -2 | sed 's/^/    /'
+      done
+      log "Готово"
       ;;
     2)
-      ask d "Домен (напр. vpn.other-zone.ru)" "" '^[a-zA-Z0-9.-]+$'
-      [[ -z "$d" ]] && return 0
-      grep -qxF "$d" "$MULTI_CERT_FILE" 2>/dev/null || printf '%s\n' "$d" >> "$MULTI_CERT_FILE"
-      log "в списке: $d (не забудь пересобрать — п.4)"
-      ;;
-    3)
-      [[ -f "$MULTI_CERT_FILE" ]] || { warn "списка нет"; pause; return 0; }
-      multi_cert_list | nl -ba | sed 's/^/  /'
-      ask d "Домен для удаления" "" '^[a-zA-Z0-9.-]+$'
-      [[ -z "$d" ]] && return 0
-      sed -i "/^${d//./\\.}$/d" "$MULTI_CERT_FILE"
-      log "убран: $d (пересобери — п.4)"
-      ;;
-    4) multi_cert_rebuild ;;
-    5)
-      if [[ -f "/etc/letsencrypt/live/$MULTI_CERT_NAME/cert.pem" ]]; then
-        local dl=""; askyn dl "Удалить серт stack-multi и список доменов?" "n"
-        if [[ "$dl" == true ]]; then
-          certbot delete --cert-name "$MULTI_CERT_NAME" -n >/dev/null 2>&1
-          rm -f "$MULTI_CERT_FILE"
-          log "мультисерт удалён"
+      for name in "${orphans[@]}"; do
+        local sure=""
+        askyn sure "Удалить «$name»?" "n"
+        if [[ "$sure" == true ]]; then
+          certbot delete --cert-name "$name" --non-interactive 2>&1 | tail -2 | sed 's/^/    /'
+          log "  удалено"
         fi
-      else warn "серта нет"; fi
+      done
       ;;
-    *) return 0 ;;
+    *) pause; return 0 ;;
   esac
   pause
 }
 
-# Выпуск wildcard: base + *.base через Cloudflare DNS-01
-# base можно передать аргументом; если wildcard уже выпущен и свеж — переустановки не будет
+# Расширенный аудит для режима B: показывает все линии + их SAN + использование.
+cert_lines_audit() {
+  line; echo -e "${B}   АУДИТ ЛИНИЙ СЕРТОВ${N}"; line
+  cert_mode_load >/dev/null 2>&1 || true
+  echo "  Режим: ${CERT_MODE:-A}"
+  echo
+
+  cert_lines_load
+  if [[ ${#CERT_LINES[@]} -eq 0 ]]; then
+    warn "Линии не найдены"
+    pause; return 0
+  fi
+  local ln d n
+  for ln in "${CERT_LINES[@]}"; do
+    cert_line_domains_load "$ln"
+    n=${#CERT_LINE_DOMAINS[@]}
+    echo "  ▸ Линия «$ln» ($n дом.)"
+    echo "      Домены SAN:"
+    for d in "${CERT_LINE_DOMAINS[@]}"; do echo "        $d"; done
+    local ldir="/etc/letsencrypt/live/$ln"
+    if [[ -f "$ldir/fullchain.pem" ]]; then
+      local end left
+      end=$(openssl x509 -noout -enddate -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)
+      left=$(( ($(date -d "$end" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+      echo "      Серт: есть (~$left дн, до $end)"
+      # Проверка: SAN серта == SAN в файле?
+      local cur_san want_san
+      cur_san=$(openssl x509 -noout -ext subjectAltName -in "$ldir/fullchain.pem" 2>/dev/null \
+                | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr -d ' ' | sort | tr '\n' ',')
+      want_san=$(printf '%s\n' "${CERT_LINE_DOMAINS[@]}" | sort -u | tr '\n' ',')
+      if [[ "${cur_san%,}" == "${want_san%,}" ]]; then
+        echo "      SAN совпадает: ✓"
+      else
+        warn "      SAN РАСХОДИТСЯ:"
+        echo "        серт:  ${cur_san%,}"
+        echo "        файл:  ${want_san%,}"
+      fi
+    else
+      warn "      Серт: НЕ выпущен"
+    fi
+    echo
+  done
+  pause
+}
+
+# Аудит сертификатов: какие линии в live/, где используются, какие сироты.
+# Ничего не удаляет — только показывает.
+cert_audit() {
+  line; echo -e "${B}   АУДИТ СЕРТИФИКАТОВ${N}"; line
+  [[ -d /etc/letsencrypt/live ]] || { warn "Нет /etc/letsencrypt/live"; pause; return 0; }
+
+  # 1. Активные домены из 3 источников
+  local active_domains=""
+  # БД x-ui
+  local _wd _sd
+  _wd=$(xui_get webDomain 2>/dev/null || true); _sd=$(xui_get subDomain 2>/dev/null || true)
+  [[ -n "$_wd" && "$_wd" != "null" ]] && active_domains+=" $_wd"
+  [[ -n "$_sd" && "$_sd" != "null" && "$_sd" != "$_wd" ]] && active_domains+=" $_sd"
+
+  # stack-domains.txt
+  if [[ -s "$CERT_DOMAINS_FILE" ]]; then
+    local d
+    while IFS= read -r d; do
+      d="$(printf '%s' "$d" | tr -d '[:space:]')"
+      [[ -n "$d" ]] && active_domains+=" $d"
+    done < "$CERT_DOMAINS_FILE"
+  fi
+
+  # SNI-карта: домены из блока map (только первое поле строк ВНУТРИ map)
+  if [[ -f "$SNI_CONF" ]]; then
+    local sd
+    while IFS= read -r sd; do
+      [[ -n "$sd" && "$sd" != "default" && "$sd" != "_" ]] && active_domains+=" $sd"
+    done < <(awk '
+      /^map / { inmap=1; next }
+      inmap && /^}/ { inmap=0 }
+      inmap && /^[[:space:]]/ && NF >= 2 {
+        dom = $1
+        sub(/;$/, "", dom)
+        if (dom != "" && dom != "default") print dom
+      }
+    ' "$SNI_CONF" 2>/dev/null | sort -u)
+  fi
+
+  # server_name в stack.conf
+  if [[ -f "$STACK_CONF" ]]; then
+    local sn
+    while IFS= read -r sn; do
+      [[ -n "$sn" && "$sn" != "_" ]] && active_domains+=" $sn"
+    done < <(grep -oE '^\s*server_name\s+[^;]+;' "$STACK_CONF" 2>/dev/null | sed 's/server_name//; s/;//; s/^\s*//; s/\s*$//' | tr ' ' '\n' | sort -u)
+  fi
+
+  # Уникализация
+  active_domains=$(printf '%s\n' $active_domains | sort -u | tr '\n' ' ')
+  echo -e "${B}▸ Активные домены стека:${N}"
+  echo "  $active_domains"
+  echo
+
+  # 2. Все линии в live/
+  echo -e "${B}▸ Линии в /etc/letsencrypt/live/:${N}"
+  local total=0 orphans=0
+  local ld
+  for ld in /etc/letsencrypt/live/*/; do
+    [[ -d "$ld" ]] || continue
+    local name
+    name=$(basename "$ld")
+    (( total++ ))
+    local fc="$ld/fullchain.pem"
+    [[ -f "$fc" ]] || { warn "  $name — НЕТ fullchain.pem (битая линия)"; continue; }
+
+    # SAN
+    local san=""
+    san=$(openssl x509 -noout -ext subjectAltName -in "$fc" 2>/dev/null \
+          | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr '\n' ',' | sed 's/,$//')
+
+    # Срок
+    local end left
+    end=$(openssl x509 -noout -enddate -in "$fc" 2>/dev/null | cut -d= -f2)
+    left=$(( ($(date -d "$end" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+
+    # Использование
+    local used_in=""
+    local in_db=0 in_nginx=0 in_sni=0 in_domains=0
+
+    # в БД?
+    local refs
+    refs=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+      "SELECT COUNT(*) FROM settings WHERE value LIKE '%/live/$name/%';" 2>/dev/null || echo 0)
+    [[ "$refs" != "0" ]] && { in_db=1; used_in+=" БД"; }
+
+    # в nginx?
+    if [[ -f "$STACK_CONF" ]] && grep -q "/live/$name/" "$STACK_CONF" 2>/dev/null; then
+      in_nginx=1; used_in+=" nginx"
+    fi
+
+    # в SNI-карте? (по имени как домен)
+    if [[ -f "$SNI_CONF" ]] && grep -qE "^\s+$name\s+" "$SNI_CONF" 2>/dev/null; then
+      in_sni=1; used_in+=" SNI"
+    fi
+
+    # в stack-domains.txt?
+    if [[ -s "$CERT_DOMAINS_FILE" ]] && grep -qxF "$name" "$CERT_DOMAINS_FILE" 2>/dev/null; then
+      in_domains=1; used_in+=" domains.txt"
+    fi
+
+    # Сан содержит любой активный домен?
+    local covers_active=0
+    local ad
+    for ad in $active_domains; do
+      [[ -z "$ad" ]] && continue
+      if grep -qE "(^|,)\s*$ad(\s*,|$)" <<<"$(tr ',' '\n' <<<"$san")" 2>/dev/null; then
+        covers_active=1; break
+      fi
+      # wildcard-проверка
+      if grep -qE "(^|,)\s*\*\.${ad#*.}(\s*,|$)" <<<"$(tr ',' '\n' <<<"$san")" 2>/dev/null; then
+        covers_active=1; break
+      fi
+    done
+
+    # Вердикт
+    local verdict
+    if [[ $((in_db + in_nginx + in_sni + in_domains)) -gt 0 ]]; then
+      verdict="${G}✓ используется${N} (${used_in# })"
+    elif [[ "$covers_active" == "1" ]]; then
+      verdict="${Y}? не привязан, но SAN покрывает активный домен${N}"
+    else
+      verdict="${R}✗ СИРОТА (не используется нигде)${N}"
+      (( orphans++ ))
+    fi
+
+    echo "  ─ $name"
+    echo "      SAN:     $san"
+    echo "      Срок:    $end (~$left дн)"
+    echo -e "      Статус:  $verdict"
+  done
+
+  echo
+  echo "  Всего линий: $total · Сирот: $orphans"
+  if [[ $orphans -gt 0 ]]; then
+    warn "Удалить сирот можно через п.10 → 12 (или вручную: certbot delete --cert-name <name>)"
+  fi
+  line
+  pause
+}
+
+# Интерактивное удаление сертов. Показывает список, даёт выбрать, требует
+# подтверждения для используемых. Защищает от случайного удаления.
+cert_delete_menu() {
+  line; echo -e "${B}   УДАЛЕНИЕ СЕРТА${N}"; line
+  [[ -d /etc/letsencrypt/live ]] || { warn "Нет /etc/letsencrypt/live"; pause; return 0; }
+
+  local -a lines=()
+  local ld
+  for ld in /etc/letsencrypt/live/*/; do
+    [[ -d "$ld" ]] || continue
+    lines+=("$(basename "$ld")")
+  done
+
+  [[ ${#lines[@]} -eq 0 ]] && { warn "Сертов нет"; pause; return 0; }
+
+  echo "Доступные линии:"
+  local i=1 name
+  for name in "${lines[@]}"; do
+    local fc="/etc/letsencrypt/live/$name/fullchain.pem"
+    local san="" exp=""
+    if [[ -f "$fc" ]]; then
+      san=$(openssl x509 -noout -ext subjectAltName -in "$fc" 2>/dev/null | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr '\n' ',' | sed 's/,$//')
+      exp=$(openssl x509 -noout -enddate -in "$fc" 2>/dev/null | cut -d= -f2)
+    fi
+
+    # Использование
+    local used=""
+    local refs
+    refs=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+      "SELECT COUNT(*) FROM settings WHERE value LIKE '%/live/$name/%';" 2>/dev/null || echo 0)
+    [[ "$refs" != "0" ]] && used+=" БД"
+    [[ -f "$STACK_CONF" ]] && grep -q "/live/$name/" "$STACK_CONF" 2>/dev/null && used+=" nginx"
+
+    local mark=""
+    if [[ -n "$used" ]]; then mark="${R}[ИСПОЛЬЗУЕТСЯ:${used# }]${N}"; else mark="${G}[не используется]${N}"; fi
+
+    printf "  %2d) %-30s %s\n" "$i" "$name" "$mark"
+    printf "        SAN: %s\n" "${san:-—}"
+    printf "        Срок: %s\n" "${exp:-—}"
+    i=$((i+1))
+  done
+  echo
+  local pick=""
+  ask pick "Номер линии для удаления (0 — отмена)" "0" '^[0-9]+$'
+  [[ "$pick" == "0" ]] && return 0
+  (( pick < 1 || pick > ${#lines[@]} )) && { err "Нет такого"; pause; return 1; }
+  local target="${lines[$((pick-1))]}"
+
+  # Проверка использования → требует YES
+  local in_use=""
+  local refs
+  refs=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "SELECT COUNT(*) FROM settings WHERE value LIKE '%/live/$target/%';" 2>/dev/null || echo 0)
+  [[ "$refs" != "0" ]] && in_use+=" БД"
+  [[ -f "$STACK_CONF" ]] && grep -q "/live/$target/" "$STACK_CONF" 2>/dev/null && in_use+=" nginx"
+
+  echo
+  if [[ -n "$in_use" ]]; then
+    warn "⚠ Линия «$target» ИСПОЛЬЗУЕТСЯ: ${in_use# }"
+    warn "  Удаление сломает TLS для этих сервисов!"
+    local sure=""
+    ask sure "Для подтверждения введи YES" "" '^YES$'
+    [[ "$sure" == "YES" ]] || { log "Отменено"; pause; return 0; }
+  else
+    local sure=""
+    askyn sure "Удалить «$target»?" "n"
+    [[ "$sure" == true ]] || { log "Отменено"; pause; return 0; }
+  fi
+
+  log "Удаляю $target …"
+  if certbot delete --cert-name "$target" --non-interactive 2>&1 | sed 's/^/    /'; then
+    log "Линия «$target» удалена"
+  else
+    err "certbot delete вернул ошибку"
+  fi
+  pause
+}
+
+# статистика decoy-посещений за 24ч (парсинг decoy_ext через python3)
 cert_wildcard_issue() {
   le_email_load || true
   if [[ -z "$EMAIL" ]]; then
@@ -4681,6 +6001,11 @@ initial_setup() {
   done
   # пути сертификатов → в settings инбаундов (naive/anytls/trusttunnel/tproxy/hysteria)
   sync_inbound_certs
+
+  # режим выпуска сертов (A/B) + мультисерт по всем доменам стека
+  cert_mode_ask
+  CERT_DEFER=0
+  cert_batch_flush || warn "Мультисерт не выпущен — часть доменов может не работать (проверь DNS и п.10)"
 
   mkdir -p "$NGINX_STREAM_DIR" 2>/dev/null || true
   {
@@ -6254,6 +7579,8 @@ panel_domain_migrate() {
 }
 
 certs_menu() {
+  while :; do
+  clear
   line; echo -e "${B}   СЕРТИФИКАТЫ${N}"; line
   # активный серт панели из настроек x-ui (в т.ч. выпущенный через меню x-ui)
   local db_line dc dk dd
@@ -6277,10 +7604,18 @@ certs_menu() {
   echo "  3) Выпустить wildcard (Cloudflare DNS-01)"
   echo "  4) Wildcard вкл/выкл"
   echo "  5) Выпуск серта через меню x-ui (освободить :80)"
-  echo "  6) Показать все серты и email (обзор)"
+  echo "  6) Показать домены и серты (обзор)"
   echo "  7) Сбросить email Let's Encrypt (спросить заново)"
   echo "  8) Переезд домена панели (серт/БД/hosts/nginx)"
-  echo "  9) Мультисерт (SAN): домены разных зон одним сертом"
+  echo "  9) Пересобрать мультисерт из доменов панели/инбаундов"
+  echo "  10) Добавить домен в мультисписок"
+  echo "  11) Удалить домен из мультисписка"
+  echo "  12) Аудит сертов — где что используется"
+  echo "  13) Удалить серт по имени (с предупреждениями)"
+  echo "  14) Логика выпуска сертификатов (A/B)"
+  echo "  15) Очистка сирот (линии, которые нигде не используются)"
+  echo "  16) Очистка дублей -0001"
+  echo "  17) Аудит линий (SAN файла vs серт)"
   echo "  0) Назад"
   line
   local action=""
@@ -6295,12 +7630,20 @@ certs_menu() {
     6) certs_view ;;
     7) le_email_forget; log "Email сброшен — при следующем выпуске спросит заново"; pause ;;
     8) panel_domain_migrate ;;
-    9) multi_cert_menu ;;
+    9) cert_domains_load; log "Доменов в списке: ${#CERT_DOMAINS[@]}"; CERT_DEFER=0; cert_batch_flush; pause ;;
+    10) certs_domain_add_manual ;;
+    11) certs_domain_remove_manual ;;
+    12) cert_audit ;;
+    13) cert_delete_menu ;;
+    14) cert_mode_menu ;;
+    15) cert_lines_cleanup ;;
+    16) cert_dedup_0001 ;;
+    17) cert_lines_audit ;;
+    0) return 0 ;;
+    *) sleep 1 ;;
   esac
-  pause
+  done
 }
-
-# статистика decoy-посещений за 24ч (парсинг decoy_ext через python3)
 decoy_stats() {
   [[ -s "$DECOY_LOG_ACCESS" ]] || { warn "Лог деко-доступов пуст"; pause; return 0; }
   python3 - "$DECOY_LOG_ACCESS" <<'PY'
@@ -6586,6 +7929,7 @@ firewall_menu() {
     echo "  7) Снимок состояния"
     echo "  8) Восстановить из снимка"
     echo "  9) Свои порты — добавить/убрать (не закрываются политиками)"
+    echo "  10) TUI-обзор: правила UFW × слушающие сокеты"
     echo "  0) Назад"
     line
     local c=""
@@ -6701,12 +8045,502 @@ firewall_menu() {
             ;;
         esac
         pause ;;
+      10) firewall_apply_menu; pause ;;
       0) return 0 ;;
       *) sleep 1 ;;
     esac
   done
 }
 
+firewall_apply_menu() {
+  if [[ ! -t 0 ]]; then
+    log "UFW (неинтерактивно): SSH+443+UDP-инбаунды панели"
+    save_firewall_state >/dev/null 2>&1 || true
+    ufw --force reset >/dev/null 2>&1 || true
+    ufw default deny incoming >/dev/null 2>&1 || true
+    ufw default allow outgoing >/dev/null 2>&1 || true
+    fw_allow "${SSH_PORT:-22}" tcp "SSH"
+    fw_allow 443 tcp "HTTPS/SNI"
+    local up
+    for up in $(udp_inbound_ports); do
+      fw_port_locked "$up" && continue
+      fw_allow "$up" udp "udp-инбаунд"
+    done
+    fw_deny_panel_ports
+    ufw --force enable >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local G Y B R N
+  if command -v tput >/dev/null 2>&1; then
+    G=$(tput setaf 2); Y=$(tput setaf 3); B=$(tput setaf 6); R=$(tput setaf 1); N=$(tput sgr0)
+  else
+    G=''; Y=''; B=''; R=''; N=''
+  fi
+
+  local old_stty=""
+  old_stty=$(stty -g </dev/tty 2>/dev/null || true)
+  tui_restore() {
+    [[ -n "$old_stty" ]] && stty "$old_stty" </dev/tty 2>/dev/null || true
+    tput cnorm 2>/dev/null || true
+    tput sgr0  2>/dev/null || true
+  }
+  trap 'tui_restore; return 1' INT TERM
+
+  local W_PTR=1 W_PROTO=6 W_PORT=7 W_PROC=22 W_STATE=10
+
+  # ── Кэш видимой длины. Ключ = "__v_" + строка. Префикс гарантирует
+  # непустой ключ даже для пустой строки → "${CACHE[$k]:-}" работает всегда.
+  local -A VIS_CACHE=()
+  vis_len() {
+    local s="$1"
+    local k="__v_${s}"
+    if [[ -n "${VIS_CACHE[$k]:-}" ]]; then
+      printf '%s' "${VIS_CACHE[$k]}"
+      return
+    fi
+    local no_ansi len
+    no_ansi=$(printf '%s' "$s" | sed $'s/\033\\[[0-9;]*[a-zA-Z]//g')
+    len=$(printf '%s' "$no_ansi" | LC_ALL=C.UTF-8 wc -m | tr -d ' ')
+    VIS_CACHE["$k"]="$len"
+    printf '%s' "$len"
+  }
+  pad_vis() {
+    local s="$1" w="$2" len add
+    len=$(vis_len "$s")
+    add=$(( w - len ))
+    (( add < 0 )) && add=0
+    printf '%s' "$s"
+    (( add > 0 )) && printf '%*s' "$add" ""
+  }
+
+  # ── Активен ли UFW ──
+  local ufw_active=0
+  ufw_is_active && ufw_active=1
+
+  # ── Правила UFW: ALLOW и DENY. Только IPv4-строки (без "(v6)"),
+  #    чтобы не дублировать.
+  declare -A UFW_ALLOW=() UFW_DENY=()
+  local _ln
+  if [[ "$ufw_active" == "1" ]]; then
+    while IFS= read -r _ln; do
+      [[ -z "$_ln" ]] && continue
+      # ожидаем: "22/tcp ALLOW IN Anywhere" или "22222/tcp DENY IN Anywhere"
+      local _pt _act
+      _pt=$(awk '{print $1}' <<<"$_ln")
+      _act=$(awk '{print $2}' <<<"$_ln")
+      [[ ! "$_pt" =~ ^[0-9]+/(tcp|udp)$ ]] && continue
+      case "$_act" in
+        ALLOW) UFW_ALLOW["$_pt"]=1 ;;
+        DENY)  UFW_DENY["$_pt"]=1 ;;
+      esac
+    done < <(ufw status 2>/dev/null | awk '
+      $1 ~ /^[0-9]+\/(tcp|udp)$/ && ($2 == "ALLOW" || $2 == "DENY") { print $1, $2 }')
+  fi
+
+  # ── Сокеты: разделяем снаружи / loopback ──
+  declare -A SOCK_OUT=() SOCK_LOOP=()
+  local port proc addr
+
+  while IFS= read -r _ln; do
+    [[ -z "$_ln" ]] && continue
+    addr=$(awk '{print $4}' <<<"$_ln")
+    case "$addr" in 127.*|\[::1\]:*|::1:*) continue ;; esac
+    port=$(awk '{split($4,a,":"); print a[length(a)]}' <<<"$_ln")
+    [[ -z "$port" || ! "$port" =~ ^[0-9]+$ ]] && continue
+    proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$_ln" | head -1)
+    [[ -z "$proc" ]] && proc="—"
+    case "$proc" in xray-linux*) proc="xray" ;; esac
+    SOCK_OUT["${port}/tcp"]="$proc"
+  done < <(ss -tlnpH 2>/dev/null)
+
+  while IFS= read -r _ln; do
+    [[ -z "$_ln" ]] && continue
+    addr=$(awk '{print $4}' <<<"$_ln")
+    case "$addr" in 127.*|\[::1\]:*|::1:*) ;; *) continue ;; esac
+    port=$(awk '{split($4,a,":"); print a[length(a)]}' <<<"$_ln")
+    [[ -z "$port" || ! "$port" =~ ^[0-9]+$ ]] && continue
+    proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$_ln" | head -1)
+    [[ -z "$proc" ]] && proc="—"
+    case "$proc" in xray-linux*) proc="xray" ;; esac
+    SOCK_LOOP["${port}/tcp"]="$proc"
+  done < <(ss -tlnpH 2>/dev/null)
+
+  while IFS= read -r _ln; do
+    [[ -z "$_ln" ]] && continue
+    [[ "$(awk '{print $5}' <<<"$_ln")" == "*:*" ]] || continue
+    addr=$(awk '{print $4}' <<<"$_ln")
+    case "$addr" in 127.*|\[::1\]:*|::1:*) continue ;; esac
+    port=$(awk '{split($4,a,":"); print a[length(a)]}' <<<"$_ln")
+    [[ -z "$port" || ! "$port" =~ ^[0-9]+$ ]] && continue
+    proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$_ln" | head -1)
+    [[ -z "$proc" ]] && proc="—"
+    case "$proc" in xray-linux*) proc="xray" ;; esac
+    SOCK_OUT["${port}/udp"]="$proc"
+  done < <(ss -ulnpH 2>/dev/null)
+
+  while IFS= read -r _ln; do
+    [[ -z "$_ln" ]] && continue
+    [[ "$(awk '{print $5}' <<<"$_ln")" == "*:*" ]] || continue
+    addr=$(awk '{print $4}' <<<"$_ln")
+    case "$addr" in 127.*|\[::1\]:*|::1:*) ;; *) continue ;; esac
+    port=$(awk '{split($4,a,":"); print a[length(a)]}' <<<"$_ln")
+    [[ -z "$port" || ! "$port" =~ ^[0-9]+$ ]] && continue
+    proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$_ln" | head -1)
+    [[ -z "$proc" ]] && proc="—"
+    case "$proc" in xray-linux*) proc="xray" ;; esac
+    SOCK_LOOP["${port}/udp"]="$proc"
+  done < <(ss -ulnpH 2>/dev/null)
+
+  # UDP-инбаунды панели
+  local _up
+  for _up in $(udp_inbound_ports); do
+    fw_port_locked "$_up" && continue
+    SOCK_OUT["${_up}/udp"]="${SOCK_OUT[${_up}/udp]:-xray}"
+  done
+
+  # ── items ──
+  local -a items=()
+  local seen=""
+  add_item() {
+    local proto="$1" port="$2" proc="$3" state="$4" note="$5"
+    [[ -z "$port" ]] && return 0
+    local key="${port}/${proto}"
+    [[ " $seen " == *" $key "* ]] && return 0
+    seen+=" $key"
+    items+=("${proto}|${port}|${proc:-—}|${state}|${note}")
+  }
+
+  # Функция: пометка для порта (SSH/ACME/стек/UDP)
+  port_extra() {
+    local proto="$1" port="$2"
+    local ex=""
+    case "$port" in
+      22)  ex="SSH" ;;
+      80)  ex="ACME" ;;
+      443) ex="стек (SNI)" ;;
+    esac
+    local isup=0 u2
+    for u2 in $(udp_inbound_ports); do [[ "$u2" == "$port" && "$proto" == "udp" ]] && isup=1; done
+    [[ "$isup" == "1" ]] && ex="${ex:+$ex · }UDP-инбаунд"
+    printf '%s' "$ex"
+  }
+
+  # 1. Сокеты снаружи
+  local key
+  for key in "${!SOCK_OUT[@]}"; do
+    local proto="${key#*/}" port="${key%/*}" proc="${SOCK_OUT[$key]}"
+    local state note=""
+    if [[ "$ufw_active" == "1" ]]; then
+      if [[ -n "${UFW_ALLOW[$key]:-}" ]]; then
+        state="1"
+      elif [[ -n "${UFW_DENY[$key]:-}" ]]; then
+        state="0"; note="← DENY (правило UFW)"
+      else
+        state="0"; note="← UFW блокирует (default deny)"
+      fi
+    else
+      state="1"
+    fi
+    local ex; ex=$(port_extra "$proto" "$port")
+    if [[ -n "$ex" ]]; then
+      [[ -z "$note" ]] && note="← $ex" || note="← $ex · ${note#← }"
+    fi
+    add_item "$proto" "$port" "$proc" "$state" "$note"
+  done
+
+  # 2. Правила UFW без сокета
+  if [[ "$ufw_active" == "1" ]]; then
+    local k
+    for k in "${!UFW_ALLOW[@]}"; do
+      [[ -n "${SOCK_OUT[$k]:-}" ]] && continue
+      local proto="${k#*/}" port="${k%/*}"
+      add_item "$proto" "$port" "—" "1" "← правило UFW, слушателя нет"
+    done
+    for k in "${!UFW_DENY[@]}"; do
+      [[ -n "${SOCK_OUT[$k]:-}" ]] && continue
+      local proto="${k#*/}" port="${k%/*}"
+      add_item "$proto" "$port" "—" "0" "← DENY (правило UFW), слушателя нет"
+    done
+  fi
+
+  # 3. Порт 22
+  local has22=""
+  local it
+  for it in "${items[@]}"; do
+    [[ "${it#*|}" == "22|"* ]] && has22=1
+  done
+  if [[ -z "$has22" ]]; then
+    local st22="0" nt22=""
+    if [[ "$ufw_active" == "0" ]]; then
+      st22="1"
+    elif [[ -n "${UFW_ALLOW[22/tcp]:-}" ]]; then
+      st22="1"
+    elif [[ -n "${UFW_DENY[22/tcp]:-}" ]]; then
+      st22="0"; nt22="← DENY (правило UFW)"
+    else
+      st22="0"; nt22="← UFW блокирует (default deny)"
+    fi
+    [[ -z "$nt22" ]] && nt22="← SSH"
+    items=("tcp|22|sshd (не слушает снаружи)|${st22}|${nt22}" "${items[@]}")
+  fi
+
+  # Сортировка
+  local -a sorted=()
+  while IFS= read -r it; do sorted+=("$it"); done < <(
+    printf '%s\n' "${items[@]}" | awk -F'|' '{printf "%06d %s\n", $2, $0}' | sort -n | cut -d' ' -f2-
+  )
+  items=("${sorted[@]}")
+  local N_items=${#items[@]}
+
+  # ── Нижний блок ──
+  local -A LOOP_BY_PROC=()
+  local _lk
+  for _lk in "${!SOCK_LOOP[@]}"; do
+    local _lp="${_lk%/*}" _lpr="${_lk#*/}" _lproc="${SOCK_LOOP[$_lk]}"
+    LOOP_BY_PROC["$_lproc"]+=" ${_lp}/${_lpr}"
+  done
+
+  # ── Отрисовка ──
+  draw_tui() {
+    tput cup 0 0 2>/dev/null || printf '\033[H'
+    tput ed 2>/dev/null || printf '\033[J'
+
+    local ufw_state_txt="inactive"
+    [[ "$ufw_active" == "1" ]] && ufw_state_txt="active"
+    echo "${B}FIREWALL (UFW) — управление портами${N}"
+    echo "${B}════════════════════════════════════════════════════════════════════════════${N}"
+    echo "  Статус UFW: $ufw_state_txt"
+    echo
+
+    local hdr=""
+    hdr+="  "
+    hdr+=$(pad_vis ""          "$W_PTR");   hdr+=" "
+    hdr+=$(pad_vis "Прото"     "$W_PROTO"); hdr+=" "
+    hdr+=$(pad_vis "Порт"      "$W_PORT");  hdr+=" "
+    hdr+=$(pad_vis "Процесс"   "$W_PROC");  hdr+=" "
+    hdr+=$(pad_vis "Статус"    "$W_STATE"); hdr+=" "
+    hdr+="Примечание"
+    printf '%s\n' "$hdr"
+    printf "  %s\n" "────────────────────────────────────────────────────────────────────────────"
+
+    local i=0 proto port proc state note ptr state_txt state_color
+    for it in "${items[@]}"; do
+      IFS='|' read -r proto port proc state note <<<"$it"
+      ptr=" "; [[ $i -eq $cur ]] && ptr="▶"
+      if [[ "$state" == "1" ]]; then
+        state_txt="● открыт"; state_color="$G"
+      else
+        state_txt="○ закрыт"; state_color="$Y"
+      fi
+      local line=""
+      line+="  "
+      line+=$(pad_vis "$ptr"   "$W_PTR");   line+=" "
+      line+=$(pad_vis "$proto" "$W_PROTO"); line+=" "
+      line+=$(pad_vis "$port"  "$W_PORT");  line+=" "
+      line+=$(pad_vis "$proc"  "$W_PROC");  line+=" "
+      local st_padded
+      st_padded=$(pad_vis "$state_txt" "$W_STATE")
+      line+="${state_color}${st_padded}${N}"
+      line+=" "
+      line+="$note"
+      printf '%s\n' "$line"
+      i=$((i+1))
+    done
+
+    echo
+    echo "${B}▸ Спрятано настройками (UFW не при чём — эти порты на 127.0.0.1):${N}"
+    if [[ ${#LOOP_BY_PROC[@]} -eq 0 ]]; then
+      echo "  —"
+    else
+      local _order=("x-ui" "nginx" "xray" "csqtt")
+      local _done=""
+      local _o _pr
+      for _o in "${_order[@]}"; do
+        for _pr in "${!LOOP_BY_PROC[@]}"; do
+          [[ "$_pr" == "$_o" ]] || continue
+          local _ports="${LOOP_BY_PROC[$_pr]}"
+          _ports=$(printf '%s' "$_ports" | tr ' ' '\n' | grep -v '^$' | sort -t/ -k1,1n | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+          printf "    %-18s %s\n" "${_pr}:" "$_ports"
+          _done+=" $_pr"
+        done
+      done
+      for _pr in "${!LOOP_BY_PROC[@]}"; do
+        [[ " $_done " == *" $_pr "* ]] && continue
+        local _ports="${LOOP_BY_PROC[$_pr]}"
+        _ports=$(printf '%s' "$_ports" | tr ' ' '\n' | grep -v '^$' | sort -t/ -k1,1n | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+        printf "    %-18s %s\n" "${_pr}:" "$_ports"
+      done
+    fi
+
+    echo
+    printf "${B}%s${N}\n" "────────────────────────────────────────────────────────────────────────────"
+    echo "  ${Y}↑/↓${N} выбор · ${Y}Пробел${N} вкл/выкл · ${Y}d${N} закрыть · ${Y}a${N} добавить порт"
+    echo "  ${Y}Enter${N} применить · ${Y}q${N} отмена"
+  }
+
+  local cur=0
+  draw_tui
+
+  while :; do
+    local k rest
+    IFS= read -rsn1 k </dev/tty || k="q"
+    case "$k" in
+      $'\x1b')
+        IFS= read -rsn2 -t 0.05 rest </dev/tty || rest=""
+        case "$rest" in
+          '[A') ((cur--)); ((cur < 0)) && cur=$((N_items-1)) ;;
+          '[B') ((cur++)); ((cur >= N_items)) && cur=0 ;;
+        esac
+        ;;
+      ' ')
+        IFS='|' read -r proto port proc state note <<<"${items[$cur]}"
+        if [[ "$port" == "22" && "$state" == "1" ]]; then
+          tui_restore
+          echo
+          local ans=""
+          read -rp "$(echo "${R}?${N} Закрыть SSH (порт 22)? Потеряешь доступ снаружи! [y/N]: ")" ans || ans=""
+          case "${ans,,}" in
+            y|yes|д|да) state=0 ;;
+            *)          state=1 ;;
+          esac
+          [[ -n "$old_stty" ]] && stty "$old_stty" </dev/tty 2>/dev/null || true
+          tput civis 2>/dev/null || true
+        else
+          [[ "$state" == "1" ]] && state=0 || state=1
+        fi
+        items[$cur]="${proto}|${port}|${proc}|${state}|${note}"
+        ;;
+      'a')
+        tui_restore
+        echo
+        local nport=""
+        read -rp "Новый порт (8090 или 22000/udp): " nport || nport=""
+        nport=$(printf '%s' "$nport" | tr -d ' ')
+        if [[ -n "$nport" ]]; then
+          local nproto="tcp" nnum="$nport"
+          case "$nport" in
+            */tcp) nnum="${nport%/*}" ;;
+            */udp) nnum="${nport%/*}"; nproto="udp" ;;
+          esac
+          if [[ "$nnum" =~ ^[0-9]+$ ]] && (( nnum >= 1 && nnum <= 65535 )); then
+            local nkey="${nnum}/${nproto}"
+            if [[ " $seen " == *" $nkey "* ]]; then
+              warn "Порт $nnum/$nproto уже в списке"
+              sleep 1
+            else
+              seen+=" $nkey"
+              items+=("${nproto}|${nnum}|manual|1|← добавлен")
+              local -a sorted2=()
+              while IFS= read -r it; do sorted2+=("$it"); done < <(
+                printf '%s\n' "${items[@]}" | awk -F'|' '{printf "%06d %s\n", $2, $0}' | sort -n | cut -d' ' -f2-
+              )
+              items=("${sorted2[@]}")
+              N_items=${#items[@]}
+              cur=$((N_items-1))
+            fi
+          else
+            warn "Некорректный порт: $nport"; sleep 1
+          fi
+        fi
+        [[ -n "$old_stty" ]] && stty "$old_stty" </dev/tty 2>/dev/null || true
+        tput civis 2>/dev/null || true
+        ;;
+      'd')
+        IFS='|' read -r proto port proc state note <<<"${items[$cur]}"
+        if [[ "$state" == "0" ]]; then
+          : # уже закрыт
+        elif [[ "$port" == "22" ]]; then
+          tui_restore
+          echo
+          echo -e "${R}⚠ Закрытие SSH (порт 22) оборвёт твою текущую сессию,${N}"
+          echo -e "${R}  если ты подключён по нему снаружи.${N}"
+          local ans=""
+          read -rp "$(echo -e "? Для подтверждения введи ${Y}YES${N}: ")" ans || ans=""
+          case "$ans" in
+            YES)
+              state=0
+              items[$cur]="${proto}|${port}|${proc}|${state}|${note}"
+              log "SSH (22) помечен как закрытый — применится по Enter"
+              ;;
+            *) log "Отменено" ;;
+          esac
+          [[ -n "$old_stty" ]] && stty "$old_stty" </dev/tty 2>/dev/null || true
+          tput civis 2>/dev/null || true
+        elif [[ "$port" == "443" || "$port" == "80" ]]; then
+          tui_restore
+          echo
+          echo -e "${Y}⚠ Порт $port — ${note:-служебный для стека}.${N}"
+          local ans=""
+          read -rp "$(echo -e "? Закрыть $port? [y/N]: ")" ans || ans=""
+          case "${ans,,}" in
+            y|yes|д|да)
+              state=0
+              items[$cur]="${proto}|${port}|${proc}|${state}|${note}"
+              log "Порт $port помечен как закрытый"
+              ;;
+            *) log "Отменено" ;;
+          esac
+          [[ -n "$old_stty" ]] && stty "$old_stty" </dev/tty 2>/dev/null || true
+          tput civis 2>/dev/null || true
+        else
+          state=0
+          items[$cur]="${proto}|${port}|${proc}|${state}|${note}"
+        fi
+        ;;
+      'q'|$'\x03')
+        tui_restore
+        echo
+        log "Отменено — UFW не тронут"
+        return 0
+        ;;
+      ''|$'\r'|$'\n')
+        tui_restore
+        echo
+        echo -e "${B}▸ Итог:${N}"
+        local open_list close_list
+        open_list=""; close_list=""
+        for it in "${items[@]}"; do
+          IFS='|' read -r proto port proc state note <<<"$it"
+          if [[ "$state" == "1" ]]; then open_list+=" ${port}/${proto}"; else close_list+=" ${port}/${proto}"; fi
+        done
+        echo "  Откроются:${open_list:- <пусто>}"
+        [[ -n "$close_list" ]] && echo "  Закроются:${close_list}"
+        echo
+        local ok=""
+        read -rp "$(echo -e "${B}?${N} Применить новую конфигурацию UFW? [y/N]: ")" ok || ok=""
+        case "${ok,,}" in
+          y|yes|д|да) ;;
+          *) log "Отменено"; return 0 ;;
+        esac
+        save_firewall_state >/dev/null 2>&1 || true
+        ufw --force reset >/dev/null 2>&1 || true
+        ufw default deny incoming >/dev/null 2>&1 || true
+        ufw default allow outgoing >/dev/null 2>&1 || true
+        for it in "${items[@]}"; do
+          IFS='|' read -r proto port proc state note <<<"$it"
+          [[ "$state" == "1" ]] && fw_allow "$port" "$proto" "kept"
+        done
+        fw_deny_panel_ports
+        ufw --force enable >/dev/null 2>&1 || true
+        sleep 1
+        log "UFW применён"
+        ufw status 2>/dev/null | grep -E "ALLOW|DENY" | sed 's/^/    /'
+        return 0
+        ;;
+      *) ;;
+    esac
+    draw_tui
+  done
+}
+
+# =====================================================================
+# ЗДОРОВЬЕ: UFW-fallback, recidive, живой лог, шаблоны decoy
+# ссылок, смена домена инбаунда
+# =====================================================================
+
+# Статус UFW с запасным путём: бинарь может не находиться в PATH — тогда
+# смотрим сервис (oneshot ufw.service остаётся active после применения правил).
 # пересборка ВСЕХ decoy-блоков: подтянуть robots/honeypot/UA-404/логи с доменом.
 # Шаблон берём из маркера (tpl=), если нет — угадываем по md5 index.html.
 decoy_rebuild_all() {
