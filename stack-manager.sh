@@ -45,6 +45,10 @@ WILDCARD_DOMAIN=""
 WILDCARD_STATE="/root/stack-backups/wildcard-domain"
 CF_CREDS="/root/.secrets/cloudflare.ini"
 
+# Сохранение email Let's Encrypt (переживает перезапуски скрипта)
+LE_EMAIL_FILE="/root/stack-backups/le-email"
+
+
 NGINX_STREAM_DIR="/etc/nginx/streams-enabled"
 NGINX_SITES_DIR="/etc/nginx/sites-enabled"
 NGINX_SITES_AVAIL="/etc/nginx/sites-available"
@@ -149,6 +153,7 @@ find_xray_bin() {
 
 ADG_WEB_PORT=3000
 XUI_DB=""
+PANEL_FLAVOR=""
 ADG_PRESENT=false
 ADG_SERVICE=""
 ADG_CONFIG=""
@@ -394,6 +399,23 @@ check_domain_points_to_server() {
   return 0
 }
 
+# Определяем вариант панели: LucX-форк vs оригинальный 3x-ui.
+#   LucX имеет уникальные маркеры: триггеры lucx_shareonly_*, таблицу
+#   client_inbounds, фикс-теги sidecar-инбаундов (inbound-qwdtt/csqtt/tproxy).
+#   Если ни одного маркера нет — считаем оригинальным 3x-ui.
+# Печатает: lucx | 3x-ui | none
+detect_panel_flavor() {
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { echo "none"; return 0; }
+  local v=""
+  v=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'lucx_shareonly_%' LIMIT 1;" 2>/dev/null || true)
+  [[ -n "$v" ]] && { echo "lucx"; return 0; }
+  v=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='client_inbounds' LIMIT 1;" 2>/dev/null || true)
+  [[ -n "$v" ]] && { echo "lucx"; return 0; }
+  v=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT 1 FROM inbounds WHERE tag IN ('inbound-qwdtt','inbound-csqtt','inbound-tproxy') LIMIT 1;" 2>/dev/null || true)
+  [[ "$v" == "1" ]] && { echo "lucx"; return 0; }
+  echo "3x-ui"
+}
+
 detect_env() {
   XUI_DB=""
   local db
@@ -426,6 +448,7 @@ detect_env() {
   SSH_PORT="${SSH_PORT:-22}"
 
   find_xray_bin || true
+  PANEL_FLAVOR=$(detect_panel_flavor)
 }
 
 xui_get() {
@@ -465,7 +488,7 @@ is_udp_proto() {
 # sendto()-сокеты на ephemeral-портах, неотличимые по peer от слушателей.
 udp_inbound_ports() {
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
-  sqlite3 "$XUI_DB" "SELECT id, protocol, port FROM inbounds WHERE enable=1;" 2>/dev/null |
+  sqlite3 "$XUI_DB" "SELECT id, protocol, port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null |
   while IFS='|' read -r _id _pr _pt; do
     [[ -z "$_pt" ]] && continue
     is_udp_proto "$_pr" && echo "$_pt"
@@ -955,18 +978,26 @@ adg_setup_sni_domain() {
 # Нужна, чтобы AdGuard, установленный ПОСЛЕ первичной настройки, сразу
 # открывался по домену панели — а не «после перезапуска п.1».
 panel_decoy_apply() {
-  local mode="$1"
+  local mode="$1" custom_path="${2:-}"
   [[ -f "$STACK_CONF" ]] || return 1
   grep -q "listen 127.0.0.1:4443" "$STACK_CONF" 2>/dev/null || return 1
   local adg_port=""
   adg_port=$(adg_config_port 2>/dev/null || true)
   [[ -z "$adg_port" ]] && adg_port="${ADG_WEB_PORT:-3000}"
-  PD_MODE="$mode" PD_PORT="$adg_port" PD_DIR="$PANEL_DECOY_DIR" python3 - "$STACK_CONF" <<'PYPDA'
+  PD_MODE="$mode" PD_PORT="$adg_port" PD_DIR="$PANEL_DECOY_DIR" PD_CUSTOM="$custom_path" python3 - "$STACK_CONF" <<'PYPDA'
 import sys, os
 mode, adg_port, pdir = os.environ["PD_MODE"], os.environ["PD_PORT"], os.environ["PD_DIR"]
+custom = os.environ.get("PD_CUSTOM", "")
 path = sys.argv[1]
 src = open(path).read()
-if mode == "adguard":
+if mode == "custom" and custom:
+    block = (
+        "    location / {\n"
+        f"        root {custom};\n"
+        "        try_files $uri $uri/ /index.html;\n"
+        "    }"
+    )
+elif mode == "adguard":
     block = (
         "    location / {\n"
         f"        proxy_pass https://127.0.0.1:{adg_port};\n"
@@ -1994,6 +2025,7 @@ create_inbounds_menu() {
   systemctl restart x-ui >/dev/null 2>&1 || true
   sleep 2
 
+
   local final
   final=$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
   log "Итого активных инбаундов: $final"
@@ -2675,7 +2707,7 @@ def listening(port):
     return bool(re.search(rf":{port}(\s|$)", out))
 try:
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
-    rows = con.execute("SELECT id,protocol,settings,stream_settings FROM inbounds WHERE enable=1").fetchall()
+    rows = con.execute("SELECT id,protocol,settings,stream_settings FROM inbounds WHERE enable=1 AND port>0").fetchall()
 except Exception:
     sys.exit(0)
 for iid, proto, s1, s2 in rows:
@@ -2847,7 +2879,7 @@ PY
 import sqlite3, json, sys
 try:
     con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=5)
-    rows = con.execute("SELECT id, protocol, settings, stream_settings FROM inbounds WHERE enable=1").fetchall()
+    rows = con.execute("SELECT id, protocol, settings, stream_settings FROM inbounds WHERE enable=1 AND port>0").fetchall()
 except Exception:
     sys.exit(0)
 for iid, proto, setts_s, stream_s in rows:
@@ -2947,7 +2979,7 @@ def port_listens(p):
 
 try:
     con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=5)
-    rows = con.execute("SELECT id, protocol, settings, stream_settings FROM inbounds WHERE enable=1").fetchall()
+    rows = con.execute("SELECT id, protocol, settings, stream_settings FROM inbounds WHERE enable=1 AND port>0").fetchall()
 except Exception:
     sys.exit(1)   # БД недоступна — не считаем поломкой
 
@@ -3028,6 +3060,38 @@ uninstall_heal_timer() {
   systemctl daemon-reload 2>/dev/null || true
 }
 
+# =====================================================================
+# МУЛЬТИСЕРТ (единый серт на все домены стека) + сохранение email LE
+# =====================================================================
+le_email_load() {
+  [[ -n "$EMAIL" ]] && return 0
+  [[ -s "$LE_EMAIL_FILE" ]] && EMAIL=$(head -n1 "$LE_EMAIL_FILE" 2>/dev/null | tr -d '[:space:]')
+  [[ -n "$EMAIL" ]] && return 0
+  return 1
+}
+le_email_save() {
+  local e="${1:-$EMAIL}"
+  [[ -z "$e" ]] && return 1
+  mkdir -p "$(dirname "$LE_EMAIL_FILE")" 2>/dev/null || true
+  printf '%s\n' "$e" > "$LE_EMAIL_FILE" 2>/dev/null || return 1
+  chmod 600 "$LE_EMAIL_FILE" 2>/dev/null || true
+  EMAIL="$e"
+  return 0
+}
+le_email_forget() {
+  rm -f "$LE_EMAIL_FILE" 2>/dev/null || true
+  EMAIL=""
+}
+
+certs_view() {
+  echo
+  echo -e "${B}▸ Все сертификаты в /etc/letsencrypt/live/:${N}"
+  certbot certificates 2>/dev/null | sed 's/^/  /' || true
+  echo
+  echo -e "${B}▸ Email Let's Encrypt:${N} ${EMAIL:-<не задан>}   (файл: $LE_EMAIL_FILE)"
+  pause
+}
+
 cert_issue() {
   local d="$1"
   # невидимый хвост (пробел/CR из БД или ans-файла) ломает пути live/<домен> —
@@ -3044,6 +3108,7 @@ cert_issue() {
       return 1
     fi
   done
+
   local dir="/etc/letsencrypt/live/$d" arch="/etc/letsencrypt/archive/$d"
 
   # self-heal: флаг wildcard мог не загрузиться (source без точки входа)
@@ -3308,7 +3373,11 @@ cert_paths() {
 # Выпуск wildcard: base + *.base через Cloudflare DNS-01
 # base можно передать аргументом; если wildcard уже выпущен и свеж — переустановки не будет
 cert_wildcard_issue() {
-  [[ -z "$EMAIL" ]] && ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
+  le_email_load || true
+  if [[ -z "$EMAIL" ]]; then
+    ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
+    le_email_save "$EMAIL"
+  fi
   local base="${1:-}"
   if [[ -z "$base" ]]; then
     ask base "Базовый домен wildcard (напр. example.com)" "${WILDCARD_DOMAIN:-}" '^[a-zA-Z0-9.-]+$'
@@ -3509,9 +3578,40 @@ decoy_template_choose() {
     printf "  %2d) %-15s %s\n" "$i" "$__n" "$__dsc" >&2
     NAMES+=("$__n"); i=$((i+1))
   done
+  local __custom_num=$i
+  printf "  %2d) %-15s %s\n" "$__custom_num" "custom" "▶ Свой сайт — папка со статикой (index.html и т.д.)" >&2
   echo >&2
   local __c=""
-  ask __c "$prompt" "$default" '^[0-9]+$|^[a-z-]+$' 2>/dev/null || { printf -v "$__result" '%s' "$default"; return 0; }
+  ask __c "$prompt" "$default" '^[0-9]+$|^[a-z:_/.-]+$' 2>/dev/null || { printf -v "$__result" '%s' "$default"; return 0; }
+  if [[ "$__c" == "custom" || "$__c" == "$__custom_num" || "$__c" == custom:* ]]; then
+    local __path=""
+    [[ "$__c" == custom:* ]] && __path="${__c#custom:}"
+    if [[ -z "$__path" ]]; then
+      while :; do
+        __path=""
+        ask __path "Путь к папке сайта (index.html обязателен)" "/var/www/mysite" '^/.+'
+        [[ -d "$__path" ]] || { err "Папка $__path не существует"; continue; }
+        if [[ ! -f "$__path/index.html" ]]; then
+          warn "В $__path нет index.html — nginx отдаст 404"
+          local __go=""
+          askyn __go "Продолжить всё равно?" "n"
+          [[ "$__go" == true ]] || continue
+        fi
+        break
+      done
+    fi
+    if command -v sudo >/dev/null 2>&1 && ! sudo -u www-data test -r "$__path/index.html" 2>/dev/null; then
+      warn "www-data не может читать $__path/index.html — nginx отдаст 403"
+      local __fix=""
+      askyn __fix "Исправить права (chmod -R o+rX)?" "y"
+      if [[ "$__fix" == true ]]; then
+        chmod -R o+rX "$__path" 2>/dev/null || true
+        log "Права исправлены: $__path"
+      fi
+    fi
+    printf -v "$__result" '%s' "custom:$__path"
+    return 0
+  fi
   if [[ "$__c" =~ ^[0-9]+$ ]]; then
     if (( __c >= 1 && __c <= ${#NAMES[@]} )); then
       printf -v "$__result" '%s' "${NAMES[$((__c-1))]}"
@@ -3597,6 +3697,11 @@ mk_decoy() {
       redir) opt_redir="$_v" ;;
     esac
   done
+  # custom:<path> — nginx будет служить прямо из указанной папки
+  if [[ "$tpl" == custom:* ]]; then
+    root="${tpl#custom:}"
+    tpl="custom"
+  fi
   mkdir -p "$root" 2>/dev/null || true
 
   # security-заголовки decoy: сниппет должен существовать до nginx -t
@@ -3608,14 +3713,16 @@ add_header Referrer-Policy "no-referrer-when-downgrade" always;
 EOF
 
   # index.html: login-реплики из DECOY_LOGIN_DIR, статика из DECOY_TPL_DIR
-  local tpl_src="$DECOY_TPL_DIR/$tpl.html"
-  is_login_template "$tpl" && tpl_src="$DECOY_LOGIN_DIR/$tpl.html"
-  if [[ -f "$tpl_src" ]]; then
-    cp -f "$tpl_src" "$root/index.html" 2>/dev/null || true
-  elif [[ "$tpl" != redirect && "$tpl" != locked ]]; then
-    cp -f "$DECOY_TPL_DIR/default.html" "$root/index.html" 2>/dev/null || true
+  if [[ "$tpl" != "custom" ]]; then
+    local tpl_src="$DECOY_TPL_DIR/$tpl.html"
+    is_login_template "$tpl" && tpl_src="$DECOY_LOGIN_DIR/$tpl.html"
+    if [[ -f "$tpl_src" ]]; then
+      cp -f "$tpl_src" "$root/index.html" 2>/dev/null || true
+    elif [[ "$tpl" != redirect && "$tpl" != locked ]]; then
+      cp -f "$DECOY_TPL_DIR/default.html" "$root/index.html" 2>/dev/null || true
+    fi
+    chown www-data:www-data "$root/index.html" 2>/dev/null || true
   fi
-  chown www-data:www-data "$root/index.html" 2>/dev/null || true
 
   # redirect/locked: ответ формирует сам nginx, index не нужен
   local extra=""
@@ -3639,7 +3746,7 @@ EOF
   local body
   body=$(cat <<EOF
 server {
-    listen 127.0.0.1:$port ssl http2;
+    listen 127.0.0.1:$port ssl;
     server_name $dom;
     ssl_certificate     $cert;
     ssl_certificate_key $key;
@@ -3988,7 +4095,21 @@ initial_setup() {
   sub_port=$(xui_get subPort); sub_port="${sub_port:-2096}"
   sub_path=$(xui_get subPath); sub_path="/${sub_path#/}"; sub_path="${sub_path%/}/"
 
-  ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
+  le_email_load || true
+  if [[ -n "$EMAIL" ]]; then
+    log "Email для Let's Encrypt: $EMAIL (сохранён)"
+    if [[ -t 0 ]]; then
+      local _keep_email=""
+      askyn _keep_email "Оставить этот email? (n — указать новый)" "y"
+      if [[ "$_keep_email" != true ]]; then
+        ask EMAIL "Новый Email для Let's Encrypt" "$EMAIL" '^[^@]+@[^@]+\.[^@]+$'
+        le_email_save "$EMAIL"
+      fi
+    fi
+  else
+    ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
+    le_email_save "$EMAIL"
+  fi
   if [[ -z "$PANEL_DOMAIN" ]]; then
     ask PANEL_DOMAIN "Домен панели" "panel.example.com" '^[a-zA-Z0-9.-]+$'
   else
@@ -4046,7 +4167,7 @@ initial_setup() {
     [[ -z "$id" ]] && continue
     INB_IDS+=("$id")
     INB_PROTO[$id]="$proto"; INB_PORT[$id]="$port"; INB_STREAM[$id]="$stream"
-  done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1;" 2>/dev/null || true)
+  done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
 
   declare -A DOMAIN HIDE TLS_PORT DECOY_TPL
   local tls_cur=4444
@@ -4115,6 +4236,7 @@ initial_setup() {
       TLS_PORT[$id]=""
     fi
   done
+
 
   local nginx_was_running=false xui_was_running=false adg_was_running=false
   systemctl is-active --quiet nginx 2>/dev/null && { nginx_was_running=true; systemctl stop nginx 2>/dev/null || true; }
@@ -4253,24 +4375,37 @@ initial_setup() {
 EOF
 )
   else
-    panel_decoy_stub_init
-    # decoy-шаблон из каталога (tpl:ИМЯ) — кладём его как index.html панели
-    if [[ "$panel_decoy" == tpl:* ]]; then
-      local tpl_name="${panel_decoy#tpl:}"
-      local tpl_src="$DECOY_TPL_DIR/$tpl_name.html"
-      is_login_template "$tpl_name" && tpl_src="$DECOY_LOGIN_DIR/$tpl_name.html"
-      if [[ -f "$tpl_src" ]]; then
-        cp -f "$tpl_src" "$PANEL_DECOY_DIR/index.html" 2>/dev/null || true
-        chown www-data:www-data "$PANEL_DECOY_DIR/index.html" 2>/dev/null || true
-        log "Decoy панели: шаблон «$tpl_name»"
+    local panel_try='try_files /index.html =404;'
+    if [[ "$panel_decoy" == tpl:custom:* ]]; then
+      local custom_path="${panel_decoy#tpl:custom:}"
+      if [[ -d "$custom_path" ]]; then
+        PANEL_DECOY_DIR="$custom_path"
+        panel_try='try_files $uri $uri/ /index.html;'
+        log "Decoy панели: свой сайт из $custom_path"
       else
-        warn "Шаблон «$tpl_name» не найден — остаётся стандартная заглушка"
+        warn "Папка $custom_path не найдена — стандартная заглушка"
+        panel_decoy_stub_init
+      fi
+    else
+      panel_decoy_stub_init
+      # decoy-шаблон из каталога (tpl:ИМЯ) — кладём его как index.html панели
+      if [[ "$panel_decoy" == tpl:* ]]; then
+        local tpl_name="${panel_decoy#tpl:}"
+        local tpl_src="$DECOY_TPL_DIR/$tpl_name.html"
+        is_login_template "$tpl_name" && tpl_src="$DECOY_LOGIN_DIR/$tpl_name.html"
+        if [[ -f "$tpl_src" ]]; then
+          cp -f "$tpl_src" "$PANEL_DECOY_DIR/index.html" 2>/dev/null || true
+          chown www-data:www-data "$PANEL_DECOY_DIR/index.html" 2>/dev/null || true
+          log "Decoy панели: шаблон «$tpl_name»"
+        else
+          warn "Шаблон «$tpl_name» не найден — остаётся стандартная заглушка"
+        fi
       fi
     fi
     decoy_block=$(cat <<EOF
     location / {
         root $PANEL_DECOY_DIR;
-        try_files /index.html =404;
+        $panel_try
     }
 EOF
 )
@@ -4278,7 +4413,7 @@ EOF
 
   { cat >> "$STACK_CONF" <<EOF
 server {
-    listen 127.0.0.1:4443 ssl http2;
+    listen 127.0.0.1:4443 ssl;
     server_name $PANEL_DOMAIN;
     ssl_certificate     $pc;
     ssl_certificate_key $pk;
@@ -4382,7 +4517,7 @@ EOF
     else
       sqlite3 "$XUI_DB" "UPDATE inbounds SET listen='127.0.0.1' WHERE id=$_id;" 2>/dev/null || true
     fi
-  done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, COALESCE(json_extract(stream_settings,'\$.security'),''), COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE enable=1;" 2>/dev/null || true)
+  done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, COALESCE(json_extract(stream_settings,'\$.security'),''), COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
 
   local has_hosts=""
   has_hosts=$(sqlite3 "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
@@ -4826,7 +4961,7 @@ add_inbound() {
         [[ "$do_it" == true ]] && configure_sni_for_inbound "$id" "$proto" "$port" "$panel_domain"
       fi
       count=$((count+1))
-    done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port FROM inbounds WHERE enable=1;" 2>/dev/null || true)
+    done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
     # hosts-строки, ссылающиеся на несуществующие/выключенные инбаунды, — мусор
     # (например, от старого vless с неверной конечной точкой). Чистим.
     sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id NOT IN (SELECT id FROM inbounds WHERE enable=1);" 2>/dev/null || true
@@ -4874,7 +5009,7 @@ remove_inbound() {
 
   echo
   local id=""
-  ask id "ID инбаунда для удаления" "" '^[0-9]+$'
+  ask id "ID инбаунда" "" '^[0-9]+$'
 
   local dom="" be=""
   while IFS='|' read -r d b i; do
@@ -4891,26 +5026,67 @@ remove_inbound() {
     return 1
   fi
 
-  local what="SNI-привязку ($dom)"
-  [[ "$exists" != "0" ]] && what="SNI-привязку${dom:+ ($dom)} И сам инбаунд #$id из панели"
+  # Что доступно: SNI-привязка / сам инбаунд
+  local has_sni=false has_inb=false
+  [[ -n "$dom" ]] && has_sni=true
+  [[ "$exists" != "0" ]] && has_inb=true
+
+  echo
+  echo "  Что делать с #$id${dom:+ (SNI: $dom)}?"
+  local a_sni="" a_inb="" n=0
+  if [[ "$has_sni" == true ]]; then
+    n=$((n+1)); a_sni="$n"
+    echo "   $n) Удалить ТОЛЬКО SNI-привязку (инбаунд остаётся, уходит с 443)"
+  fi
+  if [[ "$has_inb" == true ]]; then
+    n=$((n+1)); a_inb="$n"
+    if [[ "$has_sni" == true ]]; then
+      echo "   $n) Удалить инбаунд из панели + его SNI-привязку"
+    else
+      echo "   $n) Удалить инбаунд из панели"
+    fi
+  fi
+  echo "   0) Отмена"
+  line
+  local action=""
+  ask action "Выбор" "0" '^[0-9]+$'
+  [[ "$action" == "0" ]] && return 0
+
+  local do_sni=false do_inb=false
+  [[ -n "$a_sni" && "$a_sni" == "$action" ]] && do_sni=true
+  [[ -n "$a_inb" && "$a_inb" == "$action" ]] && { do_inb=true; do_sni=true; }
+  [[ "$do_sni" == false && "$do_inb" == false ]] && { err "Нет такого выбора"; return 1; }
+
+  # подтверждение
+  local what=""
+  if [[ "$do_inb" == false && "$do_sni" == true ]]; then
+    what="SNI-привязку ($dom) для #$id — инбаунд останется, но tcp-порт уйдёт с 443"
+  elif [[ "$do_inb" == true && "$do_sni" == true && -n "$dom" ]]; then
+    what="SNI-привязку${dom:+ ($dom)} И сам инбаунд #$id из панели"
+  else
+    what="инбаунд #$id из панели"
+  fi
+  local confirm=""
   askyn confirm "Удалить $what?" "y"
   [[ "$confirm" == true ]] || return 0
 
-  if [[ -n "$dom" ]]; then
+  # 1) SNI-привязка
+  if [[ "$do_sni" == true && -n "$dom" ]]; then
     sni_map_remove "$dom"
     [[ -n "$be" && "$be" != "panel_backend" ]] && sni_upstream_remove "$be"
     unset "SNI_USED[$dom]" 2>/dev/null || true
     stack_del_decoy "$dom"   # decoy-блок в stack.conf
     sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE sni='$dom' OR (inbound_id=$id AND port=443);" 2>/dev/null || true
-  else
-    sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id;" 2>/dev/null || true
+    log "SNI-привязка снята: $dom → #$id"
   fi
 
-  if [[ "$exists" != "0" ]]; then
-    cp -n "$XUI_DB" "${XUI_DB}.bak.$(date +%s)" 2>/dev/null || true
+  # 2) сам инбаунд
+  if [[ "$do_inb" == true && "$exists" != "0" ]]; then
+    cp -n "$XUI_DB" "${XUI_DB}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
     sqlite3 "$XUI_DB" "DELETE FROM inbounds WHERE id=$id;" 2>/dev/null || true
     log "Инбаунд #$id удалён из панели (x-ui.db)"
   fi
+
   nginx_reload || true
   systemctl restart x-ui >/dev/null 2>&1 || true
   log "Готово."
@@ -5088,31 +5264,40 @@ change_decoy() {
   stack_ensure
   local mline mport mdom
   local -a DOM_LIST=()
+  local panel_conf="$STACK_CONF"
+  local panel_dom=""
+  panel_dom=$(xui_get subDomain 2>/dev/null || true)
+
+  # ── Блок 1: домены инбаундов (из маркеров stack.conf)
+  echo -e "${B}▸ Домены инбаундов (SNI):${N}"
   while IFS= read -r mline; do
     [[ "$mline" != "# >>> decoy "* ]] && continue
     mport=$(grep -oE 'port=[0-9]+'   <<<"$mline" | head -1 | cut -d= -f2)
     mdom=$(grep  -oE 'domain=[^ ]+$' <<<"$mline" | head -1 | cut -d= -f2-)
-    if [[ -n "$mdom" ]]; then
-      DOM_LIST+=("$mdom")
-      printf "  %s) %-30s порт %s\n" "${#DOM_LIST[@]}" "$mdom" "$mport"
-    fi
+    [[ -z "$mdom" ]] && continue
+    # панельный домен в маркерах не показываем (он пойдёт во второй блок)
+    [[ -n "$panel_dom" && "$mdom" == "$panel_dom" ]] && continue
+    DOM_LIST+=("$mdom")
+    printf "  %2s) %-32s порт %s\n" "${#DOM_LIST[@]}" "$mdom" "$mport"
   done < "$STACK_CONF"
+  [[ ${#DOM_LIST[@]} -eq 0 ]] && echo "  (нет)"
 
-  # decoy домена панели (panel-блок в stack.conf: 127.0.0.1:4443) — тоже доступен для смены
-  local panel_conf="$STACK_CONF"
-  local panel_dom=""
-  panel_dom=$(xui_get subDomain 2>/dev/null || true)
+  # ── Блок 2: домен панели (отдельно, чтобы не путать с инбаундами)
   if [[ -n "$panel_dom" ]]; then
+    echo
+    echo -e "${B}▸ Домен панели:${N}"
     DOM_LIST+=("$panel_dom")
-    printf "  %s) %-30s порт 4443 [домен панели]\n" "${#DOM_LIST[@]}" "$panel_dom"
+    printf "  %2s) %-32s порт 4443 [панель]\n" "${#DOM_LIST[@]}" "$panel_dom"
   fi
+
   [[ ${#DOM_LIST[@]} -eq 0 ]] && { err "SNI-домены не найдены — сначала п.1"; pause; return 1; }
   echo
   local pick=""
-  ask pick "Номер домена (1-${#DOM_LIST[@]}, 0 — отмена)" "1" '^[0-9]+$'
+  ask pick "Номер домена (1-${#DOM_LIST[@]}, 0 — отмена)" "0" '^[0-9]+$'
   [[ "$pick" == "0" ]] && return 0
   (( pick > ${#DOM_LIST[@]} )) && { err "Нет такого номера"; pause; return 1; }
   local domain="${DOM_LIST[$((pick-1))]}"
+  log "Выбран: $domain"
   log "Выбран: $domain"
 
   # --- смена decoy для домена панели ---
@@ -5134,9 +5319,27 @@ change_decoy() {
       warn "  • п.14 «AdGuard Home: установить / удалить», затем п.4 — выбрать шаблон."
       pause; return 0
     fi
-    mkdir -p "$PANEL_DECOY_DIR" 2>/dev/null || true
     local tpl=""
     decoy_template_choose tpl "Новый decoy панели" "corporate"
+    if [[ "$tpl" == custom:* ]]; then
+      local custom_path="${tpl#custom:}"
+      if [[ -d "$custom_path" ]]; then
+        if panel_decoy_apply custom "$custom_path"; then
+          log "Decoy панели: свой сайт из $custom_path"
+        else
+          warn "Не удалось обновить stack.conf — смотри ошибки выше"
+        fi
+      else
+        err "Папка $custom_path не найдена"
+      fi
+      pause; return 0
+    fi
+    # если сейчас PANEL_DECOY_DIR — symlink/каталог от прошлого custom, пересоздаём
+    if [[ -L "$PANEL_DECOY_DIR" ]]; then
+      rm -f "$PANEL_DECOY_DIR"
+      panel_decoy_apply stub >/dev/null 2>&1 || true
+    fi
+    mkdir -p "$PANEL_DECOY_DIR" 2>/dev/null || true
     local tpl_src="$DECOY_TPL_DIR/$tpl.html"
     is_login_template "$tpl" && tpl_src="$DECOY_LOGIN_DIR/$tpl.html"
     if [[ -f "$tpl_src" ]]; then
@@ -5151,16 +5354,16 @@ change_decoy() {
     pause; return 0
   fi
 
-  local meta port="" root="" cert="" key=""
+  local meta port="" root_old="" cert="" key=""
   meta=$(stack_decoy_meta "$domain")
   if [[ -z "$meta" ]]; then
-    err "Decoy-блок для $domain не найден в $STACK_CONF. Найдены маркеры:"
+    err "Decoy-блок для $domain не найден в $STACK_CONF."
     grep "# >>> decoy" "$STACK_CONF" 2>/dev/null | sed 's/^/    /' || warn "    (ни одного)"
     pause; return 1
   fi
-  read -r port root cert key <<<"$meta"
-  local old_hash="" new_hash="" tpl=""
-  old_hash=$(md5sum "$root/index.html" 2>/dev/null | awk '{print $1}')
+  read -r port root_old cert key <<<"$meta"
+
+  local tpl=""
   decoy_template_choose tpl "Новый decoy" "default"
   [[ -z "$tpl" ]] && { warn "Шаблон не определён — применяю default"; tpl="default"; }
 
@@ -5168,29 +5371,75 @@ change_decoy() {
   local opts=""
   if [[ "$tpl" == "redirect" ]]; then
     local rurl=""
-    ask rurl "Куда редиректить (URL)" "https://www.google.com/" '^https?://[A-Za-z0-9.-]+(/[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]*)?$'
+    ask rurl "Куда редиректить (URL)" "https://www.google.com/" '^https?://[A-Za-z0-9.-]+'
     opts="redir=$rurl"
   elif [[ "$tpl" != "locked" ]]; then
     local ub="true"
     askyn ub "Прятать сайт от ботов/сканеров (404 по User-Agent)?" "y"
     [[ "$ub" == true ]] && opts="ua404=1" || opts="ua404=0"
   fi
-  mk_decoy "$port" "$domain" "$cert" "$key" "$root" "$tpl" "$opts"
-  new_hash=$(md5sum "$root/index.html" 2>/dev/null | awk '{print $1}')
+
+  local final_root="$root_old"
+  if [[ "$tpl" == custom:* ]]; then
+    final_root="${tpl#custom:}"
+  elif [[ "$root_old" != /var/www/decoy-* ]]; then
+    local safe
+    safe=$(echo "$domain" | tr -c "a-z0-9" "_")
+    final_root="/var/www/decoy-${safe}"
+    mkdir -p "$final_root" 2>/dev/null || true
+    log "Каталог $root_old оставляю нетронутым (custom-папка)"
+    log "  Шаблон «$tpl» -> $final_root"
+  fi
+  mk_decoy "$port" "$domain" "$cert" "$key" "$final_root" "$tpl" "$opts"
+
+  # Перечитать НОВЫЙ root из маркера: для custom он отличается от старого
+  local meta_new="" root_new=""
+  meta_new=$(stack_decoy_meta "$domain") || meta_new=""
+  [[ -n "$meta_new" ]] && read -r _p root_new _c _k <<<"$meta_new"
+
   if ! nginx -t >/dev/null 2>&1; then
     err "nginx -t не прошёл после смены decoy:"
     nginx -t 2>&1 | tail -5 | sed 's/^/    /'
     pause; return 1
   fi
   nginx_reload || true
-  if [[ -n "$new_hash" && "$new_hash" != "$old_hash" ]]; then
-    log "Decoy сменён на «$tpl» ✓ ($root/index.html обновлён)"
-    warn "Если в браузере всё ещё старая страница — обнови с Ctrl+F5 (кэш)"
-  elif [[ -n "$new_hash" ]]; then
-    log "Decoy применён: «$tpl» — файл совпал с прежним (вероятно, тот же шаблон уже стоял)"
-  else
-    err "index.html НЕ записался в $root — проверь шаблон: ls $DECOY_TPL_DIR"
-  fi
+
+  # Живая проверка: что реально отдаёт nginx под этим доменом
+  local live_code="" live_md5="" idx_md5="" verdict=""
+  live_code=$(curl -sk -o /tmp/.decoy_check -w '%{http_code}' --max-time 6 \
+    -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36" \
+    -H "Host: $domain" "https://127.0.0.1:$port/" 2>/dev/null || echo 000)
+  case "$tpl" in
+    custom:*)
+      idx_md5=$(md5sum "${tpl#custom:}/index.html" 2>/dev/null | awk '{print $1}')
+      live_md5=$(md5sum /tmp/.decoy_check 2>/dev/null | awk '{print $1}')
+      if [[ "$live_code" == "200" && -n "$idx_md5" && "$live_md5" == "$idx_md5" ]]; then
+        verdict="HTTP 200, контент = ${tpl#custom:}/index.html ✓"
+      elif [[ "$live_code" == "200" && -z "$idx_md5" ]]; then
+        verdict="HTTP 200, но ${tpl#custom:}/index.html НЕ найден (nginx мог отдать другой файл)"
+      elif [[ "$live_code" == "200" ]]; then
+        verdict="HTTP 200, но контент ОТЛИЧАЕТСЯ от ${tpl#custom:}/index.html"
+      else
+        verdict="HTTP $live_code — nginx не может отдать файл (права / try_files)"
+      fi
+      ;;
+    redirect|locked)
+      verdict="HTTP $live_code (ожидаемо для redirect/locked)"
+      ;;
+    *)
+      if [[ "$live_code" == "200" ]]; then verdict="HTTP 200 — decoy «$tpl» отдаётся ✓"
+      else verdict="HTTP $live_code — decoy не отвечает"; fi
+      ;;
+  esac
+  rm -f /tmp/.decoy_check 2>/dev/null || true
+
+  log "Decoy применён: «$tpl» (root=${root_new:-${root_old:-?}})"
+  echo "    Проверка nginx: $verdict"
+  case "$live_code" in
+    200|302|401) ;;
+    *) warn "Смотри /var/log/nginx/error.log и права www-data на ${root_new:-$root_old}" ;;
+  esac
+  warn "Если в браузере всё ещё старая страница — Ctrl+F5 (кэш браузера, не сервера)"
   pause
 }
 
@@ -5252,6 +5501,206 @@ show_status() {
   echo; echo "▸ Inbounds:"
   sqlite3 -header -column "$XUI_DB" "SELECT id, protocol, port, listen, enable, remark FROM inbounds ORDER BY id;" 2>/dev/null || true
   # баны: в шапке меню — сумма по всем jail'ам, детали — в п.7; здесь не дублируем
+  pause
+}
+
+
+# =====================================================================
+# PRE-INSTALL SNAPSHOT — снимок всего, во что скрипт может вмешаться.
+# Делается при первом запуске (по согласию пользователя) или по п.24.
+# Хранится в /root/stack-backups/pre-install-<timestamp>/
+# =====================================================================
+take_pre_install_snapshot() {
+  local ts; ts=$(date +%Y%m%d-%H%M%S)
+  local dir="$BACKUP_DIR/pre-install-$ts"
+  mkdir -p "$dir" 2>/dev/null || { err "Не могу создать $dir"; return 1; }
+
+  log "Снимок состояния: $dir"
+  log "  (x-ui.db, nginx, UFW, iptables, fail2ban, systemd-units, letsencrypt-renewal, AdGuard)"
+
+  # 1. x-ui.db + /etc/x-ui
+  if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+    cp -a "$XUI_DB" "$dir/x-ui.db" 2>/dev/null || true
+    [[ -d /etc/x-ui ]] && cp -a /etc/x-ui "$dir/etc-x-ui" 2>/dev/null || true
+  fi
+
+  # 2. nginx — весь конфиг целиком
+  mkdir -p "$dir/nginx"
+  cp -a /etc/nginx/nginx.conf "$dir/nginx/" 2>/dev/null || true
+  for d in sites-available sites-enabled streams-available streams-enabled snippets conf.d; do
+    [[ -d "/etc/nginx/$d" ]] && cp -a "/etc/nginx/$d" "$dir/nginx/" 2>/dev/null || true
+  done
+
+  # 3. UFW + iptables + маршруты
+  mkdir -p "$dir/ufw"
+  [[ -d /etc/ufw ]] && cp -a /etc/ufw "$dir/ufw/etc-ufw" 2>/dev/null || true
+  [[ -f /etc/default/ufw ]] && cp -a /etc/default/ufw "$dir/ufw/" 2>/dev/null || true
+  iptables-save   > "$dir/ufw/iptables.v4"  2>/dev/null || true
+  ip6tables-save  > "$dir/ufw/iptables.v6"  2>/dev/null || true
+  ip -4 route show > "$dir/ufw/routes.v4" 2>/dev/null || true
+  ip -6 route show > "$dir/ufw/routes.v6" 2>/dev/null || true
+
+  # 4. fail2ban
+  if [[ -d /etc/fail2ban ]]; then
+    mkdir -p "$dir/fail2ban"
+    cp -a /etc/fail2ban "$dir/fail2ban/etc-fail2ban" 2>/dev/null || true
+  fi
+
+  # 5. systemd units стека
+  mkdir -p "$dir/systemd"
+  cp -a /etc/systemd/system/stack-heal.service /etc/systemd/system/stack-heal.timer "$dir/systemd/" 2>/dev/null || true
+  cp -a /etc/systemd/system/x-ui.service "$dir/systemd/" 2>/dev/null || true
+
+  # 6. letsencrypt renewal (без ключей)
+  if [[ -d /etc/letsencrypt ]]; then
+    mkdir -p "$dir/letsencrypt"
+    cp -a /etc/letsencrypt/renewal "$dir/letsencrypt/" 2>/dev/null || true
+    cp -a /etc/letsencrypt/renewal-hooks "$dir/letsencrypt/" 2>/dev/null || true
+    cp -a /etc/letsencrypt/cli.ini "$dir/letsencrypt/" 2>/dev/null || true
+  fi
+
+  # 7. logrotate стека
+  [[ -f /etc/logrotate.d/stack-decoy ]] && cp -a /etc/logrotate.d/stack-decoy "$dir/" 2>/dev/null || true
+
+  # 8. AdGuard Home config
+  if [[ -n "$ADG_CONFIG" && -f "$ADG_CONFIG" ]]; then
+    cp -a "$ADG_CONFIG" "$dir/AdGuardHome.yaml" 2>/dev/null || true
+  fi
+
+  # 9. Контекст: пакеты + мета
+  dpkg --get-selections > "$dir/dpkg-selections.txt" 2>/dev/null || true
+  apt-mark showmanual > "$dir/apt-manual.txt" 2>/dev/null || true
+  {
+    echo "Дата: $(date '+%F %T')"
+    echo "Хост: $(hostname)"
+    echo "Панель: ${PANEL_FLAVOR:-unknown}"
+    echo "x-ui.db: $XUI_DB"
+    echo "AdGuard: ${ADG_SERVICE:-—}"
+    echo "nginx: $(nginx -v 2>&1 || echo —)"
+    echo "fail2ban: $(fail2ban-client --version 2>/dev/null | head -1 || echo —)"
+  } > "$dir/INFO.txt"
+
+  # Архив
+  (cd "$BACKUP_DIR" && tar czf "pre-install-$ts.tar.gz" "pre-install-$ts" 2>/dev/null) || true
+
+  log "Снимок готов: $dir"
+  log "  архив: $BACKUP_DIR/pre-install-$ts.tar.gz"
+  return 0
+}
+
+restore_pre_install_snapshot() {
+  line; echo -e "${B}   ВОССТАНОВЛЕНИЕ ИЗ PRE-INSTALL СНИМКА${N}"; line
+  local snaps
+  snaps=$(ls -1dt "$BACKUP_DIR"/pre-install-* 2>/dev/null | grep -v "\.tar\.gz$" | head -20)
+  if [[ -z "$snaps" ]]; then
+    warn "Снимков не найдено в $BACKUP_DIR/pre-install-*"; pause; return 0
+  fi
+  local i=1 d
+  while IFS= read -r d; do
+    [[ -z "$d" ]] && continue
+    local info
+    info=$(head -1 "$d/INFO.txt" 2>/dev/null || echo "—")
+    printf "  %2d) %-40s %s
+" "$i" "$(basename "$d")" "$info"
+    i=$((i+1))
+  done <<<"$snaps"
+  echo
+  local pick=""
+  ask pick "Номер снимка (0 — отмена)" "0" '^[0-9]+$'
+  [[ "$pick" == "0" ]] && return 0
+  local chosen=""
+  chosen=$(printf '%s
+' "$snaps" | sed -n "${pick}p")
+  [[ -z "$chosen" || ! -d "$chosen" ]] && { err "Не найден снимок #$pick"; pause; return 1; }
+
+  echo
+  echo -e "${R}ВНИМАНИЕ:${N} восстановление перезапишет текущее состояние:"
+  echo "  • $XUI_DB (инбаунды и настройки панели)"
+  echo "  • /etc/nginx (все сайты и стримы)"
+  echo "  • правила UFW/iptables"
+  echo "  • /etc/fail2ban (если был в снимке)"
+  echo "  • systemd units стека (stack-heal, x-ui.service)"
+  echo "  • /etc/letsencrypt/renewal + renewal-hooks"
+  echo
+  local sure=""
+  ask sure "Для подтверждения введи YES" "" '^YES$'
+  [[ "$sure" == "YES" ]] || { log "Отменено"; pause; return 0; }
+  audit "rollback: восстановление из pre-install snapshot $chosen"
+
+  log "Бэкап текущего состояния перед восстановлением…"
+  take_pre_install_snapshot >/dev/null 2>&1 || true
+
+  log "Остановка сервисов…"
+  systemctl stop x-ui 2>/dev/null || true
+  systemctl stop nginx 2>/dev/null || true
+  [[ -n "$ADG_SERVICE" ]] && systemctl stop "$ADG_SERVICE" 2>/dev/null || true
+
+  if [[ -f "$chosen/x-ui.db" && -n "$XUI_DB" ]]; then
+    cp -a "$chosen/x-ui.db" "$XUI_DB" 2>/dev/null && log "  x-ui.db восстановлен"
+  fi
+  if [[ -d "$chosen/etc-x-ui" ]]; then
+    cp -a "$chosen/etc-x-ui/." /etc/x-ui/ 2>/dev/null || true
+  fi
+
+  if [[ -d "$chosen/nginx" ]]; then
+    [[ -f "$chosen/nginx/nginx.conf" ]] && cp -a "$chosen/nginx/nginx.conf" /etc/nginx/nginx.conf 2>/dev/null
+    for d in sites-available sites-enabled streams-available streams-enabled snippets conf.d; do
+      if [[ -d "$chosen/nginx/$d" ]]; then
+        rm -rf "/etc/nginx/$d"
+        cp -a "$chosen/nginx/$d" "/etc/nginx/" 2>/dev/null || true
+      fi
+    done
+    log "  /etc/nginx восстановлен"
+  fi
+
+  if [[ -d "$chosen/ufw" ]]; then
+    [[ -f "$chosen/ufw/iptables.v4" ]] && iptables-restore  < "$chosen/ufw/iptables.v4" 2>/dev/null && log "  iptables v4 восстановлены"
+    [[ -f "$chosen/ufw/iptables.v6" ]] && ip6tables-restore < "$chosen/ufw/iptables.v6" 2>/dev/null || true
+    if [[ -d "$chosen/ufw/etc-ufw" ]]; then
+      rm -rf /etc/ufw
+      cp -a "$chosen/ufw/etc-ufw" /etc/ufw 2>/dev/null || true
+      [[ -f "$chosen/ufw/ufw" ]] && cp -a "$chosen/ufw/ufw" /etc/default/ufw 2>/dev/null || true
+      log "  /etc/ufw восстановлен"
+    fi
+  fi
+
+  if [[ -d "$chosen/fail2ban/etc-fail2ban" ]]; then
+    rm -rf /etc/fail2ban
+    cp -a "$chosen/fail2ban/etc-fail2ban" /etc/fail2ban 2>/dev/null || true
+    log "  /etc/fail2ban восстановлен"
+  fi
+
+  if [[ -d "$chosen/systemd" ]]; then
+    for u in stack-heal.service stack-heal.timer x-ui.service; do
+      [[ -f "$chosen/systemd/$u" ]] && cp -a "$chosen/systemd/$u" /etc/systemd/system/ 2>/dev/null
+    done
+    systemctl daemon-reload 2>/dev/null || true
+    log "  systemd units восстановлены"
+  fi
+
+  if [[ -d "$chosen/letsencrypt" ]]; then
+    [[ -d "$chosen/letsencrypt/renewal" ]] && { rm -rf /etc/letsencrypt/renewal; cp -a "$chosen/letsencrypt/renewal" /etc/letsencrypt/ 2>/dev/null; }
+    [[ -d "$chosen/letsencrypt/renewal-hooks" ]] && { rm -rf /etc/letsencrypt/renewal-hooks; cp -a "$chosen/letsencrypt/renewal-hooks" /etc/letsencrypt/ 2>/dev/null; }
+    [[ -f "$chosen/letsencrypt/cli.ini" ]] && cp -a "$chosen/letsencrypt/cli.ini" /etc/letsencrypt/ 2>/dev/null
+    log "  letsencrypt renewal восстановлен"
+  fi
+
+  [[ -f "$chosen/stack-decoy" ]] && cp -a "$chosen/stack-decoy" /etc/logrotate.d/ 2>/dev/null || true
+
+  if [[ -f "$chosen/AdGuardHome.yaml" && -n "$ADG_CONFIG" ]]; then
+    cp -a "$chosen/AdGuardHome.yaml" "$ADG_CONFIG" 2>/dev/null && log "  AdGuardHome.yaml восстановлен"
+  fi
+
+  log "Запуск сервисов…"
+  systemctl start nginx 2>/dev/null || true
+  systemctl start x-ui 2>/dev/null || true
+  [[ -n "$ADG_SERVICE" ]] && systemctl start "$ADG_SERVICE" 2>/dev/null || true
+  systemctl restart fail2ban 2>/dev/null || true
+  nginx -t >/dev/null 2>&1 && log "  nginx -t OK" || warn "  nginx -t провалился — проверь конфиг"
+
+  line
+  log "Восстановление из pre-install завершено: $chosen"
+  line
   pause
 }
 
@@ -5326,6 +5775,8 @@ certs_menu() {
   echo "  3) Выпустить wildcard (Cloudflare DNS-01)"
   echo "  4) Wildcard вкл/выкл"
   echo "  5) Выпуск серта через меню x-ui (освободить :80)"
+  echo "  6) Показать все серты и email (обзор)"
+  echo "  7) Сбросить email Let's Encrypt (спросить заново)"
   echo "  0) Назад"
   line
   local action=""
@@ -5337,6 +5788,8 @@ certs_menu() {
     3) cert_wildcard_issue ;;
     4) wildcard_toggle ;;
     5) xui_cert_menu_helper ;;
+    6) certs_view ;;
+    7) le_email_forget; log "Email сброшен — при следующем выпуске спросит заново"; pause ;;
   esac
   pause
 }
@@ -5746,6 +6199,9 @@ view_decoy_templates() {
     printf "  %-15s %6s B  %s\n" "$name" "$size" "$desc"
   done
   echo
+  echo -e "${B}▸ Свой сайт (custom):${N} доступен в любом меню выбора шаблона —"
+  echo "    выбрать пункт «custom» и указать путь к папке с index.html (статика)."
+  echo
   echo "  1) Пересобрать все decoy-блоки (включить robots/honeypot/UA-404/логи)"
   echo "  2) Проверить домен как посторонний (человек vs сканер)"
   echo "  0) Назад"
@@ -5954,7 +6410,7 @@ ask_adguard_and_decoy() {
   # AdGuard: да/нет → установка → пароль → размещение
   if [[ "$ADG_PRESENT" != true ]]; then
     local adg_install=false
-    [[ -t 0 ]] && askyn adg_install "Установить AdGuard Home?" "y"
+    [[ -t 0 ]] && askyn adg_install "Установить AdGuard Home?" "n"
     if [[ "$adg_install" == true ]]; then
       install_adguard_home || warn "AdGuard не установился — продолжаем без него."
       detect_env
@@ -6008,6 +6464,9 @@ ask_adguard_and_decoy() {
 # Вызывается и из авто-подъёма, и из п.1 (при переустановке убивает старые
 # правила прошлой установки — «почему открыты TCP-порты» лечится здесь).
 firewall_apply() {
+  # Снимок «до стека» — один раз, чтобы откат (п.12 / п.23 → 2) имел к чему вернуться.
+  # save_firewall_state сам защищён от перезаписи: если снимок уже есть — молча выйдет.
+  save_firewall_state >/dev/null 2>&1 || true
   log "Файрвол: сброс и только необходимое…"
   ufw --force reset >/dev/null 2>&1 || true
   ufw default deny incoming >/dev/null 2>&1 || true
@@ -6132,13 +6591,12 @@ PYROW
     askyn go "Продолжить всё равно (клиенты не подключатся, пока DNS не поправишь)?" "n"
     [[ "$go" == true ]] || return 0
   fi
-  if [[ "$sec" == "tls" && ! -f "/etc/letsencrypt/live/$nd/fullchain.pem" ]]; then
-    # wildcard-сертификат тоже годится: *.<база> покрывает поддомены
+  if [[ "$sec" == "tls" ]] && ! cert_paths "$nd" >/dev/null 2>&1; then
     if [[ -n "$WILDCARD_DOMAIN" && "$nd" == *."$WILDCARD_DOMAIN" ]]; then
       log "Сёрт: wildcard *.$WILDCARD_DOMAIN покрывает $nd"
     else
-      err "Сертификата для $nd нет (live/$nd) — выпусти сначала (п.10) и повтори"
-      return 1
+      log "Сёрта для $nd нет — выпускаю на месте (certbot)"
+      cert_issue "$nd" || warn "Серт для $nd не выпущен — сделай это через п.10 и повтори"
     fi
   fi
   echo "  План: JSON стрима/настроек ($old→$nd), hosts, SNI-карта, reality-dest при необходимости."
@@ -6410,7 +6868,7 @@ def add(d):
         seen.add(d); out.append(d)
 try:
     con=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True,timeout=5)
-    for setts_s,stream_s in con.execute("SELECT settings,stream_settings FROM inbounds WHERE enable=1"):
+    for setts_s,stream_s in con.execute("SELECT settings,stream_settings FROM inbounds WHERE enable=1 AND port>0"):
         try: se=json.loads(setts_s or "{}")
         except Exception: se={}
         try: st=json.loads(stream_s or "{}")
@@ -6809,6 +7267,535 @@ for n in sorted(names)[:20]: print(n)' 2>/dev/null)
   pause
 }
 
+# =====================================================================
+# ОТКАТ И ДЕМОНТАЖ СТЕКА (п.23)
+#   Подменю поэтапного возврата к «плоскому» состоянию:
+#     1) открыть порты наружу (панель/подписки/инбаунды)
+#     2) правила UFW (снимок / по одному / reset+open)
+#     3) службы и интеграции стека
+#     4) конфиги и каталоги стека
+#     5) удаление nginx (пакет + конфиги)
+#     6) полный откат (всё выше, тихо, подтверждение YES)
+#   AdGuard Home и серты LE НЕ трогаются — у AdGuard свой пункт (п.14),
+#   серты не наши, могут использоваться другими сервисами.
+# =====================================================================
+
+# Список служб/интеграций, которые создаёт stack-manager
+rb_services_list() {
+  printf '%s\n' \
+    "stack-heal.timer|таймер автопочинки инбаундов (каждые 2 мин)|/etc/systemd/system/stack-heal.timer|systemd" \
+    "stack-heal.service|служба автопочинки (oneshot, запускается таймером)|/etc/systemd/system/stack-heal.service|systemd" \
+    "fail2ban jail decoy-login|бан за POST /login к decoy-страницам|/etc/fail2ban/jail.d/decoy-login.local|f2b" \
+    "fail2ban filter decoy-login|фильтр для jail decoy-login|/etc/fail2ban/filter.d/decoy-login.conf|f2b" \
+    "certbot deploy-hook|рестарт x-ui/nginx/AdGuard после renew сертов|/etc/letsencrypt/renewal-hooks/deploy/stack-cert-mirror.sh|file"
+}
+
+# Список конфигов и каталогов стека
+rb_configs_list() {
+  printf '%s\n' \
+    "/etc/nginx/sites-available/stack.conf|основной http-конфиг стека (ACME :80 + панель :4443 + decoy)|file" \
+    "/etc/nginx/sites-enabled/stack.conf|симлинк основного конфига|link" \
+    "/etc/nginx/streams-available/sni-router.conf|SNI-роутер 443 (map + upstream)|file" \
+    "/etc/nginx/streams-enabled/sni-router.conf|симлинк SNI-роутера|link" \
+    "/etc/nginx/snippets/decoy-headers.conf|security-заголовки decoy|file" \
+    "/etc/logrotate.d/stack-decoy|ротация decoy-логов|file" \
+    "/var/www/panel-decoy|decoy-заглушка корня домена панели|dir" \
+    "/var/www/decoy-templates|шаблоны decoy (corporate, blog, docs…)|dir" \
+    "/var/www/decoy-login|login-шаблоны (adguard, portainer, jellyfin…)|dir"
+}
+
+# --- 23.1 Открыть порты наружу (панель/подписки/инбаунды) --------------
+rb_open_ports() {
+  line; echo -e "${B}   ОТКРЫТЬ ПОРТЫ НАРУЖУ${N}"; line
+  echo "  Сейчас панель/подписки/инбаунды живут за SNI-роутером (127.0.0.1)."
+  echo "  Здесь — открыть их напрямую на 0.0.0.0 (по каждому пункту спрошу)."
+  echo
+  [[ -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
+  auto_backup_stack >/dev/null 2>&1 || true
+
+  local wp wl sp sl
+  wp=$(xui_get webPort); wl=$(xui_get webListen)
+  sp=$(xui_get subPort); sl=$(xui_get subListen)
+
+  local need_restart=0
+  systemctl stop x-ui 2>/dev/null || true
+
+  echo "▸ Панель: bind=${wl:-<пусто>} port=${wp:-?}"
+  if [[ -n "$wp" && ( "$wl" == "127.0.0.1" || "$wl" == "::1" || -z "$wl" ) ]]; then
+    local go=""
+    askyn go "  Открыть панель ($wp) наружу (0.0.0.0)?" "n"
+    if [[ "$go" == true ]]; then
+      xui_set_setting webListen '0.0.0.0'
+      log "  webListen → 0.0.0.0 (панель $wp)"; need_restart=1
+      audit "rollback: webListen → 0.0.0.0"
+    fi
+  else
+    [[ -n "$wp" ]] && log "  панель уже слушает ${wl:-0.0.0.0}:$wp" || warn "  webPort не найден"
+  fi
+
+  echo
+  echo "▸ Подписки: bind=${sl:-<пусто>} port=${sp:-?}"
+  if [[ -n "$sp" && ( "$sl" == "127.0.0.1" || "$sl" == "::1" || -z "$sl" ) ]]; then
+    local go=""
+    askyn go "  Открыть подписки ($sp) наружу (0.0.0.0)?" "n"
+    if [[ "$go" == true ]]; then
+      xui_set_setting subListen '0.0.0.0'
+      log "  subListen → 0.0.0.0 (подписки $sp)"; need_restart=1
+      audit "rollback: subListen → 0.0.0.0"
+    fi
+  else
+    [[ -n "$sp" ]] && log "  подписки уже слушают ${sl:-0.0.0.0}:$sp" || warn "  subPort не найден"
+  fi
+
+  echo
+  echo "▸ Инбаунды:"
+  # ВАЖНО: сначала собрать строки, потом спрашивать — иначе read внутри
+  # while < <(...) съест следующую строку sqlite как ответ на askyn.
+  local -a rows=()
+  local _l
+  while IFS= read -r _l; do rows+=("$_l"); done < <(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "SELECT id, protocol, port, COALESCE(listen,''), COALESCE(json_extract(stream_settings,'\$.security'),'') FROM inbounds ORDER BY id;" 2>/dev/null || true)
+
+  if [[ ${#rows[@]} -eq 0 ]]; then
+    warn "  инбаундов в панели нет"
+  else
+    local row iid iproto iport ilisten isec note go
+    for row in "${rows[@]}"; do
+      IFS='|' read -r iid iproto iport ilisten isec <<<"$row"
+      [[ -z "$iid" ]] && continue
+      note=""
+      case "$isec" in
+        tls)     note=" [TLS — без nginx серт-пути в settings могут стать недостижимы]" ;;
+        reality) note=" [Reality — dest указывает на локальный decoy nginx]" ;;
+      esac
+      echo "  #$iid $iproto :$iport (bind=${ilisten:-0.0.0.0})$note"
+      if [[ "$ilisten" == "127.0.0.1" || "$ilisten" == "::1" ]]; then
+        askyn go "    Открыть #$iid наружу?" "n"
+        if [[ "$go" == true ]]; then
+          sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET listen='0.0.0.0' WHERE id=$iid;" 2>/dev/null || true
+          log "    #$iid listen → 0.0.0.0"; need_restart=1
+          audit "rollback: inbound #$iid listen → 0.0.0.0"
+        fi
+      else
+        echo "    уже слушает наружу"
+      fi
+    done
+  fi
+
+  systemctl start x-ui 2>/dev/null || true
+  [[ "$need_restart" == 1 ]] && log "x-ui перезапущен — новые bind'ы применены"
+  pause
+}
+
+# --- 23.2 Правила UFW -------------------------------------------------
+rb_firewall() {
+  line; echo -e "${B}   ПРАВИЛА ФАЙРВОЛА (UFW)${N}"; line
+  if ! command -v ufw >/dev/null 2>&1; then
+    warn "UFW не установлен — чистить нечего"; pause; return 0
+  fi
+  echo "  Статус: $(ufw status 2>/dev/null | head -1)"
+  echo
+  ufw status numbered 2>/dev/null | sed 's/^/    /'
+  echo
+
+  if [[ -f "$FW_STATE_DIR/saved" ]]; then
+    log "Есть снимок состояния UFW: $FW_STATE_DIR/saved"
+    local rs=""
+    askyn rs "Восстановить из снимка (отменит все правила, добавленные стеком)?" "y"
+    if [[ "$rs" == true ]]; then
+      restore_firewall_state
+      audit "rollback: UFW восстановлен из снимка"
+      return 0
+    fi
+  fi
+
+  echo "  1) Пройти по каждому правилу (оставить/удалить)"
+  echo "  2) Reset UFW (default deny) + открыть всё слушающееся"
+  echo "  0) Отмена"
+  line
+  local c=""
+  read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
+  case "$c" in
+    1)
+      # Собираем номера правил, потом спрашиваем — иначе read внутри
+      # while < <(...) съест следующую строку ufw как ответ.
+      local -a nums=()
+      local _n
+      while IFS= read -r _n; do nums+=("$_n"); done < <(
+        ufw status numbered 2>/dev/null | grep -oE '^\[[[:space:]]*[0-9]+\]' | grep -oE '[0-9]+' | sort -rn
+      )
+      local -a to_del=()
+      local n rule del
+      for n in "${nums[@]}"; do
+        rule=$(ufw status numbered 2>/dev/null | grep -E "^\[[[:space:]]*$n\]" || true)
+        [[ -z "$rule" ]] && continue
+        echo "  $rule"
+        askyn del "    Удалить это правило?" "n"
+        [[ "$del" == true ]] && to_del+=("$n")
+      done
+      local deleted=0
+      for n in "${to_del[@]}"; do
+        if ufw --force delete "$n" >/dev/null 2>&1; then
+          log "  правило $n удалено"; deleted=$((deleted+1))
+        else
+          warn "  правило $n не удалилось"
+        fi
+      done
+      [[ "$deleted" -eq 0 ]] && log "Ничего не удалено."
+      audit "rollback: UFW удалено правил: $deleted"
+      ;;
+    2)
+      local go=""
+      askyn go "Сбросить UFW (default deny + открыть всё слушающееся)?" "n"
+      [[ "$go" == true ]] || { pause; return 0; }
+      save_firewall_state
+      ufw --force reset >/dev/null 2>&1 || true
+      ufw default deny incoming >/dev/null 2>&1 || true
+      ufw default allow outgoing >/dev/null 2>&1 || true
+      fw_allow "${SSH_PORT:-22}" tcp "SSH"
+      local p
+      for p in $(ss -tln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; split($4,a,":"); print a[length(a)] }' | sort -un); do
+        [[ -n "$p" && "$p" != "${SSH_PORT:-22}" ]] && fw_allow "$p" tcp "rollback-open"
+      done
+      for p in $(ss -uln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; if ($5 != "*:*") next; split($4,a,":"); print a[length(a)] }' | sort -un); do
+        [[ -n "$p" ]] && fw_allow "$p" udp "rollback-open"
+      done
+      ufw --force enable >/dev/null 2>&1 || true
+      log "UFW: reset + открыто всё слушающееся"
+      audit "rollback: UFW reset + open listening"
+      ;;
+    *) pause; return 0 ;;
+  esac
+  pause
+}
+
+# --- 23.3 Службы и интеграции -----------------------------------------
+rb_services() {
+  line; echo -e "${B}   СЛУЖБЫ И ИНТЕГРАЦИИ СТЕКА${N}"; line
+  local -a items=()
+  local _l
+  while IFS= read -r _l; do items+=("$_l"); done < <(rb_services_list)
+
+  local found=0 name desc path typ exists unit c
+  local item
+  for item in "${items[@]}"; do
+    IFS='|' read -r name desc path typ <<<"$item"
+    [[ -z "$name" ]] && continue
+    exists=false
+    [[ -e "$path" ]] && exists=true
+    [[ "$exists" != true ]] && continue
+    found=$((found+1))
+    echo "  ─ $name"
+    echo "    $desc"
+    echo "    файл: $path"
+    echo "      1) Удалить   2) Отключить (файл оставить)   3) Отмена"
+    c=""
+    ask c "    Выбор" "3" '^[123]$'
+    case "$c" in
+      1)
+        case "$typ" in
+          systemd)
+            unit=$(basename "$path")
+            systemctl disable --now "$unit" >/dev/null 2>&1 || true
+            rm -f "$path" 2>/dev/null || true
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            ;;
+          f2b)
+            rm -f "$path" 2>/dev/null || true
+            systemctl restart fail2ban >/dev/null 2>&1 || true
+            ;;
+          file)
+            rm -f "$path" 2>/dev/null || true
+            ;;
+        esac
+        log "    удалено"; audit "rollback: удалено — $name"
+        ;;
+      2)
+        case "$typ" in
+          systemd)
+            unit=$(basename "$path")
+            systemctl disable --now "$unit" >/dev/null 2>&1 || true
+            ;;
+          f2b)
+            sed -i -E 's/^enabled[[:space:]]*=.*/enabled  = false/' "$path" 2>/dev/null || true
+            systemctl restart fail2ban >/dev/null 2>&1 || true
+            ;;
+          file)
+            chmod -x "$path" 2>/dev/null || true
+            ;;
+        esac
+        log "    отключено (файл на месте)"; audit "rollback: отключено — $name"
+        ;;
+    esac
+  done
+  [[ "$found" -eq 0 ]] && log "Служб/интеграций стека не найдено — чистить нечего."
+  pause
+}
+
+# --- 23.4 Конфиги и каталоги ------------------------------------------
+rb_configs() {
+  line; echo -e "${B}   КОНФИГИ И КАТАЛОГИ СТЕКА${N}"; line
+  local -a items=()
+  local _l
+  while IFS= read -r _l; do items+=("$_l"); done < <(rb_configs_list)
+
+  local found=0 path desc typ exists go
+  local item
+  for item in "${items[@]}"; do
+    IFS='|' read -r path desc typ <<<"$item"
+    [[ -z "$path" ]] && continue
+    exists=false
+    case "$typ" in
+      file|link) [[ -e "$path" ]] && exists=true ;;
+      dir)       [[ -d "$path" ]] && exists=true ;;
+    esac
+    [[ "$exists" != true ]] && continue
+    found=$((found+1))
+    echo "  ─ $path"
+    echo "    $desc"
+    askyn go "    Удалить?" "n"
+    if [[ "$go" == true ]]; then
+      case "$typ" in
+        dir) rm -rf "$path" ;;
+        *)   rm -f "$path" ;;
+      esac
+      log "    удалено"; audit "rollback: удалено — $path"
+    fi
+  done
+
+  # per-inbound decoy-каталоги
+  local -a decoy_dirs=()
+  local d
+  for d in /var/www/decoy-*; do
+    [[ -d "$d" ]] && decoy_dirs+=("$d")
+  done
+  for d in "${decoy_dirs[@]}"; do
+    found=$((found+1))
+    echo "  ─ $d"
+    echo "    decoy-заглушка инбаунда"
+    askyn go "    Удалить?" "n"
+    if [[ "$go" == true ]]; then
+      rm -rf "$d"; log "    удалено"; audit "rollback: удалено — $d"
+    fi
+  done
+
+  [[ "$found" -eq 0 ]] && log "Конфигов/каталогов стека не найдено."
+  nginx -t >/dev/null 2>&1 && nginx_reload >/dev/null 2>&1 || true
+  pause
+}
+
+# --- 23.5 Удаление nginx ----------------------------------------------
+rb_remove_nginx() {
+  line; echo -e "${B}   УДАЛЕНИЕ NGINX${N}"; line
+  command -v nginx >/dev/null 2>&1 || { warn "nginx не установлен — нечего удалять"; pause; return 0; }
+  echo "  ${R}ВНИМАНИЕ:${N} без nginx стек работать НЕ БУДЕТ как SNI-роутер."
+  echo "  • Панель/подписки/инбаунды сейчас на 127.0.0.1 — станут недоступны снаружи,"
+  echo "    пока не откроешь их через п.23 → 1 (Открыть порты наружу)."
+  echo "  • Серты на :443 перестанут отдаваться; decoy-страницы; DoH AdGuard."
+  echo "  • Конфиги /etc/nginx будут удалены пакетом (это же делает apt purge)."
+  echo
+  local go=""
+  askyn go "Удалить nginx (пакет + конфиги + сервис)?" "n"
+  [[ "$go" == true ]] || { pause; return 0; }
+  local sure=""
+  ask sure "Для подтверждения введи YES" "" '^YES$'
+  [[ "$sure" == "YES" ]] || { log "Отменено"; pause; return 0; }
+  audit "rollback: удаление nginx (purge)"
+  systemctl stop nginx 2>/dev/null || true
+  systemctl disable nginx 2>/dev/null || true
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y nginx nginx-common nginx-full libnginx-mod-stream >/dev/null 2>&1 || true
+  apt-get autoremove -y >/dev/null 2>&1 || true
+  rm -rf /etc/nginx /var/log/nginx 2>/dev/null || true
+  log "nginx удалён (пакет + /etc/nginx + /var/log/nginx)"
+  pause
+}
+
+# --- 23.6 Полный откат (тихо) -----------------------------------------
+rb_full_rollback() {
+  line; echo -e "${R}   ПОЛНЫЙ ОТКАТ СТЕКА${N}"; line
+  echo "  Будет выполнено (без вопросов, по шагам):"
+  echo "    1) Бэкап x-ui.db и nginx-конфигов стека"
+  echo "    2) Удаление служб и интеграций (stack-heal, decoy-login jail, certbot hook)"
+  echo "    3) Удаление конфигов и каталогов стека"
+  echo "    4) Открытие панели/подписок/инбаундов наружу (0.0.0.0)"
+  echo "    5) UFW: восстановление из снимка (если есть), иначе reset + открытие слушающегося"
+  echo "    6) Удаление nginx (пакет + конфиги)"
+  echo
+  echo "  ${G}НЕ трогается:${N} AdGuard Home, серты Let's Encrypt в /etc/letsencrypt/live/, x-ui.db."
+  echo
+  local sure=""
+  ask sure "Для подтверждения введи YES" "" '^YES$'
+  [[ "$sure" == "YES" ]] || { log "Отменено"; pause; return 0; }
+  audit "rollback: ПОЛНЫЙ ОТКАТ СТЕКА (silent)"
+
+  log "[1/6] Бэкап…"
+  auto_backup_stack >/dev/null 2>&1 || true
+
+  log "[2/6] Службы и интеграции…"
+  uninstall_heal_timer >/dev/null 2>&1 || true
+  rm -f /etc/fail2ban/jail.d/decoy-login.local /etc/fail2ban/filter.d/decoy-login.conf 2>/dev/null || true
+  rm -f /etc/letsencrypt/renewal-hooks/deploy/stack-cert-mirror.sh 2>/dev/null || true
+  systemctl restart fail2ban >/dev/null 2>&1 || true
+
+  log "[3/6] Конфиги и каталоги стека…"
+  rm -f /etc/nginx/sites-enabled/stack.conf /etc/nginx/sites-available/stack.conf 2>/dev/null || true
+  rm -f /etc/nginx/streams-enabled/sni-router.conf /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
+  rm -f /etc/nginx/snippets/decoy-headers.conf /etc/logrotate.d/stack-decoy 2>/dev/null || true
+  rm -rf /var/www/panel-decoy /var/www/decoy-templates /var/www/decoy-login 2>/dev/null || true
+  rm -rf /var/www/decoy-* 2>/dev/null || true
+
+  log "[4/6] Открытие портов наружу…"
+  systemctl stop x-ui 2>/dev/null || true
+  xui_set_setting webListen '0.0.0.0'
+  xui_set_setting subListen '0.0.0.0'
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "UPDATE inbounds SET listen='0.0.0.0' WHERE COALESCE(listen,'') IN ('127.0.0.1','::1');" 2>/dev/null || true
+  systemctl start x-ui 2>/dev/null || true
+
+  log "[5/6] UFW…"
+  # в полном откате действуем тихо: если снимок есть — восстанавливаем его логику
+  # без интерактивного запроса (restore_firewall_state спрашивает — обходим)
+  if [[ -f "$FW_STATE_DIR/saved" ]]; then
+    . "$FW_STATE_DIR/state" 2>/dev/null || true
+    [[ -f "$FW_STATE_DIR/iptables.v4" ]] && iptables-restore  < "$FW_STATE_DIR/iptables.v4"  2>/dev/null || true
+    [[ -f "$FW_STATE_DIR/iptables.v6" ]] && ip6tables-restore < "$FW_STATE_DIR/iptables.v6"  2>/dev/null || true
+    if [[ "${UFW_WAS_INSTALLED:-0}" == "1" && -f "$FW_STATE_DIR/ufw-config.tar" ]]; then
+      tar -xpf "$FW_STATE_DIR/ufw-config.tar" -C / 2>/dev/null || true
+      [[ "${UFW_WAS_ACTIVE:-0}" == "1" ]] && ufw --force enable >/dev/null 2>&1 || ufw --force disable >/dev/null 2>&1
+    fi
+    rm -f "$FW_STATE_DIR/saved"
+    log "  восстановлено из снимка $FW_STATE_DIR (тихо)"
+  else
+    save_firewall_state >/dev/null 2>&1 || true
+    ufw --force reset >/dev/null 2>&1 || true
+    ufw default deny incoming >/dev/null 2>&1 || true
+    ufw default allow outgoing >/dev/null 2>&1 || true
+    fw_allow "${SSH_PORT:-22}" tcp "SSH"
+    local p
+    for p in $(ss -tln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; split($4,a,":"); print a[length(a)] }' | sort -un); do
+      [[ -n "$p" && "$p" != "${SSH_PORT:-22}" ]] && fw_allow "$p" tcp "rollback-open"
+    done
+    for p in $(ss -uln 2>/dev/null | awk 'NR>1 { if ($4 ~ /^127\./ || $4 ~ /^\[::1\]/) next; if ($5 != "*:*") next; split($4,a,":"); print a[length(a)] }' | sort -un); do
+      [[ -n "$p" ]] && fw_allow "$p" udp "rollback-open"
+    done
+    ufw --force enable >/dev/null 2>&1 || true
+    log "  reset + открыто всё слушающееся"
+  fi
+
+  log "[6/6] Удаление nginx…"
+  systemctl stop nginx 2>/dev/null || true
+  systemctl disable nginx 2>/dev/null || true
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y nginx nginx-common nginx-full libnginx-mod-stream >/dev/null 2>&1 || true
+  apt-get autoremove -y >/dev/null 2>&1 || true
+  rm -rf /etc/nginx /var/log/nginx 2>/dev/null || true
+
+  line
+  log "ПОЛНЫЙ ОТКАТ ЗАВЕРШЁН"
+  line
+  local wp
+  wp=$(xui_get webPort 2>/dev/null || echo '?')
+  echo "  Панель:  http://$(server_ip4):$wp"
+  echo "  Серты:   сохранены (/etc/letsencrypt/live/)"
+  echo "  AdGuard: не трогался"
+  echo "  Бэкап:   $BACKUP_DIR/auto-*"
+  line
+  pause
+}
+
+# --- Подменю отката ---------------------------------------------------
+rollback_menu() {
+  while :; do
+    clear
+    line; echo -e "${B}   ОТКАТ И ДЕМОНТАЖ СТЕКА${N}"; line
+    local heal="нет" jail="нет" hook="нет" ngx="нет" sni="нет" snap="нет"
+    systemctl list-unit-files 2>/dev/null | grep -q '^stack-heal\.' && heal="да"
+    [[ -f /etc/fail2ban/jail.d/decoy-login.local ]] && jail="да"
+    [[ -x /etc/letsencrypt/renewal-hooks/deploy/stack-cert-mirror.sh ]] && hook="да"
+    command -v nginx >/dev/null 2>&1 && ngx="да"
+    [[ -f /etc/nginx/streams-available/sni-router.conf ]] && sni="да"
+    [[ -f "$FW_STATE_DIR/saved" ]] && snap="да"
+    echo "  Текущее состояние стека:"
+    printf "    nginx:                 %s\n" "$ngx"
+    printf "    SNI-роутер (443):      %s\n" "$sni"
+    printf "    stack-heal:            %s\n" "$heal"
+    printf "    fail2ban decoy-jail:   %s\n" "$jail"
+    printf "    certbot deploy-hook:   %s\n" "$hook"
+    printf "    снимок UFW:            %s\n" "$snap"
+    echo
+    line
+    echo "  1) 🌐 Открыть порты наружу (панель / подписки / инбаунды)"
+    echo "  2) 🚧 Правила файервола (UFW)"
+    echo "  3) 🛠️  Службы и интеграции стека"
+    echo "  4) 📁 Конфиги и каталоги стека"
+    echo "  5) 🗑️  Удалить nginx (пакет + конфиги)"
+    echo "  6) 💣 ПОЛНЫЙ ОТКАТ (всё выше, тихо, подтверждение YES)"
+    echo "  0) Назад"
+    line
+    local c=""
+    read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
+    case "$c" in
+      1) rb_open_ports ;;
+      2) rb_firewall ;;
+      3) rb_services ;;
+      4) rb_configs ;;
+      5) rb_remove_nginx ;;
+      6) rb_full_rollback ;;
+      0) return 0 ;;
+      *) sleep 1 ;;
+    esac
+  done
+}
+
+
+# --- Подменю 24: pre-install snapshot ---------------------------------
+preinstall_menu() {
+  while :; do
+    clear
+    line; echo -e "${B}   PRE-INSTALL СНИМОК СОСТОЯНИЯ${N}"; line
+    local cnt
+    cnt=$(ls -1d "$BACKUP_DIR"/pre-install-* 2>/dev/null | grep -v "\.tar\.gz$" | wc -l)
+    echo "  Снимков в $BACKUP_DIR/pre-install-*: $cnt"
+    echo
+    echo "  Что сохраняется:"
+    echo "    x-ui.db, /etc/x-ui, /etc/nginx/*, правила UFW/iptables, /etc/fail2ban,"
+    echo "    systemd units стека, /etc/letsencrypt/renewal+hooks, logrotate, AdGuardHome.yaml"
+    echo
+    line
+    echo "  1) 📸 Сделать новый снимок сейчас"
+    echo "  2) ♻️  Восстановить из снимка (перезапишет текущее состояние)"
+    echo "  3) 🗑️  Удалить старый снимок"
+    echo "  0) Назад"
+    line
+    local c=""
+    read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
+    case "$c" in
+      1) take_pre_install_snapshot; pause ;;
+      2) restore_pre_install_snapshot ;;
+      3)
+        local snaps
+        snaps=$(ls -1dt "$BACKUP_DIR"/pre-install-* 2>/dev/null | grep -v "\.tar\.gz$" | head -20)
+        [[ -z "$snaps" ]] && { warn "Снимков нет"; pause; continue; }
+        local i=1 d
+        while IFS= read -r d; do
+          [[ -z "$d" ]] && continue
+          printf "  %2d) %s\n" "$i" "$(basename "$d")"
+          i=$((i+1))
+        done <<<"$snaps"
+        local pick=""; ask pick "Номер (0 — отмена)" "0" '^[0-9]+$'
+        [[ "$pick" == "0" ]] && continue
+        local ch
+        ch=$(printf '%s\n' "$snaps" | sed -n "${pick}p")
+        [[ -z "$ch" ]] && { err "Нет такого"; pause; continue; }
+        local sure=""; askyn sure "Удалить $(basename "$ch") и его .tar.gz?" "n"
+        [[ "$sure" == true ]] && { rm -rf "$ch" "$ch.tar.gz" 2>/dev/null; log "Удалено"; }
+        pause
+        ;;
+      0) return 0 ;;
+      *) sleep 1 ;;
+    esac
+  done
+}
+
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
@@ -6836,6 +7823,8 @@ run_menu_action() {
     20) inbound_change_domain ;;
     21) nginx_hygiene ;;
     22) stealth_audit ;;
+    23) rollback_menu ;;
+    24) preinstall_menu ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -6937,6 +7926,8 @@ main_menu() {
     echo -e "  ${B}20)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
     echo -e "  ${B}21)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
     echo -e "  ${B}22)${N} 🕶 Стелс-аудит (глазами Shodan/Censys)"
+    echo -e "  ${B}23)${N} 💣 Откат и демонтаж стека"
+    echo -e "  ${B}24)${N} 📸 Pre-install снимок (состояние до скрипта)"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
@@ -7183,7 +8174,7 @@ auto_full_setup() {
           echo "${REALITY_DECOY_TPL_BYID[$id]:-corporate}"   # своя заглушка инбаунда
         fi
       fi
-    done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 ORDER BY id;" 2>/dev/null)
+    done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null)
     echo "n"                                    # файрвол: настроим сами ниже
   } > "$ansf"
   log "Первичная настройка (автоответы: $ansf)…"
@@ -7247,6 +8238,26 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   ensure_deps
   detect_env
   [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — сервер работает не на свежем ядре. См. п.18 → «Ресурсы»."
+
+  # Первый запуск — предложить pre-install снимок состояния
+  if [[ ! -f "$BACKUP_DIR/.pre-install-done" ]]; then
+    echo
+    warn "Первый запуск скрипта в этой системе."
+    echo "  Рекомендуется сохранить снимок ТЕКУЩЕГО состояния — всех файлов,"
+    echo "  которые скрипт может изменить: x-ui.db, /etc/nginx, UFW/iptables,"
+    echo "  fail2ban, systemd units, certbot renewal-hooks, AdGuardHome.yaml."
+    echo "  Это позволит откатить любые изменения одним кликом (п.24)."
+    echo
+    mk_snap=""
+    askyn mk_snap "Сделать pre-install снимок сейчас?" "y"
+    if [[ "$mk_snap" == true ]]; then
+      mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+      take_pre_install_snapshot && touch "$BACKUP_DIR/.pre-install-done" 2>/dev/null || true
+    else
+      warn "Снимок не сделан. Можно сделать позже через п.24."
+    fi
+    echo
+  fi
   # Автобэкап x-ui.db + nginx-конфигов стека (последние 5 копий)
   auto_backup_stack
   # deploy-hook renew (сертиф. живут в live/, зеркала нет) + дедупликация
@@ -7261,27 +8272,18 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   # (AdGuard берёт сертификат панели/wildcard для своего https).
   auto_full=false   # НЕ local: точка входа — вне функции
   if [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]]; then
-    warn "x-ui.db не найден — панель LucX UI не установлена."
-    if [[ -z "$PANEL_DOMAIN" ]]; then
-      ask PANEL_DOMAIN "Домен панели (A-запись → этот сервер)" "panel.example.com" '^[a-zA-Z0-9.-]+$'
-    fi
-    askyn install_now "Установить панель LucX UI сейчас?" "y"
+    warn "x-ui.db не найден — панель (LucX UI / 3x-ui) не установлена."
+    echo "  Установка доступна через меню (п.13 — панель LucX UI)."
+    echo "  Если уже стоит оригинальный 3x-ui — убедись, что x-ui.db в /etc/x-ui/."
+    local install_now=""
+    askyn install_now "Установить панель LucX UI сейчас?" "n"
     if [[ "$install_now" == true ]]; then
-      install_lucx_panel || { err "Не удалось установить панель. Выход."; exit 1; }
-      auto_full=true
+      install_lucx_panel || warn "Установка не удалась — можно повторить через п.13."
+      [[ -n "$XUI_DB" && -f "$XUI_DB" ]] && auto_full=true
     else
-      err "Без панели работа невозможна. Выход."; exit 1
+      warn "Панель не установлена — меню откроется, установка доступна через п.13."
     fi
   fi
-
-  if [[ "$ADG_PRESENT" != true ]]; then
-    warn "AdGuard Home не установлен."
-    askyn install_adg "Установить AdGuard Home сейчас?" "y"
-    if [[ "$install_adg" == true ]]; then
-      install_adguard_home || warn "Установка не удалась — продолжаем без AdGuard."
-      detect_env
-    fi
-  fi   # установлен — молча (статус виден в шапке и п.6/п.18)
 
   # чистая установка → авто: инбаунды + настройка + UFW + итоговая сводка
   if [[ "$auto_full" == true ]]; then
