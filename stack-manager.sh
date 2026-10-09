@@ -437,6 +437,8 @@ detect_env() {
   for db in /etc/x-ui/x-ui.db /usr/local/x-ui/x-ui.db /opt/x-ui/x-ui.db; do
     [[ -f "$db" ]] && { XUI_DB="$db"; break; }
   done
+  # какой панели принадлежит найденная БД: lucx | 3x-ui | none
+  PANEL_FLAVOR=$(detect_panel_flavor)
 
   ADG_PRESENT=false; ADG_SERVICE=""; ADG_CONFIG=""
   local svc cfg
@@ -2004,19 +2006,34 @@ create_inbounds_menu() {
   echo
   echo -e "${B}Выберите инбаунды для создания:${N}"
   echo
-  local i=1 entry
+  # Гейт по типу панели: в оригинальном 3x-ui работают только обычные VLESS-инбаунды.
+  # QWDTT/CSQTT/tproxy/naive/anytls/trusttunnel/hysteria — рецепты LucX UI:
+  # панель LucX сама поднимает sidecar'ы и понимает свои форматы settings.
+  local flavor="${PANEL_FLAVOR:-}"
+  [[ -z "$flavor" ]] && flavor=$(detect_panel_flavor)
+  if [[ "$flavor" != "lucx" ]]; then
+    warn "Панель: ${flavor:-неизвестно} — показываю только то, что она умеет запускать."
+    [[ "$flavor" == "3x-ui" ]] && warn "QWDTT/CSQTT/tproxy/naive/anytls/trusttunnel/hysteria — это LucX: п.13 → «Обновить 3x-ui → LucX UI»."
+  fi
+  local i=1 entry name proto
   local -a NAMES=()
   for entry in "${RECOMMENDED_INBOUNDS[@]}"; do
-    local name="${entry%%|*}"
+    IFS='|' read -r _ proto _ <<<"$entry"
+    [[ "$flavor" != "lucx" && "$proto" != "vless" ]] && continue
+    name="${entry%%|*}"
     printf "  %2d) %s\n" "$i" "$name"
     NAMES+=("$entry")
     i=$((i+1))
   done
+  if [[ ${#NAMES[@]} -eq 0 ]]; then
+    err "Для панели ${flavor:-неизвестно} создавать из скрипта нечего — нужны протоколы LucX UI (п.13 → обновление)."
+    return 1
+  fi
   echo
   echo "  0) Отмена"
   echo
-  echo "Пример: 1 2 5    (VLESS TCP Reality, VLESS XHTTP Reality, QWDTT)"
-  echo "naive/anytls/trusttunnel/mtproto — создавайте в UI панели (sidecar-протоколы LucX)."
+  echo "Пример: 1 2    (VLESS TCP Reality, VLESS XHTTP Reality)"
+  [[ "$flavor" == "lucx" ]] && echo "naive/anytls/trusttunnel/mtproto — создавайте в UI панели (sidecar-протоколы LucX)."
   echo
 
   local choices=""
@@ -6260,7 +6277,7 @@ EOF
   ensure_stream_include
   if ! nginx -t 2>/dev/null; then
     err "nginx -t упал:"; nginx -t 2>&1 | tail -5 | sed 's/^/  /'
-    restore_running_services; return 1
+    return 1
   fi
 
   if [[ "$panel_decoy" == "adguard" && -n "$ADG_SERVICE" ]]; then
@@ -9475,19 +9492,82 @@ PYLIVE
   return 0
 }
 
-# Единые пункты «установить/удалить»: смотрим текущее состояние и предлагаем
-# обратное действие — вместо двух отдельных пунктов меню.
-panel_manage() {
-  line; echo -e "${B}   ПАНЕЛЬ LUCX UI — УСТАНОВКА / УДАЛЕНИЕ${N}"; line
-  if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
-    log "Панель уже установлена (x-ui.db: $XUI_DB)"
-    local go=""
-    askyn go "Удалить панель LucX UI со всеми данными?" "n"
-    [[ "$go" == true ]] && uninstall_panel_lucx
-    return 0
+# Обновление панели до LucX UI с сохранением данных (инбаунды/клиенты/настройки
+# живут в x-ui.db — установщик LucX её подхватывает). Бэкап БД делаем до запуска.
+panel_upgrade_lucx() {
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден — обновлять нечего"; return 1; }
+  local bak="${XUI_DB}.bak-$(date +%F-%H%M%S)"
+  if ! sqlite3 "$XUI_DB" ".backup '$bak'" 2>/dev/null && ! cp -a "$XUI_DB" "$bak"; then
+    err "Не удалось забэкапить $XUI_DB — отмена"
+    return 1
   fi
-  log "Панель не найдена — установка."
-  install_lucx_panel
+  chmod 600 "$bak" 2>/dev/null || true
+  log "Бэкап БД: $bak"
+  local tmp_sh
+  tmp_sh=$(mktemp /tmp/lucx-upgrade.XXXXXX.sh) || { err "mktemp failed"; return 1; }
+  log "Скачивание установщика LucX UI..."
+  if ! curl -fSL --retry 3 "$LUCX_INSTALL_URL" -o "$tmp_sh" || [[ ! -s "$tmp_sh" ]]; then
+    err "Не удалось скачать установщик ($LUCX_INSTALL_URL)"
+    rm -f "$tmp_sh"
+    return 1
+  fi
+  warn "Установщик задаст вопросы по панели — существующие значения оставляй как есть (Enter), БД сохранится."
+  if ! bash "$tmp_sh"; then
+    err "Установщик завершился с ошибкой — проверь состояние панели. Бэкап БД: $bak"
+    rm -f "$tmp_sh"
+    return 1
+  fi
+  rm -f "$tmp_sh"
+  detect_env
+  local nf
+  nf=$(detect_panel_flavor)
+  if [[ "$nf" == "lucx" ]]; then
+    log "Готово: панель обновлена до LucX UI (инбаунды/клиенты на месте)."
+    warn "Дальше: прогони п.1 заново — он перестроит SNI/hosts/серты под LucX."
+  else
+    warn "После установки панель определяется как «$nf» — если это не то, что ожидал, разбирайся вручную (бэкап: $bak)."
+  fi
+  return 0
+}
+
+# Единый пункт п.13: смотрим какая панель стоит и предлагаем действия.
+panel_manage() {
+  line; echo -e "${B}   ПАНЕЛЬ — УСТАНОВКА / ОБНОВЛЕНИЕ / УДАЛЕНИЕ${N}"; line
+  local flavor
+  flavor=$(detect_panel_flavor)
+  case "$flavor" in
+    lucx)
+      log "Установлена: LucX UI (x-ui.db: ${XUI_DB:-?})"
+      ;;
+    3x-ui)
+      log "Установлена: оригинальный 3x-ui (x-ui.db: ${XUI_DB:-?})"
+      warn "Протоколы LucX (qwdtt/csqtt/tproxy/naive/anytls/trusttunnel/hysteria) в ней работать не будут."
+      ;;
+    *)
+      log "Панель не найдена — установка LucX UI."
+      install_lucx_panel
+      return 0
+      ;;
+  esac
+  echo
+  if [[ "$flavor" == "3x-ui" ]]; then
+    echo "  1) Обновить 3x-ui → LucX UI (бэкап БД + установщик, инбаунды сохранятся)"
+  else
+    echo "  1) Переустановить/обновить LucX UI (бэкап БД + установщик)"
+  fi
+  echo "  2) Удалить панель со всеми данными"
+  echo "  0) Назад"
+  local act=""
+  ask act "Выбор" "0" '^[0-2]$'
+  case "$act" in
+    1) panel_upgrade_lucx; pause ;;
+    2)
+      local go=""
+      askyn go "ТОЧНО удалить панель со всеми данными?" "n"
+      [[ "$go" == true ]] && { uninstall_panel_lucx; pause; }
+      ;;
+  esac
+  return 0
 }
 
 adguard_manage() {
@@ -10464,7 +10544,7 @@ main_menu() {
     echo -e "  ${B}10)${N} 🔒 Управление сертификатами"
     echo -e "  ${B}11)${N} 🚧 Файрвол: только нужные порты"
     echo -e "  ${B}12)${N} 🧯 Восстановить состояние фаервола"
-    echo -e "  ${B}13)${N} 📥 Панель LucX UI: установить / удалить"
+    echo -e "  ${B}13)${N} 📥 Панель 3x-ui/LucX: определить, обновить до LucX, установить/удалить"
     echo -e "  ${B}14)${N} 🛰️  AdGuard Home: установить / удалить"
     echo -e "  ${B}15)${N} 🧹 Очистка SNI: записи без инбаундов"
     echo -e "  ${B}16)${N} 🔑 Сменить пароли admin (панель / AdGuard)"
