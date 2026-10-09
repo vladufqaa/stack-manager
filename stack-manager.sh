@@ -45,6 +45,8 @@ WILDCARD_DOMAIN=""
 WILDCARD_STATE="/root/stack-backups/wildcard-domain"
 CF_CREDS="/root/.secrets/cloudflare.ini"
 FROZEN_FILE="/root/stack-frozen.txt"   # заморозка самолечения: cert:<domain> / inbound:<id> / ALL-CERTS
+MULTI_CERT_NAME="stack-multi"                    # имя SAN-линии мультисерта (live/stack-multi)
+MULTI_CERT_FILE="/root/stack-multi-cert-domains.txt"   # список доменов мультисерта (по одному в строке)
 
 # Сохранение email Let's Encrypt (переживает перезапуски скрипта)
 LE_EMAIL_FILE="/root/stack-backups/le-email"
@@ -3395,6 +3397,124 @@ cert_paths() {
   return 0
 }
 
+# --- МУЛЬТИСЕРТ (SAN): один серт на несколько доменов (в т.ч. РАЗНЫХ зон) ---
+# Сосуществует с wildcard: cert_paths/find_covering_cert сами выберут wildcard
+# для его зоны, а для остальных доменов найдут SAN в линии stack-multi.
+# cert_issue при виде домена из списка тоже переиспользует SAN (find_covering_cert).
+multi_cert_list() {
+  [[ -f "$MULTI_CERT_FILE" ]] && grep -vE '^\s*(#|$)' "$MULTI_CERT_FILE" 2>/dev/null || true
+}
+
+multi_cert_rebuild() {
+  frozen "ALL-CERTS" && { warn "мультисерт: серты заморожены (ALL-CERTS) — п.25"; return 1; }
+  le_email_load || true
+  if [[ -z "$EMAIL" ]]; then
+    ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
+    le_email_save "$EMAIL"
+  fi
+  local -a doms=()
+  local d
+  while IFS= read -r d; do
+    d="$(printf '%s' "$d" | tr -d '[:space:]')"
+    [[ -z "$d" ]] && continue
+    frozen "cert:$d" && { warn "мультисерт: «$d» в заморозке — пропущен"; continue; }
+    doms+=("-d" "$d")
+  done < <(multi_cert_list)
+  [[ ${#doms[@]} -gt 0 ]] || { err "список доменов пуст ($MULTI_CERT_FILE)"; return 1; }
+
+  local dir="/etc/letsencrypt/live/$MULTI_CERT_NAME"
+  log "  выпуск SAN-серта «$MULTI_CERT_NAME»: $(multi_cert_list | tr '\n' ' ')"
+  local out="" nginx_was_active=false
+  systemctl is-active --quiet nginx 2>/dev/null && nginx_was_active=true
+  # 80 закрыт UFW — для HTTP-01 открываем временно (как в cert_issue)
+  local ufw_80_temp=false
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    if ! ufw status 2>/dev/null | grep -qE "^80/tcp[[:space:]]+ALLOW"; then
+      ufw allow 80/tcp comment "acme-temp" >/dev/null 2>&1 || true
+      ufw_80_temp=true
+      log "  UFW: 80/tcp временно открыт для ACME"
+    fi
+  fi
+  mkdir -p /var/www/html 2>/dev/null || true
+  if [[ "$nginx_was_active" == true ]]; then
+    out=$(certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos --keep-until-expiring --email "$EMAIL" --cert-name "$MULTI_CERT_NAME" "${doms[@]}" 2>&1 || true)
+    if [[ ! -f "$dir/fullchain.pem" || ! -f "$dir/privkey.pem" ]]; then
+      warn "  webroot не сработал, пробуем standalone (nginx кратко остановим)"
+      systemctl stop nginx 2>/dev/null || true
+      out="$out
+$(certbot certonly --standalone --non-interactive --agree-tos --keep-until-expiring --email "$EMAIL" --cert-name "$MULTI_CERT_NAME" "${doms[@]}" 2>&1 || true)"
+      systemctl start nginx 2>/dev/null || true
+    fi
+  else
+    out=$(certbot certonly --standalone --non-interactive --agree-tos --keep-until-expiring --email "$EMAIL" --cert-name "$MULTI_CERT_NAME" "${doms[@]}" 2>&1 || true)
+  fi
+  if [[ "$ufw_80_temp" == true ]]; then
+    ufw delete allow 80/tcp >/dev/null 2>&1 || true
+    log "  UFW: 80/tcp закрыт обратно"
+  fi
+  if [[ -f "$dir/fullchain.pem" && -f "$dir/privkey.pem" ]]; then
+    log "  OK: SAN-серт «$MULTI_CERT_NAME» покрывает: $(multi_cert_list | tr '\n' ' ')"
+    openssl x509 -noout -enddate -in "$dir/cert.pem" 2>/dev/null | sed 's/^/    /'
+    return 0
+  fi
+  err "  certbot отказал:"
+  echo "$out" | tail -8 | sed 's/^/    /'
+  return 1
+}
+
+multi_cert_menu() {
+  line; echo -e "${B}   МУЛЬТИСЕРТ (SAN) — один серт на несколько доменов${N}"; line
+  echo "  Wildcard покрывает СВОЮ зону сам; SAN нужен для доменов ДРУГИХ зон."
+  echo "  Резолвер сам выбирает серт: точный → wildcard → SAN (stack-multi)."
+  echo
+  echo "  Домены в списке:"
+  if [[ -n "$(multi_cert_list)" ]]; then multi_cert_list | sed 's/^/    • /'; else echo "    (пусто)"; fi
+  echo
+  echo "   1) Показать серт (SAN + срок)"
+  echo "   2) Добавить домен в список"
+  echo "   3) Убрать домен из списка"
+  echo "   4) Пересобрать серт по списку"
+  echo "   5) Удалить серт stack-multi целиком"
+  echo "   0) Назад"
+  local a=""; ask a "Выбор" "0" '^[0-9]+$'
+  local d=""
+  case "$a" in
+    1)
+      local mdir="/etc/letsencrypt/live/$MULTI_CERT_NAME"
+      if [[ -f "$mdir/cert.pem" ]]; then
+        openssl x509 -noout -subject -enddate -ext subjectAltName -in "$mdir/cert.pem" 2>/dev/null | sed 's/^/  /'
+      else warn "серт stack-multi ещё не выпущен — добавь домены и пересобери (п.4)"; fi
+      ;;
+    2)
+      ask d "Домен (напр. vpn.other-zone.ru)" "" '^[a-zA-Z0-9.-]+$'
+      [[ -z "$d" ]] && return 0
+      grep -qxF "$d" "$MULTI_CERT_FILE" 2>/dev/null || printf '%s\n' "$d" >> "$MULTI_CERT_FILE"
+      log "в списке: $d (не забудь пересобрать — п.4)"
+      ;;
+    3)
+      [[ -f "$MULTI_CERT_FILE" ]] || { warn "списка нет"; pause; return 0; }
+      multi_cert_list | nl -ba | sed 's/^/  /'
+      ask d "Домен для удаления" "" '^[a-zA-Z0-9.-]+$'
+      [[ -z "$d" ]] && return 0
+      sed -i "/^${d//./\\.}$/d" "$MULTI_CERT_FILE"
+      log "убран: $d (пересобери — п.4)"
+      ;;
+    4) multi_cert_rebuild ;;
+    5)
+      if [[ -f "/etc/letsencrypt/live/$MULTI_CERT_NAME/cert.pem" ]]; then
+        local dl=""; askyn dl "Удалить серт stack-multi и список доменов?" "n"
+        if [[ "$dl" == true ]]; then
+          certbot delete --cert-name "$MULTI_CERT_NAME" -n >/dev/null 2>&1
+          rm -f "$MULTI_CERT_FILE"
+          log "мультисерт удалён"
+        fi
+      else warn "серта нет"; fi
+      ;;
+    *) return 0 ;;
+  esac
+  pause
+}
+
 # Выпуск wildcard: base + *.base через Cloudflare DNS-01
 # base можно передать аргументом; если wildcard уже выпущен и свеж — переустановки не будет
 cert_wildcard_issue() {
@@ -5989,6 +6109,7 @@ certs_menu() {
   echo "  6) Показать все серты и email (обзор)"
   echo "  7) Сбросить email Let's Encrypt (спросить заново)"
   echo "  8) Переезд домена панели (серт/БД/hosts/nginx)"
+  echo "  9) Мультисерт (SAN): домены разных зон одним сертом"
   echo "  0) Назад"
   line
   local action=""
@@ -6003,6 +6124,7 @@ certs_menu() {
     6) certs_view ;;
     7) le_email_forget; log "Email сброшен — при следующем выпуске спросит заново"; pause ;;
     8) panel_domain_migrate ;;
+    9) multi_cert_menu ;;
   esac
   pause
 }
