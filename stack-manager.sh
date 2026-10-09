@@ -2675,6 +2675,16 @@ decoy_full_init() {
   decoy_templates_init || true
   decoy_login_templates_init || true
   decoy_fail2ban_init || true
+  # тихий старт/decoy-init только что рестартовали юниты — дать им дожить
+  # до active, иначе первый рендер шапки покажет 🔴 для живых сервисов
+  local _u _t
+  for _u in nginx x-ui fail2ban; do
+    systemctl is-active --quiet "$_u" 2>/dev/null && continue
+    for _t in 1 2 3 4 5 6 7 8 9 10; do
+      sleep 0.5
+      systemctl is-active --quiet "$_u" 2>/dev/null && break
+    done
+  done
 }
 
 # =====================================================================
@@ -3801,6 +3811,12 @@ cert_domains_save() {
 cert_domains_add() {
   local d="$1" force="${2:-0}"
   [[ -z "$d" ]] && return 0
+  # wildcard в SAN-линии не нужен: HTTP-01 его не выпустит, а покрытие
+  # *.база уже даёт серт линии/файл доменов — не портим идемпотентность
+  if [[ "$d" == "*."* ]]; then
+    warn "cert_domains_add: wildcard «$d» в SAN-список не добавляется (не выпускается по HTTP-01)"
+    return 0
+  fi
   cert_mode_load >/dev/null 2>&1 || true
   # ── В режиме B добавляем в правильную линию (автоопределение по базе) ──
   if [[ "${CERT_MODE:-A}" == "B" ]]; then
@@ -3949,6 +3965,12 @@ cert_issue_line() {
       left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
       if (( left > 30 )); then
         log "Линия «$line» актуальна (${#CERT_LINE_DOMAINS[@]} дм., ~$left дн)"
+        return 0
+      fi
+    elif cert_san_set_covers "$ldir/fullchain.pem" "${CERT_LINE_DOMAINS[@]}"; then
+      left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+      if (( left > 30 )); then
+        log "Линия «$line» покрыта текущим сертом (wildcard/SAN), ~$left дн — перевыпуск не нужен"
         return 0
       fi
     fi
@@ -4113,6 +4135,26 @@ cert_domains_sync_from_sni() {
 #   • Режим B — обход всех линий (главная + доп. all.<base>).
 #   • Если SAN совпадает и срок > 30 дн — перевыпуск не запускается.
 #   • Выводит состояние каждой линии.
+# Покрывает ли SAN серта ($1) все перечисленные домены — точно или wildcard *.база.
+# Защита от перезатирания wildcard-серта SAN-перевыпуском (п.10.9/самолечение).
+cert_san_set_covers() {
+  local certf="$1"; shift
+  local san dom
+  [[ -f "$certf" ]] || return 1
+  san=$(openssl x509 -noout -ext subjectAltName -in "$certf" 2>/dev/null \
+        | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr -d ' ')
+  [[ -n "$san" ]] || return 1
+  for dom in "$@"; do
+    grep -qx "$dom" <<<"$san" && continue
+    local base="${dom#*.}"
+    if [[ "$dom" == *.* && "$dom" != "$base" ]] && grep -qx "*.$base" <<<"$san"; then
+      continue
+    fi
+    return 1
+  done
+  return 0
+}
+
 cert_batch_flush() {
   cert_mode_load >/dev/null 2>&1 || true
   # Перед перевыпуском — синхронизировать список с SNI-картой (могут быть
@@ -4142,6 +4184,14 @@ cert_batch_flush() {
         fi
         warn "Линия «$CERT_MULTI_NAME»: срок ~$left дн (<=30) — обновляю"
       else
+        if cert_san_set_covers "$ldir/fullchain.pem" "${CERT_DOMAINS[@]}"; then
+          left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+          if (( left > 30 )); then
+            log "Линия «$CERT_MULTI_NAME» полностью покрыта текущим сертом (wildcard/SAN), ~$left дн — перевыпуск не нужен"
+            echo "      SAN серта: ${cur_san%,}"
+            return 0
+          fi
+        fi
         warn "Линия «$CERT_MULTI_NAME»: SAN изменился"
         echo "      было:  ${cur_san%,}"
         echo "      стало: ${want_san%,}"
@@ -10400,7 +10450,7 @@ print(f"{B}{center('STACK MANAGER', W)}{N}")
 print(f"{B}{center('SNI-роутер · LucX/x-ui · AdGuard · decoy', W)}{N}")
 print(f"{B}╚{'═'*W}╝{N}")
 print(f"{B}┌{'─'*W}┐{N}")
-print(line(f"{dot(ngx)} nginx  {dot(xui)} x-ui  {adg} AdGuard  {dot(f2b)} f2b", W))
+print(line(f"{ngx} nginx  {xui} x-ui  {adg} AdGuard  {f2b} f2b", W))
 print(line(f"👥 инбаунды: {G}{nb}{N}   🔥 decoy-хиты: {Y}{att}{N}   ⛔ баны: {R}{bans}{N}", W))
 print(line(f"🔒 серты: мин. {cs}   💾 диск: {duse}%   📁 {db}", W))
 ufw = f"🚧 UFW {G}active{N}" if ufw_ok == "1" else f"🚧 UFW {R}down{N}"
