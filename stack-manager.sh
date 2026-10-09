@@ -309,6 +309,20 @@ ensure_deps() {
     apt-get update -y >/dev/null 2>&1 || true
     apt-get install -y "${missing[@]}" >/dev/null 2>&1 || true
   fi
+  # nginx числится установленным, но /etc/nginx/nginx.conf отсутствует
+  # (после демонтажа с rm -rf /etc/nginx apt не возвращает conffiles —
+  # считает их «удалеными админом»). Переустановка пакетов их возвращает.
+  if dpkg -s nginx >/dev/null 2>&1 && [[ ! -f /etc/nginx/nginx.conf ]]; then
+    log "nginx установлен, но конфигов /etc/nginx нет — переустанавливаю пакет (conffiles)"
+    local _ngx_pkgs
+    _ngx_pkgs=$(dpkg -l 2>/dev/null | awk '/^ii/ && $2 ~ /nginx/ {print $2}' | tr '\n' ' ')
+    [[ -z "$_ngx_pkgs" ]] && _ngx_pkgs="nginx nginx-common nginx-full"
+    apt-get install -y --reinstall $_ngx_pkgs >/dev/null 2>&1 || true
+    if [[ ! -f /etc/nginx/nginx.conf ]]; then
+      apt-get install -y --reinstall -o Dpkg::Options::=--force-confmiss nginx >/dev/null 2>&1 || true
+    fi
+    [[ -f /etc/nginx/nginx.conf ]] && log "  /etc/nginx восстановлен" || warn "  /etc/nginx/nginx.conf всё ещё отсутствует — покажи apt-get install --reinstall nginx"
+  fi
 }
 
 get_random_port() { echo $(( ((RANDOM<<15)|RANDOM) % 49152 + 10000 )); }
@@ -3500,6 +3514,20 @@ cert_line_file() {   # <line-name> → путь к файлу SAN этой ли�
   printf '%s%s.domains' "$CERT_LINE_FILE_PREFIX" "$1"
 }
 
+# валидный домен: >=2 метки из [a-z0-9-], без ведущих/хвостовых дефисов.
+# Отсекает мусор из файлов линий («0», обрезки), который раньше доезжал до ACME.
+cert_domain_valid() {
+  local d="$1"
+  [[ "$d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]
+}
+
+# валидное имя линии: домен ИЛИ all.<домен>
+cert_line_name_valid() {
+  local n="$1"
+  [[ "$n" == all.* ]] && n="${n#all.}"
+  cert_domain_valid "$n"
+}
+
 # Загрузка списка линий в массив CERT_LINES
 cert_lines_load() {
   CERT_LINES=()
@@ -3518,6 +3546,10 @@ cert_lines_load() {
   while IFS= read -r l; do
     l="$(printf '%s' "$l" | tr -d '[:space:]')"
     [[ -z "$l" ]] && continue
+    if ! cert_line_name_valid "$l"; then
+      warn "cert-lines: имя линии «$l» не похоже на домен — пропуск (мусор в $CERT_LINES_FILE)"
+      continue
+    fi
     [[ " ${CERT_LINES[*]} " == *" $l "* ]] && continue
     CERT_LINES+=("$l")
   done < "$CERT_LINES_FILE"
@@ -3582,6 +3614,10 @@ cert_line_domains_load() {   # <line-name>
   while IFS= read -r d; do
     d="$(printf '%s' "$d" | tr -d '[:space:]')"
     [[ -z "$d" ]] && continue
+    if ! cert_domain_valid "$d"; then
+      warn "cert-line «$n»: домен «$d» не похож на домен — пропуск (мусор в $f)"
+      continue
+    fi
     [[ " ${CERT_LINE_DOMAINS[*]} " == *" $d "* ]] && continue
     CERT_LINE_DOMAINS+=("$d")
   done < "$f"
