@@ -7396,6 +7396,15 @@ take_pre_install_snapshot() {
   return 0
 }
 
+# Файл отсутствует в списке содержимого архива? (0 = отсутствует)
+absent_in_list() {  # $1 = список путей, $2 = путь
+  local e
+  while IFS= read -r e; do
+    [[ "$e" == "$2" || "$e" == "./$2" || "$e" == "${2#/}" ]] && return 1
+  done <<<"$1"
+  return 0
+}
+
 restore_pre_install_snapshot() {
   line; echo -e "${B}   ВОССТАНОВЛЕНИЕ ИЗ PRE-INSTALL СНИМКА${N}"; line
   local snaps
@@ -7496,8 +7505,36 @@ restore_pre_install_snapshot() {
   [[ -f "$chosen/stack-decoy" ]] && cp -a "$chosen/stack-decoy" /etc/logrotate.d/ 2>/dev/null || true
 
   if [[ -f "$chosen/AdGuardHome.yaml" && -n "$ADG_CONFIG" ]]; then
-    cp -a "$chosen/AdGuardHome.yaml" "$ADG_CONFIG" 2>/dev/null && log "  AdGuardHome.yaml восстановлен"
+    cp -a "$chosen/AdGuardHome.yaml" "$ADG_CONFIG" && log "  AdGuardHome.yaml восстановлен"
   fi
+
+  # ── ПОЛНЫЙ откат: чего нет в снимке — того до стека не существовало. ──
+  # Убираем артефакты стека, иначе остаётся полу-настроенный «зомби»-стек:
+  # п.1 пишет «уже всё настроено», п.10 видит чужие SAN-файлы и т.д.
+  if [[ ! -f "$chosen/x-ui.db" ]]; then
+    rm -f "$XUI_DB" /etc/x-ui/x-ui.db /usr/local/x-ui/x-ui.db /opt/x-ui/x-ui.db 2>/dev/null || true
+    rm -f /root/panel-credentials.txt 2>/dev/null || true
+    log "  x-ui.db убран (в снимке его не было) — панель поставит п.1"
+  fi
+  if [[ -d "$chosen/nginx" && ! -f "$chosen/nginx/streams-available/sni-router.conf" ]]; then
+    rm -f /etc/nginx/streams-available/sni-router.conf /etc/nginx/streams-enabled/sni-router.conf 2>/dev/null || true
+    log "  sni-router.conf убран (в снимке его не было)"
+  fi
+  [[ -f "$chosen/nginx/sites-available/stack.conf" ]] || rm -f "$STACK_CONF" 2>/dev/null || true
+  if [[ ! -f "$chosen/systemd/stack-heal.timer" ]]; then
+    systemctl disable --now stack-heal.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/stack-heal.timer /etc/systemd/system/stack-heal.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    log "  таймер самолечения убран (в снимке его не было)"
+  fi
+  if [[ -d "$chosen/letsencrypt" && ! -d "$chosen/letsencrypt/live" ]]; then
+    rm -rf /etc/letsencrypt/live /etc/letsencrypt/archive 2>/dev/null || true
+    log "  серты убраны (в снимке их не было) — п.1 выпустит заново"
+  fi
+  # состояние подсистем стека в снимок не входит — после полного отката ему не место
+  rm -f /etc/letsencrypt/stack-domains.txt /root/stack-backups/cert-lines.txt \
+        /root/stack-backups/cert-mode /root/stack-backups/wildcard-domain \
+        /root/stack-backups/cert-line-*.domains /root/stack-frozen.txt 2>/dev/null || true
 
   log "Запуск сервисов…"
   systemctl start nginx 2>/dev/null || true
@@ -7552,6 +7589,23 @@ restore_config() {
   systemctl stop x-ui  2>/dev/null || true
   [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && systemctl stop "$ADG_SERVICE" 2>/dev/null || true
   tar xzf "$file" -C / 2>/dev/null && log "Файлы восстановлены"
+  # Полный откат: убираем артефакты стека, которых в бэкапе нет — иначе
+  # остаётся полу-настроенный стек и п.1 решает, что «уже всё настроено».
+  local tlist _a
+  tlist=$(tar tzf "$file" 2>/dev/null) || tlist=""
+  for _a in "$STACK_CONF" \
+            /etc/nginx/streams-available/sni-router.conf \
+            /etc/nginx/streams-enabled/sni-router.conf \
+            /etc/systemd/system/stack-heal.timer \
+            /etc/systemd/system/stack-heal.service \
+            /etc/letsencrypt/stack-domains.txt \
+            /root/stack-frozen.txt \
+            /etc/x-ui/x-ui.db /usr/local/x-ui/x-ui.db /opt/x-ui/x-ui.db; do
+    if [[ -e "$_a" ]] && absent_in_list "$tlist" "$_a"; then
+      rm -f "$_a" 2>/dev/null && log "  убрано (в бэкапе отсутствует): $_a"
+    fi
+  done
+  [[ -e /etc/systemd/system/stack-heal.timer ]] || { systemctl disable --now stack-heal.timer 2>/dev/null || true; systemctl daemon-reload 2>/dev/null || true; }
   nginx -t 2>/dev/null && systemctl start nginx && log "Nginx запущен"
   systemctl start x-ui 2>/dev/null || true
   [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && systemctl start "$ADG_SERVICE" 2>/dev/null || true
