@@ -7067,9 +7067,102 @@ sni_cleanup_stale() {
 # =====================================================================
 # СМЕНА DECOY
 # =====================================================================
-change_decoy() {
-  line; echo -e "${B}   СМЕНА DECOY${N}"; line
+# ── Раздать decoy всем SNI-инбаундам (кроме TG WEB-PROXY) ───────────────
+#   Свой Reality   → nginx-декой (маркер stack.conf) + dest=127.0.0.1:<порт>
+#   VLESS+TLS (tcp)→ fallback → 127.0.0.1:80 (браузер видит заглушку)
+#   TG WEB-PROXY   → пропуск: сам проксирует живую цель
+#   Чужой Reality  → пропуск: спрятан за SNI цели, декой не нужен
+decoy_ensure_all() {
+  line; echo -e "${B}   DECOY: РАЗДАТЬ ВСЕМ SNI-ИНБАУНДАМ${N}"; line
   stack_ensure
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
+  local used_ports
+  used_ports=$(grep -oE 'port=[0-9]+' "$STACK_CONF" 2>/dev/null | cut -d= -f2 | sort -u)
+  local tls_cur=8443 _free=0
+  while (( _free < 1 )); do
+    if grep -qx "$tls_cur" <<<"$used_ports" || port_in_use "$tls_cur"; then tls_cur=$((tls_cur+1)); else _free=1; fi
+  done
+  local id dom be proto dest dport line_ok=0
+  local -a done_ids=()
+  while IFS='|' read -r dom be; do
+    [[ "$be" =~ ^inb_([0-9]+)_backend$ ]] || continue
+    id="${BASH_REMATCH[1]}"
+    [[ " ${done_ids[*]} " == *" $id "* ]] && continue
+    done_ids+=("$id")
+    proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
+    [[ -z "$proto" ]] && continue
+    if [[ "$proto" == "tproxy" ]]; then
+      echo "  #$id $dom — TG WEB-PROXY: пропуск (живая цель, декой не нужен)"
+      continue
+    fi
+    local st
+    st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    dest=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+      "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),json_extract(stream_settings,'\$.realitySettings.target'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    dest="${dest%%:*}"
+    if [[ -n "$dest" && "$dest" != "127.0.0.1" ]]; then
+      echo "  #$id $dom — чужой Reality: пропуск (спрятан за SNI цели)"
+      continue
+    fi
+    if [[ "$proto" == "vless" ]] && grep -qi '"security": *"reality"' <<<"$st"; then
+      local meta="" cp_line c="" k=""
+      meta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
+      if [[ -n "$meta" ]]; then
+        dport="${meta%% *}"
+      else
+        cp_line=$(cert_paths "$dom") || true
+        if [[ -z "$cp_line" ]]; then
+          warn "  #$id $dom — серта нет, декой отложен (п.10 → пересборка, затем повторить)"
+          continue
+        fi
+        c="${cp_line%% *}"; k="${cp_line##* }"
+        dport="$tls_cur"; tls_cur=$((tls_cur+1))
+        mk_decoy "$dport" "$dom" "$c" "$k" "/var/www/decoy-$id" "default"
+      fi
+      db_protect_suspend reality_set_dest "$id" "$dport" "$dom"
+      log "  #$id $dom — декой на 127.0.0.1:$dport, Reality dest выставлен"
+      line_ok=1
+      continue
+    fi
+    if [[ "$proto" == "vless" ]] && grep -qi '"security": *"tls"' <<<"$st"; then
+      local fb
+      fb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+      if [[ -z "$fb" || "$fb" == "[]" || "$fb" == "null" ]]; then
+        db_protect_suspend sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":\"127.0.0.1:80\"}]') WHERE id=$id;"
+        log "  #$id $dom — vless/tls: fallback → 127.0.0.1:80 (заглушка браузеру)"
+        line_ok=1
+      else
+        echo "  #$id $dom — fallback уже настроен"
+      fi
+      continue
+    fi
+    echo "  #$id $dom ($proto) — декой не применим (протокол/transport отвечает сам)"
+  done < <(awk '
+    /^map / { inmap=1; next }
+    inmap && /^}/ { inmap=0 }
+    inmap && /^[[:space:]]/ && NF >= 2 {
+      dom = $1; sub(/;$/, "", dom); be = $2; sub(/;$/, "", be)
+      if (dom != "" && dom != "default" && be ~ /_backend$/ && be !~ /^(panel|agh)_backend$/) print dom "|" be
+    }' "$SNI_CONF" 2>/dev/null)
+  if (( line_ok )); then
+    nginx_reload || true
+  fi
+  log "Готово: декой гарантирован для всех применимых SNI-инбаундов (TG WEB-PROXY исключён)."
+  pause
+}
+
+change_decoy() {
+  line; echo -e "${B}   DECOY ДЛЯ SNI-ДОМЕНОВ${N}"; line
+  stack_ensure
+  echo "  1) Раздать decoy всем SNI-инбаундам (кроме TG WEB-PROXY)"
+  echo "  2) Сменить decoy конкретного домена"
+  echo "  0) Назад"
+  local m=""
+  ask m "Выбор" "2" '^[0-2]$'
+  case "$m" in
+    1) decoy_ensure_all; return 0 ;;
+    0) return 0 ;;
+  esac
   local mline mport mdom
   local -a DOM_LIST=()
   local panel_conf="$STACK_CONF"
