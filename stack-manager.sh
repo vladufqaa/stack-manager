@@ -44,6 +44,7 @@ ACTION_LOG="/root/stack-actions.log"
 WILDCARD_DOMAIN=""
 WILDCARD_STATE="/root/stack-backups/wildcard-domain"
 CF_CREDS="/root/.secrets/cloudflare.ini"
+FROZEN_FILE="/root/stack-frozen.txt"   # заморозка самолечения: cert:<domain> / inbound:<id> / ALL-CERTS
 
 # Сохранение email Let's Encrypt (переживает перезапуски скрипта)
 LE_EMAIL_FILE="/root/stack-backups/le-email"
@@ -493,6 +494,14 @@ udp_inbound_ports() {
     [[ -z "$_pt" ]] && continue
     is_udp_proto "$_pr" && echo "$_pt"
   done | sort -un
+}
+
+# Заморозка: строка вида «cert:<domain>», «inbound:<id>» или «ALL-CERTS»
+# в FROZEN_FILE запрещает АВТОМАТИКЕ (heal-таймер, авто-выпуск сертов)
+# трогать объект. Ручные действия через меню не блокируются.
+frozen() {
+  [[ -s "$FROZEN_FILE" ]] || return 1
+  grep -qxF -- "$1" "$FROZEN_FILE" 2>/dev/null
 }
 
 proto_remark() {
@@ -2699,6 +2708,11 @@ import sqlite3, json, sys, subprocess, re
 db = sys.argv[1]
 targets = set(a.lower() for a in sys.argv[2:])
 SKIP = {"qwdtt","csqdtt","csqtt","wireguard","amnezia","amneziawg","awg","mtproto","tun"}
+FROZEN_INB = set()
+try:
+    FROZEN_INB = {l.strip().split(":",1)[1] for l in open("/root/stack-frozen.txt") if l.strip().startswith("inbound:")}
+except Exception:
+    pass
 def listening(port):
     try:
         out = subprocess.run(["ss","-tln"],capture_output=True,text=True,timeout=5).stdout
@@ -2713,6 +2727,7 @@ except Exception:
 for iid, proto, s1, s2 in rows:
     p = (proto or "").lower()
     if p in SKIP: continue
+    if f"inbound:{iid}" in FROZEN_INB: continue
     try: se = json.loads(s1 or "{}")
     except Exception: se = {}
     try: st = json.loads(s2 or "{}")
@@ -2759,6 +2774,7 @@ sync_inbound_certs() {
   while IFS=$'\x1f' read -r id proto dom stream; do
     [[ -z "$id" || -z "$dom" || "$dom" == "null" ]] && continue
     dom="$(printf '%s' "$dom" | tr -d '[:space:]')"   # хвост-пробел/CR ломает пути live/<домен>
+    frozen "inbound:$id" && continue   # заморожено (п.25) — самолечение не трогает
     # qwdtt/csqtt/wireguard/т.п. — серты и decoy не нужны никогда
     case "$proto" in
       qwdtt|csqdtt|csqtt|wireguard|amnezia|amneziawg|awg|mtproto|tun) continue ;;
@@ -2984,8 +3000,15 @@ except Exception:
     sys.exit(1)   # БД недоступна — не считаем поломкой
 
 SKIP = {"qwdtt", "csqdtt", "csqtt", "wireguard", "amnezia", "amneziawg", "awg", "mtproto", "tun"}
+FROZEN_INB = set()
+try:
+    FROZEN_INB = {l.strip().split(":",1)[1] for l in open("/root/stack-frozen.txt") if l.strip().startswith("inbound:")}
+except Exception:
+    pass
 for iid, proto, setts_s, stream_s in rows:
     if proto in SKIP:
+        continue
+    if f"inbound:{iid}" in FROZEN_INB:
         continue
     try:    st = json.loads(stream_s or "{}")
     except Exception: st = {}
@@ -3097,6 +3120,8 @@ cert_issue() {
   # невидимый хвост (пробел/CR из БД или ans-файла) ломает пути live/<домен> —
   # certbot нормализует имя, скрипт ищет файлы по «грязному» пути и не находит
   d="$(printf '%s' "$d" | tr -d '[:space:]')"
+  frozen "ALL-CERTS" && { warn "cert_issue: сертификаты заморожены (ALL-CERTS) — «$d» пропущен"; return 1; }
+  frozen "cert:$d" && { warn "cert_issue: «$d» в заморозке — пропуск"; return 1; }
   # ЖЁСТКИЙ ЗАПРЕТ: цели чужого reality — НЕ наши домены. Let's Encrypt серт
   # на них не выдаст (HTTP-01/DNS-01 недоступны), а спрашивать пользователя
   # «какой сертификат для www.samsung.com» — баг, какими бы путями домен
@@ -7825,6 +7850,7 @@ run_menu_action() {
     22) stealth_audit ;;
     23) rollback_menu ;;
     24) preinstall_menu ;;
+    25) freeze_menu ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -7874,6 +7900,70 @@ print(line(f"{ufw}   🩺 самодиагностика — п.18", W))
 print(f"{B}└{'─'*W}┘{N}")
 print(f"{D}  └─ ◆ stack-manager · правка: {mtime}{N}")
 PYHDR
+}
+
+# =====================================================================
+# П.25 ЗАМОРОЗКА САМОЛЕЧЕНИЯ
+#   Файл /root/stack-frozen.txt: cert:<domain> / inbound:<id> / ALL-CERTS.
+#   Heal-таймер и авто-выпуск сертов пропускают замороженное молча.
+#   Ручные действия через меню НЕ блокируются.
+# =====================================================================
+freeze_menu() {
+  line; echo -e "${B}   ЗАМОРОЗКА САМОЛЕЧЕНИЯ${N}"; line
+  echo "  Автопочинка (stack-heal, 2 мин) и авто-выпуск сертов НЕ трогают то,"
+  echo "  что заморожено здесь. Ручные действия через меню работают как раньше."
+  echo
+  if [[ -s "$FROZEN_FILE" ]]; then
+    echo -e "  ${B}Заморожено:${N}"
+    sed 's/^/    • /' "$FROZEN_FILE"
+  else
+    echo "  Замороженного нет — самолечение работает по всему стеку."
+  fi
+  echo
+  echo "   1) Заморозить инбаунд (не трогать его серты/decoy/hosts)"
+  echo "   2) Заморозить серт домена (не выпускать и не перевыпускать)"
+  echo "   3) ALL-CERTS: заморозить/разморозить ВСЕ сертификаты"
+  echo "   4) Разморозить строку"
+  echo "   0) Назад"
+  line
+  local a=""; ask a "Выбор" "0" '^[0-9]+$'
+  case "$a" in
+    1)
+      [[ -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
+      sqlite3 -header -column "$XUI_DB" "SELECT id, protocol, port, remark FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null | sed 's/^/    /'
+      local id=""; ask id "ID инбаунда" "" '^[0-9]+$'
+      [[ -z "$id" ]] && return 0
+      if frozen "inbound:$id"; then warn "inbound:$id уже заморожен"; else
+        printf 'inbound:%s\n' "$id" >> "$FROZEN_FILE" 2>/dev/null || { err "не могу писать $FROZEN_FILE"; pause; return 1; }
+        log "Заморожено: inbound:$id"
+      fi
+      ;;
+    2)
+      local d=""; ask d "Домен серта" "" '^[a-zA-Z0-9.-]+$'
+      [[ -z "$d" ]] && return 0
+      if frozen "cert:$d"; then warn "cert:$d уже заморожен"; else
+        printf 'cert:%s\n' "$d" >> "$FROZEN_FILE" 2>/dev/null || { err "не могу писать $FROZEN_FILE"; pause; return 1; }
+        log "Заморожено: cert:$d (авто-выпуск пропускает)"
+      fi
+      ;;
+    3)
+      touch "$FROZEN_FILE" 2>/dev/null || { err "не могу писать $FROZEN_FILE"; pause; return 1; }
+      if grep -qxF 'ALL-CERTS' "$FROZEN_FILE"; then
+        sed -i '/^ALL-CERTS$/d' "$FROZEN_FILE"; log "ALL-CERTS разморожен"
+      else
+        printf 'ALL-CERTS\n' >> "$FROZEN_FILE"; log "ALL-CERTS заморожен — авто-выпуск сертов выключен"
+      fi
+      ;;
+    4)
+      [[ -s "$FROZEN_FILE" ]] || { warn "Замороженного нет"; pause; return 0; }
+      local ln=""; nl -ba "$FROZEN_FILE" | sed 's/^/    /'
+      ask ln "Номер строки для разморозки" "" '^[0-9]+$'
+      [[ -z "$ln" ]] && return 0
+      sed -i "${ln}d" "$FROZEN_FILE" 2>/dev/null && log "Разморожено (строка $ln)"
+      ;;
+    *) return 0 ;;
+  esac
+  pause
 }
 
 main_menu() {
@@ -7928,6 +8018,7 @@ main_menu() {
     echo -e "  ${B}22)${N} 🕶 Стелс-аудит (глазами Shodan/Censys)"
     echo -e "  ${B}23)${N} 💣 Откат и демонтаж стека"
     echo -e "  ${B}24)${N} 📸 Pre-install снимок (состояние до скрипта)"
+    echo -e "  ${B}25)${N} ❄️  Заморозка самолечения (серты/инбаунды от автоматики)"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
