@@ -506,6 +506,113 @@ frozen() {
   grep -qxF -- "$1" "$FROZEN_FILE" 2>/dev/null
 }
 
+# =====================================================================
+# ЗАЩИТА БД ОТ ПЕРЕЗАПИСИ ПАНЕЛЬЮ (SQL-триггеры, п.25.5)
+#   Панель при правке инбаунда сохраняет свою копию JSON целиком и может
+#   затереть вписанные скриптом пути сертов / reality-dest / hostname.
+#   Триггер AFTER UPDATE возвращает защищённые ключи, если панель их снесла
+#   (первичная запись при пустом OLD проходит свободно). hosts защищается
+#   теневой таблицей hosts_shadow: самолечение возвращает снесённые строки.
+#   Свои правки скрипт делает через db_protect_suspend (триггеры роняются,
+#   тень сохраняется; RETURN-ловушка возвращает всё на место).
+#   SQL валидирован тестами (json_patch-вложение, без null-ключей).
+# =====================================================================
+db_protect_on() {
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
+  python3 - "$XUI_DB" <<'PYPROT' 2>/dev/null || return 0
+import sqlite3, sys
+try:
+    con = sqlite3.connect(sys.argv[1], timeout=10)
+    cur = con.cursor()
+    cur.executescript("""
+CREATE TRIGGER IF NOT EXISTS sm_prot_inb
+AFTER UPDATE ON inbounds
+WHEN
+ ( COALESCE(json_extract(OLD.settings,'$.certFile'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.certFile'),'') != COALESCE(json_extract(OLD.settings,'$.certFile'),'') )
+OR ( COALESCE(json_extract(OLD.settings,'$.keyFile'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.keyFile'),'') != COALESCE(json_extract(OLD.settings,'$.keyFile'),'') )
+OR ( COALESCE(json_extract(OLD.settings,'$.hostname'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.hostname'),'') != COALESCE(json_extract(OLD.settings,'$.hostname'),'') )
+OR ( COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.realitySettings.dest'),'') != COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') )
+OR ( COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.realitySettings.target'),'') != COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') )
+OR ( COALESCE(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.tlsSettings.certificates'),'') != COALESCE(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'),'') )
+BEGIN
+  UPDATE inbounds SET
+    settings =
+      json_patch(json_patch(json_patch(NEW.settings,
+        CASE WHEN COALESCE(json_extract(OLD.settings,'$.certFile'),'') != ''
+             THEN json_object('certFile', json_extract(OLD.settings,'$.certFile')) ELSE '{}' END),
+        CASE WHEN COALESCE(json_extract(OLD.settings,'$.keyFile'),'') != ''
+             THEN json_object('keyFile', json_extract(OLD.settings,'$.keyFile')) ELSE '{}' END),
+        CASE WHEN COALESCE(json_extract(OLD.settings,'$.hostname'),'') != ''
+             THEN json_object('hostname', json_extract(OLD.settings,'$.hostname')) ELSE '{}' END),
+    stream_settings =
+      json_patch(json_patch(NEW.stream_settings,
+        CASE WHEN COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') != ''
+               OR COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') != ''
+             THEN json_object('realitySettings',
+                  json_patch(
+                    CASE WHEN COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') != ''
+                         THEN json_object('dest', json_extract(OLD.stream_settings,'$.realitySettings.dest')) ELSE '{}' END,
+                    CASE WHEN COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') != ''
+                         THEN json_object('target', json_extract(OLD.stream_settings,'$.realitySettings.target')) ELSE '{}' END))
+             ELSE '{}' END),
+        CASE WHEN COALESCE(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'),'') != ''
+             THEN json_object('tlsSettings',
+                  json_object('certificates', json(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'))))
+             ELSE '{}' END)
+  WHERE id = NEW.id;
+END;
+""")
+    if cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts'").fetchone():
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(hosts)")]
+        ins_cols = [c for c in cols if c != "id"]
+        cl = ",".join('"%s"' % c for c in ins_cols)
+        pk = ", PRIMARY KEY(inbound_id,port)" if ("inbound_id" in cols and "port" in cols) else ""
+        cur.execute('CREATE TABLE IF NOT EXISTS hosts_shadow (%s%s)' % (cl, pk))
+        cur.execute('INSERT OR REPLACE INTO hosts_shadow (%s) SELECT %s FROM hosts' % (cl, cl))
+        cur.executescript("""
+CREATE TRIGGER IF NOT EXISTS sm_hosts_ins AFTER INSERT ON hosts BEGIN
+  DELETE FROM hosts_shadow WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
+  INSERT INTO hosts_shadow ({cl}) SELECT {cl} FROM hosts WHERE inbound_id=NEW.inbound_id AND port=NEW.port; END;
+CREATE TRIGGER IF NOT EXISTS sm_hosts_upd AFTER UPDATE ON hosts BEGIN
+  DELETE FROM hosts_shadow WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
+  INSERT INTO hosts_shadow ({cl}) SELECT {cl} FROM hosts WHERE inbound_id=NEW.inbound_id AND port=NEW.port; END;
+CREATE TRIGGER IF NOT EXISTS sm_hosts_clean AFTER DELETE ON hosts
+WHEN NOT EXISTS(SELECT 1 FROM inbounds WHERE id=OLD.inbound_id AND enable=1)
+BEGIN DELETE FROM hosts_shadow WHERE inbound_id=OLD.inbound_id; END;
+""".replace("{cl}", cl))
+    con.commit()
+except Exception:
+    sys.exit(1)
+PYPROT
+}
+
+db_protect_off() {   # мягкое выключение: триггеры роняются, hosts_shadow живёт
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
+  local t
+  for t in sm_prot_inb sm_hosts_ins sm_hosts_upd sm_hosts_clean; do
+    sqlite3 "$XUI_DB" "DROP TRIGGER IF EXISTS $t;" 2>/dev/null || true
+  done
+}
+
+db_protect_remove() {   # полное выключение (п.25): триггеры + теневая таблица
+  db_protect_off
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
+  sqlite3 "$XUI_DB" "DROP TABLE IF EXISTS hosts_shadow;" 2>/dev/null || true
+}
+
+db_protect_state() {
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 1
+  [[ -n "$(sqlite3 "$XUI_DB" "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='sm_prot_inb' LIMIT 1;" 2>/dev/null)" ]]
+}
+
+# Для функций скрипта, осознанно меняющих защищённые ключи: поставить в начало,
+# RETURN-ловушка сама вернёт триггеры на место (вложенные вызовы безопасны).
+db_protect_suspend() {
+  db_protect_state || return 0
+  db_protect_off
+  trap 'db_protect_on >/dev/null 2>&1 || true' RETURN
+}
+
 proto_remark() {
   local proto="$1" stream="${2:-}"
   case "$proto" in
@@ -2562,6 +2669,7 @@ setup_tproxy_web() {
   local tid
   tid=$(sqlite3 "$XUI_DB" "SELECT id FROM inbounds WHERE protocol='tproxy' ORDER BY id LIMIT 1;" 2>/dev/null || true)
   [[ -z "$tid" ]] && return 0   # tproxy не выбран при установке — нечего настраивать
+  db_protect_suspend
   local tdom="${T_PROXY_DOMAIN:-}"
   if [[ -z "$tdom" ]]; then
     # реальный домен — из настроек инбаунда (если не плейсхолдер *.example.com)
@@ -2762,6 +2870,7 @@ sync_inbound_certs() {
   # Тихий проход: если самолечению нечего чинить — панель НЕ останавливаем
   # и ничего не печатаем (раньше каждый запуск бил x-ui и сыпал «cert вписан»).
   [[ -z "$(sync_inbound_needs)" ]] && return 0
+  db_protect_suspend   # осознанные правки сертов/dest — триггеры вернутся на выходе
   local cnt=0 id proto dom stream line cert key
   # x-ui держит inbounds в памяти и при рестарте сбрасывает её поверх БД —
   # поэтому ВСЕ правки inbounds делаем только при ОСТАНОВЛЕННОМ x-ui
@@ -2914,6 +3023,16 @@ for iid, proto, setts_s, stream_s in rows:
     print(f"{iid}\x1f{proto}\x1f{dom}\x1f{json.dumps(st, ensure_ascii=False)}")
 PYROWS
   )
+  # hosts: панель снесла строки — вернём из теневой копии (защита БД, п.25);
+  # x-ui ещё остановлен — окно для правок; тень живёт даже при suspend
+  if [[ -n "$(sqlite3 "$XUI_DB" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts_shadow' LIMIT 1;" 2>/dev/null)" ]]; then
+    local hid haddr hsni
+    while IFS='|' read -r hid haddr hsni; do
+      [[ -z "$hid" || -z "$haddr" ]] && continue
+      hosts_upsert "$hid" "$haddr" "$hsni"
+      log "  #$hid: hosts-строка восстановлена из тени → $haddr:443"
+    done < <(sqlite3 "$XUI_DB" "SELECT s.inbound_id, s.address, COALESCE(s.sni,'') FROM hosts_shadow s LEFT JOIN hosts h ON h.inbound_id=s.inbound_id AND h.port=s.port JOIN inbounds i ON i.id=s.inbound_id AND i.enable=1 AND i.port>0 WHERE s.port=443 AND h.id IS NULL;" 2>/dev/null || true)
+  fi
   if [[ $cnt -gt 0 ]]; then
     systemctl start x-ui 2>/dev/null || true
     sleep 3
@@ -3076,6 +3195,9 @@ EOF
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable --now stack-heal.timer 2>/dev/null || true
   HEAL_TIMER_DONE=1
+  # защита БД ставится вместе с самолечением: панель не затрёт серты/dest/hosts
+  db_protect_on >/dev/null 2>&1 || true
+  db_protect_state && log "Защита БД: триггеры установлены — правки панели не затирают серты/dest/hosts"
   log "Автопочинка правок панели: stack-heal.timer (каждые 2 мин, лог /root/stack-heal.log)"
 }
 
@@ -3930,6 +4052,7 @@ reality_set_dest() {
   local id="$1" decoy_port="$2" dom="${3:-}" stream=""
   stream=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
   grep -qi reality <<<"$stream" || return 0
+  db_protect_suspend   # осознанная смена dest — триггеры вернутся на выходе
   local new_stream
   # новые панели (xray 25+) читают «Цель» из target, старые — из dest: пишем ОБА ключа
   new_stream=$(sqlite3 "$XUI_DB" "SELECT json_set(stream_settings,'$.realitySettings.dest','127.0.0.1:$decoy_port','$.realitySettings.target','127.0.0.1:$decoy_port') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
@@ -4957,6 +5080,7 @@ fix_inbound() {
   line; echo -e "${B}   ПОЧИНИТЬ ИНБАУНД (SNI + CERT + DEST)${N}"; line
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
   [[ ! -f "$SNI_CONF" ]] && { err "Нет $SNI_CONF — сначала выполните п.1"; return 1; }
+  db_protect_suspend
   sqlite3 -header -column "$XUI_DB" "SELECT id, protocol, port, remark FROM inbounds WHERE enable=1;" 2>/dev/null || true
   echo
   local id=""
@@ -6924,6 +7048,7 @@ f2b_tail() {
 inbound_change_domain() {
   line; echo -e "${B}   СМЕНА ДОМЕНА ИНБАУНДА (без пересоздания)${N}"; line
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
+  db_protect_suspend
   inbounds_live
   local id=""
   ask id "ID инбаунда (0 — отмена)" "0" '^[0-9]+$'
@@ -7269,6 +7394,11 @@ PYDOMS
   echo -e "${B}— Heal-таймер —${N}"
   if systemctl is-enabled --quiet stack-heal.timer 2>/dev/null; then
     ok "самолечение включено (каждые 2 мин); последний лог: $(tail -1 /root/stack-heal.log 2>/dev/null | head -c 80)"
+    if db_protect_state; then
+      ok "защита БД: серты/dest/hostname защищены от перезаписи панелью (п.25)"
+    else
+      warn "защита БД выключена — панель может затирать серты/dest при правках (вкл: п.25)"
+    fi
   else
     warn2 "самолечение выключено (отклонения чинятся только вручную: п.1/п.4)"
   fi
@@ -8261,6 +8391,11 @@ freeze_menu() {
   line; echo -e "${B}   ЗАМОРОЗКА САМОЛЕЧЕНИЯ${N}"; line
   echo "  Автопочинка (stack-heal, 2 мин) и авто-выпуск сертов НЕ трогают то,"
   echo "  что заморожено здесь. Ручные действия через меню работают как раньше."
+  if db_protect_state; then
+    echo -e "  ${G}Защита БД: ВКЛ${N} — панель не затирает серты/dest/hostname (hosts — тень+восстановление)"
+  else
+    echo "  Защита БД: выкл (панель может затирать серты/dest при правках инбаундов)"
+  fi
   echo
   if [[ -s "$FROZEN_FILE" ]]; then
     echo -e "  ${B}Заморожено:${N}"
@@ -8273,6 +8408,7 @@ freeze_menu() {
   echo "   2) Заморозить серт домена (не выпускать и не перевыпускать)"
   echo "   3) ALL-CERTS: заморозить/разморозить ВСЕ сертификаты"
   echo "   4) Разморозить строку"
+  echo "   5) Защита БД от перезаписи панелью: вкл/выкл (SQL-триггеры)"
   echo "   0) Назад"
   line
   local a=""; ask a "Выбор" "0" '^[0-9]+$'
@@ -8309,6 +8445,30 @@ freeze_menu() {
       ask ln "Номер строки для разморозки" "" '^[0-9]+$'
       [[ -z "$ln" ]] && return 0
       sed -i "${ln}d" "$FROZEN_FILE" 2>/dev/null && log "Разморожено (строка $ln)"
+      ;;
+    5)
+      if db_protect_state; then
+        local off1=""
+        askyn off1 "Защита БД ВКЛЮЧЕНА. Выключить? (панель снова сможет затирать серты/dest)" "n"
+        [[ "$off1" == true ]] || return 0
+        warn "  Если хочешь осознанно поменять серт/dest через веб-панель — выключи защиту,"
+        warn "  сделай правку, затем включи обратно (триггер вернул бы старое значение)."
+        systemctl stop x-ui >/dev/null 2>&1 || true
+        db_protect_remove
+        systemctl start x-ui >/dev/null 2>&1 || true
+        log "Защита БД выключена"
+      else
+        local on1=""
+        askyn on1 "Включить защиту БД? (серты/dest/hostname переживают правки панели; hosts — тень)" "y"
+        [[ "$on1" == true ]] || return 0
+        systemctl stop x-ui >/dev/null 2>&1 || true
+        if db_protect_on; then
+          log "Защита БД включена: панель больше не затрёт серты/dest/hostname"
+        else
+          err "Не удалось поставить триггеры (см. вывод выше / /root/stack-actions.log)"
+        fi
+        systemctl start x-ui >/dev/null 2>&1 || true
+      fi
       ;;
     *) return 0 ;;
   esac
