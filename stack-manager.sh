@@ -525,15 +525,23 @@ try:
     con = sqlite3.connect(sys.argv[1], timeout=10)
     cur = con.cursor()
     cur.executescript("""
-CREATE TRIGGER IF NOT EXISTS sm_prot_inb
+DROP TRIGGER IF EXISTS sm_prot_inb;
+CREATE TRIGGER sm_prot_inb
 AFTER UPDATE ON inbounds
 WHEN
- ( COALESCE(json_extract(OLD.settings,'$.certFile'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.certFile'),'') != COALESCE(json_extract(OLD.settings,'$.certFile'),'') )
+ ( (OLD.settings IS NULL OR json_valid(OLD.settings)) AND (NEW.settings IS NULL OR json_valid(NEW.settings))
+   AND (
+   ( COALESCE(json_extract(OLD.settings,'$.certFile'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.certFile'),'') != COALESCE(json_extract(OLD.settings,'$.certFile'),'') )
 OR ( COALESCE(json_extract(OLD.settings,'$.keyFile'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.keyFile'),'') != COALESCE(json_extract(OLD.settings,'$.keyFile'),'') )
 OR ( COALESCE(json_extract(OLD.settings,'$.hostname'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.hostname'),'') != COALESCE(json_extract(OLD.settings,'$.hostname'),'') )
-OR ( COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.realitySettings.dest'),'') != COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') )
+   ) )
+OR
+ ( (OLD.stream_settings IS NULL OR json_valid(OLD.stream_settings)) AND (NEW.stream_settings IS NULL OR json_valid(NEW.stream_settings))
+   AND (
+   ( COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.realitySettings.dest'),'') != COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') )
 OR ( COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.realitySettings.target'),'') != COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') )
 OR ( COALESCE(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.tlsSettings.certificates'),'') != COALESCE(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'),'') )
+   ) )
 BEGIN
   UPDATE inbounds SET
     settings =
@@ -543,7 +551,11 @@ BEGIN
         CASE WHEN COALESCE(json_extract(OLD.settings,'$.keyFile'),'') != ''
              THEN json_object('keyFile', json_extract(OLD.settings,'$.keyFile')) ELSE '{}' END),
         CASE WHEN COALESCE(json_extract(OLD.settings,'$.hostname'),'') != ''
-             THEN json_object('hostname', json_extract(OLD.settings,'$.hostname')) ELSE '{}' END),
+             THEN json_object('hostname', json_extract(OLD.settings,'$.hostname')) ELSE '{}' END)
+  WHERE id = NEW.id
+    AND (OLD.settings IS NULL OR json_valid(OLD.settings))
+    AND (NEW.settings IS NULL OR json_valid(NEW.settings));
+  UPDATE inbounds SET
     stream_settings =
       json_patch(json_patch(NEW.stream_settings,
         CASE WHEN COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') != ''
@@ -559,7 +571,9 @@ BEGIN
              THEN json_object('tlsSettings',
                   json_object('certificates', json(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'))))
              ELSE '{}' END)
-  WHERE id = NEW.id;
+  WHERE id = NEW.id
+    AND (OLD.stream_settings IS NULL OR json_valid(OLD.stream_settings))
+    AND (NEW.stream_settings IS NULL OR json_valid(NEW.stream_settings));
 END;
 """)
     if cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts'").fetchone():
@@ -570,13 +584,16 @@ END;
         cur.execute('CREATE TABLE IF NOT EXISTS hosts_shadow (%s%s)' % (cl, pk))
         cur.execute('INSERT OR REPLACE INTO hosts_shadow (%s) SELECT %s FROM hosts' % (cl, cl))
         cur.executescript("""
-CREATE TRIGGER IF NOT EXISTS sm_hosts_ins AFTER INSERT ON hosts BEGIN
+DROP TRIGGER IF EXISTS sm_hosts_ins;
+CREATE TRIGGER sm_hosts_ins AFTER INSERT ON hosts BEGIN
   DELETE FROM hosts_shadow WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
   INSERT INTO hosts_shadow ({cl}) SELECT {cl} FROM hosts WHERE inbound_id=NEW.inbound_id AND port=NEW.port; END;
-CREATE TRIGGER IF NOT EXISTS sm_hosts_upd AFTER UPDATE ON hosts BEGIN
+DROP TRIGGER IF EXISTS sm_hosts_upd;
+CREATE TRIGGER sm_hosts_upd AFTER UPDATE ON hosts BEGIN
   DELETE FROM hosts_shadow WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
   INSERT INTO hosts_shadow ({cl}) SELECT {cl} FROM hosts WHERE inbound_id=NEW.inbound_id AND port=NEW.port; END;
-CREATE TRIGGER IF NOT EXISTS sm_hosts_clean AFTER DELETE ON hosts
+DROP TRIGGER IF EXISTS sm_hosts_clean;
+CREATE TRIGGER sm_hosts_clean AFTER DELETE ON hosts
 WHEN NOT EXISTS(SELECT 1 FROM inbounds WHERE id=OLD.inbound_id AND enable=1)
 BEGIN DELETE FROM hosts_shadow WHERE inbound_id=OLD.inbound_id; END;
 """.replace("{cl}", cl))
