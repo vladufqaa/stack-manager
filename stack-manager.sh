@@ -5776,6 +5776,93 @@ restore_config() {
   pause
 }
 
+# =====================================================================
+# ПЕРЕЕЗД ДОМЕНА ПАНЕЛИ: серт + БД (webDomain/hosts) + nginx (блоки/map)
+# + decoy-маркер + credentials. Старый серт опционально отзывается.
+# =====================================================================
+panel_domain_migrate() {
+  line; echo -e "${B}   ПЕРЕЕЗД ДОМЕНА ПАНЕЛИ${N}"; line
+  [[ -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
+  local old=""; old=$(xui_get webDomain 2>/dev/null | tr -d '[:space:]')
+  if [[ -z "$old" || "$old" == "null" ]]; then
+    ask old "Текущий домен панели (не найден в БД)" "" '^[a-zA-Z0-9.-]+$'
+  fi
+  [[ -z "$old" ]] && { warn "Отмена"; pause; return 0; }
+  local new=""
+  ask new "НОВЫЙ домен панели" "" '^[a-zA-Z0-9.-]+$'
+  [[ -z "$new" || "$new" == "$old" ]] && { warn "Отмена"; pause; return 0; }
+
+  echo
+  echo "  Будет сделано:"
+  echo "   • серт для $new (certbot, с текущим email LE)"
+  echo "   • панель: webDomain → $new (stop → edit → start)"
+  echo "   • hosts-записи: address $old → $new (ссылки подписок обновятся сами)"
+  echo "   • nginx: stack.conf + SNI-map, маркер decoy панели, credentials-файл"
+  if check_domain_points_to_server "$new" >/dev/null 2>&1; then
+    ok "DNS: $new указывает на этот сервер"
+  else
+    local go=""
+    askyn go "DNS: $new НЕ указывает на сервер (или не резолвится). Продолжить?" "n"
+    [[ "$go" == true ]] || { pause; return 0; }
+  fi
+  local go=""
+  askyn go "Начать переезд $old → $new?" "n"
+  [[ "$go" == true ]] || { pause; return 0; }
+  auto_backup_stack >/dev/null 2>&1 || true
+
+  # 1) серт нового домена (уважает заморозку п.25 — снял freeze, если надо)
+  cert_issue "$new" || warn "Серт $new не выпущен — панель временно на старом серте; повтори п.10 позже"
+
+  # 2) БД панели: webDomain + hosts
+  systemctl stop x-ui 2>/dev/null || true
+  sqlite3 "$XUI_DB" "UPDATE settings SET value='$new' WHERE key='webDomain';" 2>/dev/null || true
+  sqlite3 "$XUI_DB" "UPDATE hosts SET address='$new' WHERE address='$old';" 2>/dev/null || true
+
+  # 3) nginx: панельные вхождения old → new (домен панели нигде больше не используется)
+  local oesc="${old//./\\.}"
+  local confs=("$STACK_CONF" "$SNI_CONF")
+  local cf
+  for cf in "${confs[@]}"; do
+    [[ -f "$cf" ]] && cp -a "$cf" "$cf.bak-migrate-$(date +%Y%m%d-%H%M%S)"
+  done
+  sed -i "s/$oesc/$new/g" "$STACK_CONF" 2>/dev/null || true
+  [[ -f "$SNI_CONF" ]] && sed -i "s/$oesc/$new/g" "$SNI_CONF" 2>/dev/null || true
+  [[ -f /root/panel-credentials.txt ]] && sed -i "s/$oesc/$new/g" /root/panel-credentials.txt 2>/dev/null || true
+
+  if nginx -t >/dev/null 2>&1; then
+    nginx_reload || true
+  else
+    err "nginx -t не прошёл после замены — откатываю конфиги:"
+    nginx -t 2>&1 | tail -4 | sed 's/^/    /'
+    for cf in "${confs[@]}"; do
+      local bak; bak=$(ls -t "$cf".bak-migrate-* 2>/dev/null | head -1)
+      [[ -n "$bak" ]] && cp -a "$bak" "$cf"
+    done
+    systemctl start x-ui 2>/dev/null || true
+    pause; return 1
+  fi
+  systemctl start x-ui 2>/dev/null || true
+
+  # 4) старый серт — предложить убрать
+  if cert_paths "$old" >/dev/null 2>&1; then
+    local del=""
+    askyn del "Отозвать и удалить старый серт $old? (клиенты должны перейти на $new)" "n"
+    if [[ "$del" == true ]]; then
+      certbot delete --cert-name "$old" -n >/dev/null 2>&1 \
+        && log "Старый серт $old удалён" \
+        || warn "Не удалось удалить серт $old — удали вручную: certbot delete --cert-name $old"
+    fi
+  fi
+
+  echo
+  ok "Переезд завершён: панель и подписки теперь на $new"
+  warn "  • проверь панель и подписку в браузере (Ctrl+F5)"
+  warn "  • у клиентов обнови ссылки (или просто перечитай подписку — URL меняется на $new)"
+  warn "  • если decoy панели показывал старый домен в тексте — смени шаблон п.4"
+  audit "panel: домен панели $old → $new"
+  pause
+}
+
 certs_menu() {
   line; echo -e "${B}   СЕРТИФИКАТЫ${N}"; line
   # активный серт панели из настроек x-ui (в т.ч. выпущенный через меню x-ui)
@@ -5802,6 +5889,7 @@ certs_menu() {
   echo "  5) Выпуск серта через меню x-ui (освободить :80)"
   echo "  6) Показать все серты и email (обзор)"
   echo "  7) Сбросить email Let's Encrypt (спросить заново)"
+  echo "  8) Переезд домена панели (серт/БД/hosts/nginx)"
   echo "  0) Назад"
   line
   local action=""
@@ -5815,6 +5903,7 @@ certs_menu() {
     5) xui_cert_menu_helper ;;
     6) certs_view ;;
     7) le_email_forget; log "Email сброшен — при следующем выпуске спросит заново"; pause ;;
+    8) panel_domain_migrate ;;
   esac
   pause
 }
