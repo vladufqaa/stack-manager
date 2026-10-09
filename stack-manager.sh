@@ -4087,6 +4087,50 @@ initial_setup() {
   fi
   # ПЕРЕУСТАНОВКА (п.17 → сюда): таймер самолечения лезет в x-ui каждые 2 мин
   # и рушит схему «стоп → правка БД → старт». Гасим до начала, вернём в конце.
+  # === ФАЗА А: анкета и план — НИКАКИХ изменений до подтверждения ===
+  local PLAN_INSTALL=true PLAN_CREATE=true PLAN_FW=true
+  local PLAN_EMAIL_DONE=0 PLAN_CREDS_DONE=0 PLAN_ADG_DONE=0
+  if [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]]; then
+    if [[ -z "$PANEL_DOMAIN" || "$PANEL_DOMAIN" == "panel.example.com" ]]; then
+      local pd0=""
+      ask pd0 "Домен панели (A-запись → этот сервер)" "${PANEL_DOMAIN:-panel.example.com}" '^[a-zA-Z0-9.-]+$'
+      PANEL_DOMAIN="$pd0"
+    fi
+    askyn PLAN_INSTALL "Ставить панель LucX UI сейчас?" "y"
+    if [[ "$PLAN_INSTALL" != true ]]; then
+      err "Без панели стек не собирается — отмена."
+      return 1
+    fi
+  fi
+  le_email_load || true
+  if [[ -z "$EMAIL" ]]; then
+    ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
+    le_email_save "$EMAIL"
+  fi
+  PLAN_EMAIL_DONE=1
+  if [[ -t 0 ]]; then
+    ask_panel_creds || return 1
+    PLAN_CREDS_DONE=1
+  fi
+  ask_adguard_and_decoy               # AdGuard да/нет → пароль → где → заглушка
+  PLAN_ADG_DONE=1
+  askyn PLAN_CREATE "В конце создать инбаунды (мастер создания)?" "y"
+  askyn PLAN_FW "В конце настроить файрвол (только нужные порты)?" "y"
+  echo
+  line
+  echo -e "${B}   ПЛАН НАСТРОЙКИ${N}"; line
+  local _pan_state="уже установлена"
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && _pan_state="будет установлена (LucX UI)"
+  echo "  • панель: $PANEL_DOMAIN — $_pan_state"
+  echo "  • email LE: ${EMAIL:-<не задан>}"
+  echo "  • AdGuard: ${ADG_PRESENT:-false} · размещение: ${ADG_PLACEMENT:--} · decoy панели: ${PDECOY:--}"
+  echo "  • инбаунды в конце: $([[ "$PLAN_CREATE" == true ]] && echo да || echo нет)"
+  echo "  • файрвол в конце: $([[ "$PLAN_FW" == true ]] && echo да || echo нет)"
+  line
+  local go_apply=""
+  askyn go_apply "План верный — применять?" "y"
+  [[ "$go_apply" == true ]] || { warn "Отменено — ничего не изменено"; return 0; }
+  # === ФАЗА Б: применение (вопросы выше пропускаются по PLAN_*-флагам) ===
   systemctl stop stack-heal.timer 2>/dev/null || true
   systemctl disable stack-heal.timer 2>/dev/null || true
   # Панели нет? НЕ валимся — ставим прямо здесь (первоначальная установка
@@ -4099,7 +4143,7 @@ initial_setup() {
       PANEL_DOMAIN="$pd_ask"
     fi
     local install_now=false
-    askyn install_now "Установить панель LucX UI сейчас?" "y"
+    [[ "$PLAN_INSTALL" == true ]] && install_now=true
     if [[ "$install_now" != true ]]; then
       err "Без панели работа невозможна."
       return 1
@@ -4120,6 +4164,9 @@ initial_setup() {
   sub_port=$(xui_get subPort); sub_port="${sub_port:-2096}"
   sub_path=$(xui_get subPath); sub_path="/${sub_path#/}"; sub_path="${sub_path%/}/"
 
+  if [[ "${PLAN_EMAIL_DONE:-0}" == 1 ]]; then
+    log "Email для Let's Encrypt: $EMAIL (из анкеты)"
+  else
   le_email_load || true
   if [[ -n "$EMAIL" ]]; then
     log "Email для Let's Encrypt: $EMAIL (сохранён)"
@@ -4135,6 +4182,7 @@ initial_setup() {
     ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
     le_email_save "$EMAIL"
   fi
+  fi
   if [[ -z "$PANEL_DOMAIN" ]]; then
     ask PANEL_DOMAIN "Домен панели" "panel.example.com" '^[a-zA-Z0-9.-]+$'
   else
@@ -4145,10 +4193,14 @@ initial_setup() {
 
   # ЕДИНЫЙ ПУТЬ (тот же, что в авто-подъёме):
   # пароль+порты — только в TTY; в ans-режиме всё уже в глобальных (U_*)
-  if [[ -t 0 ]]; then
-    ask_panel_creds || return 1
+  if [[ "${PLAN_CREDS_DONE:-0}" != 1 ]]; then
+    if [[ -t 0 ]]; then
+      ask_panel_creds || return 1
+    fi
   fi
-  ask_adguard_and_decoy               # AdGuard да/нет → пароль → где → заглушка
+  if [[ "${PLAN_ADG_DONE:-0}" != 1 ]]; then
+    ask_adguard_and_decoy               # AdGuard да/нет → пароль → где → заглушка
+  fi
   local panel_decoy="$PDECOY"
   if [[ "$ADG_PRESENT" == true && "$ADG_PLACEMENT" == "panel" ]]; then
     panel_decoy="adguard"
@@ -4634,7 +4686,7 @@ EOF
   inb_count=$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
   if [[ "$inb_count" -eq 0 ]]; then
     local do_create=false
-    askyn do_create "Стек готов. Создать инбаунды сейчас?" "y"
+    [[ "$PLAN_CREATE" == true ]] && do_create=true
     [[ "$do_create" == true ]] && create_inbounds_menu
   fi
 
@@ -4646,7 +4698,8 @@ EOF
   fi
   echo
   # Переустановка: сброс старых правил прошлой установки (лишние TCP-порты)
-  askyn fw_now "Настроить файрвол сейчас (сброс: только SSH+443+UDP)?" "y"
+  local fw_now=false
+  [[ "$PLAN_FW" == true ]] && fw_now=true
   [[ "$fw_now" == true ]] && firewall_apply
   install_heal_timer
 }
