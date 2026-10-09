@@ -6139,6 +6139,12 @@ firewall_menu() {
     clear
     line; echo -e "${B}   ФАЙРВОЛ (UFW)${N}"; line
     echo "  Статус: $(ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo unknown)"
+    local pol="allowlist"
+    [[ -f "$BACKUP_DIR/fw-policy" ]] && pol=$(head -n1 "$BACKUP_DIR/fw-policy" 2>/dev/null | tr -d '[:space:]')
+    [[ "$pol" != "hideonly" ]] && pol="allowlist"
+    local pol_desc="allowlist — «всё закрыть, кроме списка» (reset + только нужное)"
+    [[ "$pol" == "hideonly" ]] && pol_desc="hide-only — «закрыть только спрятанное» (без reset, deny для панельных/11443)"
+    echo "  Политика: $pol_desc"
     echo
     declare -A REQ=()
     # SSH только через туннель? (sshd слушает loopback) — 22 наружу не открываем
@@ -6169,6 +6175,7 @@ firewall_menu() {
     echo "  3) Выключить UFW"
     echo "  4) Показать правила"
     echo "  5) Удалить правило по номеру"
+    echo "  6) Сменить политику файрвола"
     echo "  7) Снимок состояния"
     echo "  8) Восстановить из снимка"
     echo "  0) Назад"
@@ -6177,23 +6184,55 @@ firewall_menu() {
     read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
     case "$c" in
       1)
-        askyn confirm "Применить?" "n"
-        [[ "$confirm" == true ]] || continue
-        save_firewall_state
-        ufw --force reset >/dev/null 2>&1 || true
-        ufw default deny incoming >/dev/null 2>&1 || true
-        ufw default allow outgoing >/dev/null 2>&1 || true
-        fw_allow "$SSH_PORT" tcp "SSH"
-        for k in "${!REQ[@]}"; do
-          local pr="${k%%:*}" pt="${k##*:}"
-          [[ "$pr:$pt" == "tcp:$SSH_PORT" ]] && continue
-          fw_allow "$pt" "$pr" "${REQ[$k]}"
-        done
-        # порты панели/подписок наружу закрыты явно (они живут на 127.0.0.1)
-        fw_deny_panel_ports
-        ufw --force enable >/dev/null 2>&1 || true
-        log "Применено"; pause
+        if [[ "$pol" == "hideonly" ]]; then
+          askyn confirm "Применить hide-only? (правила НЕ сбрасываются: панельные/11443 закрываются явно)" "n"
+          [[ "$confirm" == true ]] || continue
+          save_firewall_state
+          if ! ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:22([[:space:]]|$)'; then
+            fw_allow "$SSH_PORT" tcp "SSH"
+          fi
+          systemctl is-active --quiet nginx 2>/dev/null && fw_allow 443 tcp "HTTPS/SNI"
+          local hp
+          for hp in "$(xui_get webPort 2>/dev/null)" "$(xui_get subPort 2>/dev/null)" 11443; do
+            [[ -z "$hp" || "$hp" == "0" ]] && continue
+            ufw delete allow "$hp/tcp" >/dev/null 2>&1 || true
+            ufw delete allow "$hp/udp" >/dev/null 2>&1 || true
+            ufw deny "$hp/tcp" >/dev/null 2>&1 || true
+          done
+          fw_deny_panel_ports
+          ufw --force enable >/dev/null 2>&1 || true
+          log "hide-only применено: панельные/служебные закрыты явно, остальное не тронуто"
+        else
+          askyn confirm "Применить? (allowlist: reset + открыть только список ниже)" "n"
+          [[ "$confirm" == true ]] || continue
+          save_firewall_state
+          ufw --force reset >/dev/null 2>&1 || true
+          ufw default deny incoming >/dev/null 2>&1 || true
+          ufw default allow outgoing >/dev/null 2>&1 || true
+          fw_allow "$SSH_PORT" tcp "SSH"
+          for k in "${!REQ[@]}"; do
+            local pr="${k%%:*}" pt="${k##*:}"
+            [[ "$pr:$pt" == "tcp:$SSH_PORT" ]] && continue
+            fw_allow "$pt" "$pr" "${REQ[$k]}"
+          done
+          # порты панели/подписок наружу закрыты явно (они живут на 127.0.0.1)
+          fw_deny_panel_ports
+          ufw --force enable >/dev/null 2>&1 || true
+          log "Применено (allowlist)"
+        fi
+        pause
         ;;
+      6)
+        echo "  Политики:"
+        echo "   1) allowlist — «всё закрыть, кроме списка»: reset, наружу только SSH/443/UDP-инбаунды (текущая логика)"
+        echo "   2) hide-only — «закрыть только спрятанное»: без reset; deny для панельных портов и 11443;"
+        echo "      всё, что ты открыл руками, остаётся как есть"
+        local pc=""; ask pc "Политика" "$pol" '^[12]$'
+        case "$pc" in
+          1) printf 'allowlist\n' > "$BACKUP_DIR/fw-policy"; log "Политика: allowlist" ;;
+          2) mkdir -p "$BACKUP_DIR" 2>/dev/null; printf 'hideonly\n' > "$BACKUP_DIR/fw-policy"; log "Политика: hide-only" ;;
+        esac
+        pause ;;
       2) ufw --force enable 2>&1 | sed 's/^/  /'; pause ;;
       3) ufw disable 2>&1 | sed 's/^/  /'; pause ;;
       4) ufw status numbered 2>&1 | sed 's/^/  /'; pause ;;
