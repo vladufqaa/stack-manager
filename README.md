@@ -132,6 +132,10 @@ bash /root/stack-manager.sh
 curl -fsSL https://raw.githubusercontent.com/vladufqaa/stack-manager/main/stack-manager.sh -o /root/stack-manager.sh && bash /root/stack-manager.sh
 ```
 
+## 🙏 Благодарности
+
+- [**Mannokia**](https://github.com/Mannokia) — автор форка, из которого мы берём фичи: линии сертификатов A/B, умный выпуск с DNS-фильтром и идемпотентностью, аудит сертов и линий, чистка сирот и дублей `-0001`, синк серта панели/подписок, TUI-обзор файрвола.
+
 ---
 
 <div align="center">
