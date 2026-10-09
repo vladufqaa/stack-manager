@@ -6554,12 +6554,27 @@ firewall_menu() {
       fw_port_locked "$up" && continue
       REQ["udp:$up"]="udp-инбаунд (панель)"
     done
+    # СВОИ порты (п.9): то, что запрещено закрывать любой политикой (файл прото/порт)
+    declare -A EXTRA=()
+    if [[ -s "$BACKUP_DIR/fw-extra" ]]; then
+      local ex_proto ex_port
+      while IFS=/ read -r ex_proto ex_port; do
+        [[ "$ex_proto" =~ ^(tcp|udp)$ && "$ex_port" =~ ^[0-9]+$ ]] || continue
+        EXTRA["${ex_proto}:${ex_port}"]="свой порт — не закрывать"
+      done < "$BACKUP_DIR/fw-extra"
+    fi
 
     echo "▸ Открытыми БУДУТ:"
     local k
     for k in $(printf '%s\n' "${!REQ[@]}" | sort -t: -k1,1 -k2,2n); do
       printf "  %-6s %-6s %s\n" "${k%%:*}" "${k##*:}" "${REQ[$k]}"
     done
+    if [[ ${#EXTRA[@]} -gt 0 ]]; then
+      echo "▸ Плюс СВОИ порты (п.9 — политиками не закрываются):"
+      for k in $(printf '%s\n' "${!EXTRA[@]}" | sort -t: -k1,1 -k2,2n); do
+        printf "  %-6s %-6s %s\n" "${k%%:*}" "${k##*:}" "${EXTRA[$k]}"
+      done
+    fi
     echo
     line
     echo "  1) ПРИМЕНИТЬ"
@@ -6570,6 +6585,7 @@ firewall_menu() {
     echo "  6) Сменить политику файрвола"
     echo "  7) Снимок состояния"
     echo "  8) Восстановить из снимка"
+    echo "  9) Свои порты — добавить/убрать (не закрываются политиками)"
     echo "  0) Назад"
     line
     local c=""
@@ -6584,6 +6600,11 @@ firewall_menu() {
             fw_allow "$SSH_PORT" tcp "SSH"
           fi
           systemctl is-active --quiet nginx 2>/dev/null && fw_allow 443 tcp "HTTPS/SNI"
+          # свои порты открываем явно (idempotent) — политикой не закрываются
+          local kk
+          for kk in "${!EXTRA[@]}"; do
+            fw_allow "${kk##*:}" "${kk%%:*}" "свой порт"
+          done
           local hp
           for hp in "$(xui_get webPort 2>/dev/null)" "$(xui_get subPort 2>/dev/null)" 11443; do
             [[ -z "$hp" || "$hp" == "0" ]] && continue
@@ -6607,6 +6628,11 @@ firewall_menu() {
             [[ "$pr:$pt" == "tcp:$SSH_PORT" ]] && continue
             fw_allow "$pt" "$pr" "${REQ[$k]}"
           done
+          # свои порты — всегда открыты (после reset их нужно вернуть)
+          local kk
+          for kk in "${!EXTRA[@]}"; do
+            fw_allow "${kk##*:}" "${kk%%:*}" "свой порт"
+          done
           # порты панели/подписок наружу закрыты явно (они живут на 127.0.0.1)
           fw_deny_panel_ports
           ufw --force enable >/dev/null 2>&1 || true
@@ -6616,9 +6642,9 @@ firewall_menu() {
         ;;
       6)
         echo "  Политики:"
-        echo "   1) allowlist — «всё закрыть, кроме списка»: reset, наружу только SSH/443/UDP-инбаунды (текущая логика)"
+        echo "   1) allowlist — «всё закрыть, кроме списка»: reset, наружу только SSH/443/UDP-инбаунды + свои порты (п.9)"
         echo "   2) hide-only — «закрыть только спрятанное»: без reset; deny для панельных портов и 11443;"
-        echo "      всё, что ты открыл руками, остаётся как есть"
+        echo "      свои порты (п.9) открываются явно, остальное остаётся как есть"
         local pc=""; ask pc "Политика" "$pol" '^[12]$'
         case "$pc" in
           1) printf 'allowlist\n' > "$BACKUP_DIR/fw-policy"; log "Политика: allowlist" ;;
@@ -6634,6 +6660,47 @@ firewall_menu() {
          ufw --force delete "$n" 2>&1 | sed 's/^/  /'; pause ;;
       7) save_firewall_state; pause ;;
       8) restore_firewall_state ;;
+      9)
+        echo "  Свои порты (всегда открыты; allowlist их сохраняет, hide-only — открывает явно):"
+        if [[ -s "$BACKUP_DIR/fw-extra" ]]; then
+          nl -ba "$BACKUP_DIR/fw-extra" | sed 's/^/    /'
+        else
+          echo "    (пусто)"
+        fi
+        echo "   1) Добавить порт"
+        echo "   2) Убрать порт"
+        echo "   0) Назад"
+        local sc9=""; ask sc9 "Выбор" "0" '^[0-9]$'
+        case "$sc9" in
+          1)
+            local ep=""; ask ep "Порт" "" '^[0-9]+$'
+            [[ -z "$ep" ]] && continue
+            if fw_port_locked "$ep"; then
+              warn "  Порт $ep — служебный (скрытые панели/DNS/amplification), наружу открывать нельзя"
+              pause; continue
+            fi
+            local epr=""; ask epr "Протокол tcp/udp" "tcp" '^(tcp|udp)$'
+            mkdir -p "$BACKUP_DIR" 2>/dev/null
+            if grep -qxE "${epr}/${ep}" "$BACKUP_DIR/fw-extra" 2>/dev/null; then
+              echo "  Уже в списке"; pause; continue
+            fi
+            printf '%s/%s\n' "$epr" "$ep" >> "$BACKUP_DIR/fw-extra"
+            fw_allow "$ep" "$epr" "свой порт"
+            log "Свой порт $epr/$ep: добавлен в исключения файрвола и открыт сразу"
+            ;;
+          2)
+            [[ -s "$BACKUP_DIR/fw-extra" ]] || { echo "  Список пуст"; pause; continue; }
+            local en=""; ask en "Номер строки" "0" '^[0-9]+$'
+            [[ -z "$en" || "$en" == 0 ]] && continue
+            local dline
+            dline=$(sed -n "${en}p" "$BACKUP_DIR/fw-extra")
+            [[ -z "$dline" ]] && continue
+            ufw delete allow "${dline##*/}/${dline%%/*}" >/dev/null 2>&1 || true
+            sed -i "${en}d" "$BACKUP_DIR/fw-extra"
+            log "Свой порт убран из исключений: $dline (правило UFW снято)"
+            ;;
+        esac
+        pause ;;
       0) return 0 ;;
       *) sleep 1 ;;
     esac
