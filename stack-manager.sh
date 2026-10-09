@@ -4063,6 +4063,21 @@ configure_sni_for_inbound() {
     log "  + decoy (Reality) на порту $tls_port${pre_tpl:+ ($pre_tpl)}"
   fi
 
+  # vless/trojan + TLS (не reality): заглушка для пробоев — не-протокольный
+  # трафик (браузер по https://<домен>) уходит fallback'ом в nginx :80,
+  # где лежит статичный сайт (ACME webroot), вместо молчаливого reset.
+  if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$stream"; then
+    local has_fb=""
+    has_fb=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    if [[ -z "$has_fb" || "$has_fb" == "[]" || "$has_fb" == "null" ]]; then
+      systemctl stop x-ui >/dev/null 2>&1 || true
+      if sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":80}]') WHERE id=$id;" 2>/dev/null; then
+        log "  + заглушка vless/tls: fallback → 127.0.0.1:80 (пробой браузером увидит сайт)"
+      fi
+      systemctl start x-ui >/dev/null 2>&1 || true
+    fi
+  fi
+
   nginx_reload || true
   log "SNI настроен: $domain -> inb_${id}_backend"
 }
@@ -4993,6 +5008,37 @@ add_inbound() {
   line; echo -e "${B}   ДОБАВИТЬ / ПРОВЕРИТЬ INBOUND${N}"; line
   sqlite3 -header -column "$XUI_DB" "SELECT id, protocol, port, enable, remark FROM inbounds WHERE enable=1;" 2>/dev/null || true
   echo
+
+  # Автодетект: TCP-инбаунды, созданные руками в панели и НЕ спрятанные за 443.
+  # При активном файрволе (allowlist) их порт снаружи закрыт — они не работают.
+  local -a UNHID=()
+  local _id _proto _port _st
+  while IFS='|' read -r _id _proto _port; do
+    [[ -z "$_id" || -z "$_proto" ]] && continue
+    is_udp_proto "$_proto" && continue
+    grep -qE "^\s+\S+\s+inb_${_id}_backend" "$SNI_CONF" 2>/dev/null && continue
+    # чужой reality (dest = внешняя цель) уже спрятан за 443 по SNI цели
+    _st=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$_id;" 2>/dev/null || true)
+    grep -qi '"security": *"reality"' <<<"$_st" && ! grep -Eq '"dest": *"127\.0\.0\.1:' <<<"$_st" && continue
+    UNHID+=("$_id|$_proto|$_port")
+  done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
+  if [[ ${#UNHID[@]} -gt 0 ]]; then
+    warn "TCP-инбаунды НЕ за 443 — при включённом файрволе снаружи они НЕ работают:"
+    local _u
+    for _u in "${UNHID[@]}"; do echo "    • #${_u%%|*} ${_u#*|}"; done
+    echo "    (UDP-инбаунды за 443 не прячутся — после создания примени п.11 заново)"
+    local hide_all=""
+    askyn hide_all "Спрятать их за 443 (по очереди спросит домен)?" "y"
+    if [[ "$hide_all" == true ]]; then
+      local pd0="${PANEL_DOMAIN:-$(xui_get subDomain 2>/dev/null || true)}"
+      for _u in "${UNHID[@]}"; do
+        IFS='|' read -r _id _proto _port <<<"$_u"
+        configure_sni_for_inbound "$_id" "$_proto" "$_port" "$pd0" || warn "  #$_id: не удалось — см. п.2 → 2"
+      done
+      return 0
+    fi
+  fi
+
   echo "  1) Проверить все инбаунды в SNI"
   echo "  2) Настроить конкретный инбаунд"
   echo "  3) Создать новый инбаунд (VLESS Reality/TLS, anytls, naive, AWG...)"
