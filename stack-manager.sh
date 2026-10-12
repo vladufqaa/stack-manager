@@ -335,8 +335,80 @@ sni_repair_links() {
   pause
 }
 
-ensure_deps() {
-  local missing=() t
+# Пересборка SNI-карты из текущей БД, без изменений БД и сертификатов.
+rebuild_sni_from_db() {
+  line; echo -e "${B}   ПЕРЕСБОРКА SNI ИЗ ТЕКУЩЕЙ БД${N}"; line
+  nginx_ready || { err "nginx или nginx.conf отсутствует"; pause; return 1; }
+  [[ -f "$XUI_DB" && -f "$SNI_CONF" ]] || { err "Нужны x-ui.db и существующий SNI-конфиг"; pause; return 1; }
+  local pd="${PANEL_DOMAIN:-}"; [[ -z "$pd" ]] && pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ "$pd" =~ ^[A-Za-z0-9.-]+$ ]] || { err "Некорректный домен панели"; pause; return 1; }
+  local tmp bak rows count=0 id proto port dom backend sec dest
+  tmp=$(mktemp "${SNI_CONF}.rebuild.XXXXXX") || { err "Не удалось создать временный SNI-конфиг"; pause; return 1; }
+  rows=$(python3 - "$XUI_DB" <<'PY'
+import sqlite3,json,sys,re
+con=sqlite3.connect(sys.argv[1]); con.row_factory=sqlite3.Row
+skip={'wireguard','amnezia','amneziawg','awg','qwdtt','csqtt','csqdt','mtproto','tun'}
+for r in con.execute("SELECT id,protocol,port,settings,stream_settings FROM inbounds WHERE enable=1 AND port>0 ORDER BY id"):
+    try: s=json.loads(r['settings'] or '{}'); t=json.loads(r['stream_settings'] or '{}')
+    except Exception: continue
+    net=(t.get('network') or '').lower(); proto=(r['protocol'] or '').lower()
+    if proto in skip or net in ('udp','quic'): continue
+    dom=s.get('domain') or s.get('hostname') or s.get('sni')
+    tls=t.get('tlsSettings') or {}; dom=dom or tls.get('serverName')
+    rs=t.get('realitySettings') or {}; names=rs.get('serverNames') or []
+    dom=dom or (names[0] if names else '')
+    if not isinstance(dom,str) or not re.fullmatch(r'[A-Za-z0-9.-]+',dom): continue
+    dest=rs.get('dest') or rs.get('target') or ''
+    backend='tproxy' if proto=='tproxy' else f'inb_{r["id"]}_backend'
+    port=11443 if proto=='tproxy' else int(r['port'])
+    print(f'{r["id"]}|{proto}|{port}|{dom}|{backend}|{dest}')
+PY
+) || true
+  {
+    echo 'map $ssl_preread_server_name $backend {'
+    echo '    default                       panel_backend;'
+    printf '    %-30s panel_backend;\n' "$pd"
+    while IFS='|' read -r id proto port dom backend sec dest; do
+      [[ -n "$dom" ]] || continue
+      printf '    %-30s %s;\n' "$dom" "$backend"
+      count=$((count+1))
+    done <<<"$rows"
+    # Сохраняем существующий AdGuard SNI-маршрут, если он был.
+    awk '/^[[:space:]]+[A-Za-z0-9.-]+[[:space:]]+agh_backend;/{print}' "$SNI_CONF" 2>/dev/null
+    echo '}'
+    echo
+    echo 'upstream panel_backend { server 127.0.0.1:4443; }'
+    while IFS='|' read -r id proto port dom backend sec dest; do
+      [[ -n "$backend" ]] || continue
+      printf 'upstream %s { server 127.0.0.1:%s; }\n' "$backend" "$port"
+    done <<<"$rows"
+    if grep -q '^upstream agh_backend[[:space:]]*{' "$SNI_CONF" 2>/dev/null; then
+      awk '/^upstream agh_backend[[:space:]]*\{/{p=1} p{print} p&&/^}/{exit}' "$SNI_CONF"
+    fi
+    echo
+    echo 'server {'
+    echo '    listen 443;'
+    echo '    proxy_pass $backend;'
+    echo '    ssl_preread on;'
+    echo '    proxy_connect_timeout 5s;'
+    echo '    proxy_timeout 10m;'
+    echo '}'
+  } > "$tmp" || { rm -f "$tmp"; err "Не удалось записать временный SNI-конфиг"; pause; return 1; }
+  bak="${SNI_CONF}.bak-rebuild-$(date +%Y%m%d-%H%M%S)"
+  cp -a "$SNI_CONF" "$bak" || { rm -f "$tmp"; err "Не удалось сохранить резервную копию SNI"; pause; return 1; }
+  mv -f "$tmp" "$SNI_CONF" || { rm -f "$tmp"; err "Не удалось заменить SNI-конфиг"; pause; return 1; }
+  if ! nginx -t 2>/dev/null; then
+    mv -f "$bak" "$SNI_CONF"; err "nginx -t не прошёл — исходный SNI восстановлен"; nginx -t 2>&1 | tail -6; pause; return 1
+  fi
+  mkdir -p /etc/nginx/streams-available 2>/dev/null || true
+  rm -f /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
+  ln -s "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null || cp -f "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
+  nginx_reload || { mv -f "$bak" "$SNI_CONF"; nginx_reload >/dev/null 2>&1 || true; err "SNI заменён, но nginx не перезагрузился — восстановлен старый"; pause; return 1; }
+  log "SNI пересобран из БД: маршрутов $count; БД и сертификаты не менялись."
+  pause
+}
+
+ensure_deps() {  local missing=() t
   for t in sqlite3 jq curl ss nginx certbot openssl dig ufw fail2ban-client nc xxd; do
     command -v "$t" >/dev/null 2>&1 && continue
     case "$t" in
@@ -11621,7 +11693,7 @@ run_menu_action() {
     23) rollback_menu ;;
     24) preinstall_menu ;;
     25) freeze_menu ;;
-    26) sni_repair_links ;;
+    26) rebuild_sni_from_db ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -11820,7 +11892,7 @@ main_menu() {
     echo -e "  ${B}23)${N} 💣 Откат и демонтаж стека"
     echo -e "  ${B}24)${N} 📸 Pre-install снимок (состояние до скрипта)"
     echo -e "  ${B}25)${N} ❄️  Заморозка самолечения (серты/инбаунды от автоматики)"
-    echo -e "  ${B}26)${N} 🧩 Восстановить SNI-роутер без пересоздания инбаундов"
+    echo -e "  ${B}26)${N} 🧩 Пересобрать SNI из текущей БД (без пересоздания инбаундов)"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
