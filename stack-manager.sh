@@ -7618,18 +7618,89 @@ decoy_pick_inbound() {
   pause; return 0
 }
 
+# ── Убрать decoy инбаундов: вернуть как изначально ─────────────────────
+#   Исходная доктрина: decoy-вхост только у Reality-инбаундов и панели.
+#   П.4.1 мог раздать decoy всем — здесь снимается всё «лишнее»:
+#     • decoy-блоки stack.conf у не-Reality SNI-доменов удаляются
+#     • vless/trojan+TLS: decoy-fallback (dest = 127.0.0.1:80 или 80)
+#       снимается целиком; боевой fallback (другой dest) не трогается
+#     • свой Reality — decoy остаётся (заглушка обязательна)
+#     • TG WEB-PROXY — пропуск (decoy ему не ставится)
+decoy_reset_all() {
+  line; echo -e "${B}   DECOY: УБРАТЬ (КАК ИЗНАЧАЛЬНО: ТОЛЬКО REALITY + ПАНЕЛЬ)${N}"; line
+  stack_ensure
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
+  local id dom be proto st fb ds d ok changed=0 restarted=0
+  while IFS='|' read -r dom be; do
+    [[ "$be" =~ ^inb_([0-9]+)_backend$ ]] || continue
+    id="${BASH_REMATCH[1]}"
+    proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
+    [[ -z "$proto" ]] && continue
+    st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    if [[ "$proto" == "vless" ]] && grep -qi '"security": *"reality"' <<<"$st"; then
+      echo "  #$id $dom — Reality: decoy остаётся (как изначально)"
+      continue
+    fi
+    if [[ "$proto" == "tproxy" ]]; then
+      echo "  #$id $dom — TG WEB-PROXY: декоя нет и не было"
+      continue
+    fi
+    # 1) decoy-блок stack.conf у этого домена (если вдруг есть) — убрать
+    if stack_decoy_meta "$dom" >/dev/null 2>&1; then
+      stack_del_decoy "$dom"
+      changed=1
+      log "  #$id $dom — decoy-блок убран из stack.conf"
+    fi
+    # 2) decoy-fallback у vless/trojan+TLS (ставился п.4.1)
+    if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$st"; then
+      fb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+      if [[ -n "$fb" && "$fb" != "[]" && "$fb" != "null" ]]; then
+        ds=$(grep -oE '"dest"[[:space:]]*:[[:space:]]*[^,}]+' <<<"$fb" | sed -E 's/.*:[[:space:]]*//; s/^"//; s/"$//')
+        if [[ -n "$ds" ]]; then
+          ok=1
+          for d in $ds; do [[ "$d" == "80" || "$d" == "127.0.0.1:80" ]] || ok=0; done
+          if (( ok )); then
+            db_protect_suspend sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_remove(settings,'\$.fallbacks') WHERE id=$id;"
+            restarted=1
+            log "  #$id $dom — decoy-fallback (127.0.0.1:80) снят"
+            changed=1
+          else
+            echo "  #$id $dom — fallback боевой (не decoy): не трогаю"
+          fi
+        fi
+      fi
+    fi
+  done < <(awk '
+    /^map / { inmap=1; next }
+    inmap && /^}/ { inmap=0 }
+    inmap && /^[[:space:]]/ && NF >= 2 {
+      dom = $1; sub(/;$/, "", dom); be = $2; sub(/;$/, "", be)
+      if (dom != "" && dom != "default" && be ~ /_backend$/ && be !~ /^(panel|agh)_backend$/) print dom "|" be
+    }' "$SNI_CONF" 2>/dev/null)
+  (( restarted )) && systemctl restart x-ui >/dev/null 2>&1 || true
+  if (( changed )); then
+    nginx_reload || true
+    log "Готово: decoy остался только у Reality-инбаундов и панели (как изначально)."
+  else
+    log "Менять нечего: decoy уже только у Reality и панели."
+  fi
+  pause
+}
+
 change_decoy() {
   line; echo -e "${B}   DECOY ДЛЯ SNI-ДОМЕНОВ${N}"; line
   stack_ensure
   echo "  1) Раздать decoy всем SNI-инбаундам (кроме TG WEB-PROXY)"
   echo "  2) Выбрать инбаунд → назначить/сменить его decoy"
   echo "  3) Сменить decoy домена панели"
+  echo "  4) Убрать decoy инбаундов: как изначально (только Reality + панель)"
   echo "  0) Назад"
   local m=""
-  ask m "Выбор" "2" '^[0-3]$'
+  ask m "Выбор" "2" '^[0-4]$'
   case "$m" in
     1) decoy_ensure_all; return 0 ;;
     2) decoy_pick_inbound; return 0 ;;
+    4) decoy_reset_all; return 0 ;;
     0) return 0 ;;
   esac
   # ── 3) decoy домена панели ──
