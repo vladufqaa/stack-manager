@@ -4,7 +4,7 @@
 
 ### SNI-стек «всё за 443» в одном файле
 
-**LucX / x-ui · AdGuard Home · nginx SNI-роутер · Reality · decoy · fail2ban · UFW · Let's Encrypt**
+**[LucX UI](https://github.com/AlexeyLCP/lucx-ui) / x-ui · AdGuard Home · nginx SNI-роутер · Reality · decoy · fail2ban · UFW · Let's Encrypt**
 
 ![bash](https://img.shields.io/badge/made%20with-bash-4EAA25?logo=gnu-bash&logoColor=white)
 ![platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-E95420?logo=ubuntu&logoColor=white)
