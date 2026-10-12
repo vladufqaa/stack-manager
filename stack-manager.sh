@@ -852,8 +852,10 @@ db_set_listen() {
     panel_journal_capture_row inbounds "$id" # и вся строка целиком
   fi
   local sq; sq=$(sql_escape "$want")
-  sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-    "UPDATE inbounds SET listen='$sq' WHERE id=$id AND COALESCE(listen,'') <> '$sq';" 2>/dev/null || true
+  if ! sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "UPDATE inbounds SET listen='$sq' WHERE id=$id AND COALESCE(listen,'') <> '$sq';" 2>/dev/null; then
+    err "Не удалось изменить listen у inbound #$id"; return 1
+  fi
   return 0
 }
 
@@ -887,7 +889,9 @@ panel_journal_capture_row() {
     warn "journal: не удалось снять снимок строки $kind#$id (код $rc) — откат её не восстановит"
     return 1
   fi
-  printf '%s\t%s\t1\t%s\t%s\n' "$kind" "$id" "$out" "$XUI_DB" >> "$ROWS_JOURNAL" 2>/dev/null || true
+  if ! printf '%s\t%s\t1\t%s\t%s\n' "$kind" "$id" "$out" "$XUI_DB" >> "$ROWS_JOURNAL" 2>/dev/null; then
+    warn "journal: не удалось записать снимок $kind#$id"; return 1
+  fi
   return 0
 }
 
@@ -913,7 +917,9 @@ db_update_inbound() {
   local id="$1" set_expr="$2" mode="${3:-journal}"
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" || -z "$set_expr" ]] && return 1
   [[ "$mode" == "journal" ]] && panel_journal_capture_row inbounds "$id"
-  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET $set_expr WHERE id=$id;" 2>/dev/null || true
+  if ! sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET $set_expr WHERE id=$id;" 2>/dev/null; then
+    err "Не удалось обновить inbound #$id"; return 1
+  fi
   return 0
 }
 
@@ -967,7 +973,9 @@ panel_journal_note_settings() {
           "SELECT COUNT(*) FROM settings WHERE key='$k';" 2>/dev/null || echo 0)
     [[ "$cur" == "0" ]] && cur="__NULL__" || cur="__EMPTY__"
   fi
-  printf 'settings\t%s\t%s\t%s\n' "$k" "$cur" "$XUI_DB" >> "$PANEL_JOURNAL" 2>/dev/null || true
+  printf 'settings\t%s\t%s\t%s\n' "$k" "$cur" "$XUI_DB" >> "$PANEL_JOURNAL" 2>/dev/null || {
+    warn "journal: не удалось записать settings.$k"; return 1
+  }
 }
 
 panel_journal_note_listen() {
@@ -984,7 +992,9 @@ panel_journal_note_listen() {
           "SELECT COUNT(*) FROM inbounds WHERE id=$id AND listen IS NULL;" 2>/dev/null || echo 0)
     [[ "$cur" == "0" ]] && cur="__EMPTY__" || cur="__NULL__"
   fi
-  printf '%s\t%s\t%s\n' "$id" "$cur" "$XUI_DB" >> "$LISTEN_JOURNAL" 2>/dev/null || true
+  printf '%s\t%s\t%s\n' "$id" "$cur" "$XUI_DB" >> "$LISTEN_JOURNAL" 2>/dev/null || {
+    warn "journal: не удалось записать listen для #$id"; return 1
+  }
 }
 
 # Применить журнал в обратном порядке: вернуть старые значения.
@@ -10444,6 +10454,56 @@ PYDOMS
     echo -e "${R}  Итог: проблем — $problems${N} (подсказки [→] выше)"
   fi
   line
+  (( problems > 0 )) && return 1
+  return 0
+}
+
+# Единый read-only аудит для CI/ручной проверки. Не меняет БД, nginx и сервисы.
+stack_audit_readonly() {
+  line; echo -e "${B}   ПОЛНЫЙ READ-ONLY АУДИТ СТЕКА${N}"; line
+  local bad=0 x dbcount dbbad cert_dir d crt left
+  local pass fail
+  pass(){ ok "$*"; }
+  fail(){ err "$*"; bad=$((bad+1)); }
+  echo -e "${B}— nginx / SNI / stack-heal —${N}"
+  systemctl is-active --quiet nginx 2>/dev/null && pass "nginx активен" || fail "nginx не активен"
+  nginx_ready && pass "nginx.conf найден" || fail "nginx или nginx.conf отсутствует"
+  if sni_router_present; then
+    pass "SNI-файл найден"
+    grep -qE '^map[[:space:]]+\$ssl_preread_server_name' "$SNI_CONF" 2>/dev/null && pass "SNI map найден" || fail "SNI map отсутствует"
+  else
+    fail "SNI-роутер отсутствует"
+  fi
+  nginx -t >/dev/null 2>&1 && pass "nginx -t OK" || fail "nginx -t FAILED"
+  stack_heal_present && pass "stack-heal найден" || warn "stack-heal отсутствует"
+  systemctl is-enabled --quiet stack-heal.timer 2>/dev/null && pass "stack-heal.timer включён" || warn "stack-heal.timer не включён"
+  echo -e "${B}— БД —${N}"
+  if [[ -f "$XUI_DB" ]]; then
+    dbcount=$(sqlite3 -readonly -cmd '.timeout 3000' "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || true)
+    [[ "$dbcount" =~ ^[0-9]+$ ]] && pass "x-ui.db читается: $dbcount включённых inbounds" || fail "x-ui.db не читается"
+    dbbad=$(sqlite3 -readonly -cmd '.timeout 3000' "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1 AND (port IS NULL OR port<=0 OR json_valid(COALESCE(settings,''))=0 OR json_valid(COALESCE(stream_settings,''))=0);" 2>/dev/null || echo -1)
+    [[ "$dbbad" == 0 ]] && pass "JSON и порты inbounds валидны" || fail "Проблемные inbounds: $dbbad"
+  else
+    fail "x-ui.db не найден"
+  fi
+  echo -e "${B}— сертификаты / UFW —${N}"
+  cert_dir=/etc/letsencrypt/live
+  if [[ -d "$cert_dir" ]]; then
+    local certn=0
+    for d in "$cert_dir"/*; do
+      [[ -d "$d" ]] || continue; certn=$((certn+1)); crt="$d/fullchain.pem"
+      [[ -f "$crt" ]] || { fail "$(basename "$d"): fullchain отсутствует"; continue; }
+      left=$((($(date -d "$(openssl x509 -enddate -noout -in "$crt" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0)-$(date +%s))/86400))
+      (( left < 0 )) && fail "$(basename "$d"): сертификат просрочен" || (( left < 14 )) && warn "$(basename "$d"): истекает через $left дн" || pass "$(basename "$d"): $left дн"
+    done
+    (( certn == 0 )) && warn "Сертификатов нет"
+  else
+    warn "$cert_dir отсутствует"
+  fi
+  ufw_is_active && pass "UFW активен" || warn "UFW выключен"
+  line
+  (( bad > 0 )) && { err "Аудит завершён: критических проблем $bad"; return 1; }
+  ok "Аудит завершён без критических проблем"
   return 0
 }
 
@@ -11696,6 +11756,7 @@ run_menu_action() {
     24) preinstall_menu ;;
     25) freeze_menu ;;
     26) rebuild_sni_from_db ;;
+    27) stack_audit_readonly; pause ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -11841,6 +11902,37 @@ freeze_menu() {
   pause
 }
 
+print_menu_actions() {
+  echo
+  echo -e "  ${B} 1)${N} 🧭 Первичная настройка SNI-роутера"
+  echo -e "  ${B} 2)${N} ➕ Добавить / проверить inbound"
+  echo -e "  ${B} 3)${N} 🗑️  Удалить inbound"
+  echo -e "  ${B} 4)${N} 🎭 Сменить decoy для SNI-домена"
+  echo -e "  ${B} 5)${N} 🖼️  Каталог decoy-шаблонов"
+  echo -e "  ${B} 6)${N} 📊 Показать статус"
+  echo -e "  ${B} 7)${N} 🛡️  Безопасность: баны, деко-логины, fail2ban"
+  echo -e "  ${B} 8)${N} 💾 Бэкап конфигурации"
+  echo -e "  ${B} 9)${N} ♻️  Восстановить из бэкапа"
+  echo -e "  ${B}10)${N} 🔒 Управление сертификатами"
+  echo -e "  ${B}11)${N} 🚧 Файрвол: только нужные порты"
+  echo -e "  ${B}12)${N} 🧯 Восстановить состояние фаервола"
+  echo -e "  ${B}13)${N} 📥 Панель 3x-ui/LucX: определить, обновить до LucX, установить/удалить"
+  echo -e "  ${B}14)${N} 🛰️  AdGuard Home: установить / удалить"
+  echo -e "  ${B}15)${N} 🧹 Очистка SNI: записи без инбаундов"
+  echo -e "  ${B}16)${N} 🔑 Сменить пароли admin (панель / AdGuard)"
+  echo -e "  ${B}17)${N} ⬇️  Обновить скрипт с GitHub"
+  echo -e "  ${B}18)${N} 🩺 Самодиагностика (проверка стека)"
+  echo -e "  ${B}19)${N} 📡 Инбаунды: live-таблица"
+  echo -e "  ${B}20)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
+  echo -e "  ${B}21)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
+  echo -e "  ${B}22)${N} 🕶 Стелс-аудит (глазами Shodan/Censys)"
+  echo -e "  ${B}23)${N} 💣 Откат и демонтаж стека"
+  echo -e "  ${B}24)${N} 📸 Pre-install снимок (состояние до скрипта)"
+  echo -e "  ${B}25)${N} ❄️  Заморозка самолечения (серты/инбаунды от автоматики)"
+  echo -e "  ${B}26)${N} 🔄 Пересобрать SNI из текущей БД (без пересоздания инбаундов)"
+  echo -e "  ${B}27)${N} 🔍 Полный read-only аудит стека"
+}
+
 main_menu() {
   decoy_full_init || true
   local W=58
@@ -11868,33 +11960,7 @@ main_menu() {
     menu_header "$(svc_dot nginx)" "$(svc_dot x-ui)" "$adg_dot" "$(svc_dot fail2ban)" \
       "$ufw_ok" "${nb:-0}" "${att:-0}" "${bans:-0}" "$amin" "${duse:-?}" \
       "$(basename "${XUI_DB:-нет}")" "$(date -r "$0" '+%d.%m.%y %H:%M')"
-    echo
-    echo -e "  ${B} 1)${N} 🧭 Первичная настройка SNI-роутера"
-    echo -e "  ${B} 2)${N} ➕ Добавить / проверить inbound"
-    echo -e "  ${B} 3)${N} 🗑️  Удалить inbound"
-    echo -e "  ${B} 4)${N} 🎭 Сменить decoy для SNI-домена"
-    echo -e "  ${B} 5)${N} 🖼️  Каталог decoy-шаблонов"
-    echo -e "  ${B} 6)${N} 📊 Показать статус"
-    echo -e "  ${B} 7)${N} 🛡️  Безопасность: баны, деко-логины, fail2ban"
-    echo -e "  ${B} 8)${N} 💾 Бэкап конфигурации"
-    echo -e "  ${B} 9)${N} ♻️  Восстановить из бэкапа"
-    echo -e "  ${B}10)${N} 🔒 Управление сертификатами"
-    echo -e "  ${B}11)${N} 🚧 Файрвол: только нужные порты"
-    echo -e "  ${B}12)${N} 🧯 Восстановить состояние фаервола"
-    echo -e "  ${B}13)${N} 📥 Панель 3x-ui/LucX: определить, обновить до LucX, установить/удалить"
-    echo -e "  ${B}14)${N} 🛰️  AdGuard Home: установить / удалить"
-    echo -e "  ${B}15)${N} 🧹 Очистка SNI: записи без инбаундов"
-    echo -e "  ${B}16)${N} 🔑 Сменить пароли admin (панель / AdGuard)"
-    echo -e "  ${B}17)${N} ⬇️  Обновить скрипт с GitHub"
-    echo -e "  ${B}18)${N} 🩺 Самодиагностика (проверка стека)"
-    echo -e "  ${B}19)${N} 📡 Инбаунды: live-таблица"
-    echo -e "  ${B}20)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
-    echo -e "  ${B}21)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
-    echo -e "  ${B}22)${N} 🕶 Стелс-аудит (глазами Shodan/Censys)"
-    echo -e "  ${B}23)${N} 💣 Откат и демонтаж стека"
-    echo -e "  ${B}24)${N} 📸 Pre-install снимок (состояние до скрипта)"
-    echo -e "  ${B}25)${N} ❄️  Заморозка самолечения (серты/инбаунды от автоматики)"
-    echo -e "  ${B}26)${N} 🧩 Пересобрать SNI из текущей БД (без пересоздания инбаундов)"
+    print_menu_actions
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
@@ -12187,6 +12253,11 @@ auto_full_setup() {
 # ТОЧКА ВХОДА (только при прямом запуске; при source функции доступны для теста)
 # =====================================================================
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if [[ "${1:-}" == "--check" ]]; then
+    detect_env
+    stack_audit_readonly
+    exit $?
+  fi
   check_os
   ensure_deps || { err "Невозможно продолжить без обязательных зависимостей"; exit 1; }
   detect_env
