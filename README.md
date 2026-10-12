@@ -55,7 +55,6 @@ flowchart LR
     NGINX -->|"SNI: panel.dom"| AGH["🛡️ AdGuard Home + DoH"]
     NGINX -->|"SNI: цель (reality)"| INB1["⚡ VLESS Reality<br/>127.0.0.1"]
     NGINX -->|"SNI: r. / rx. / nn. …"| INB2["🔌 naive · anytls · trusttunnel<br/>127.0.0.1"]
-    NGINX -->|"прочие SNI"| DECOY["🃏 Decoy-заглушка"]
 
     style NGINX fill:#1f6feb,color:#fff
     style C fill:#238636,color:#fff
