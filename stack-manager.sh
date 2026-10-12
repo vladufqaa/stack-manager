@@ -317,16 +317,22 @@ sni_repair_links() {
     src="/etc/nginx/streams-enabled/sni-router.conf"
   fi
   [[ -n "$src" ]] || { err "SNI-конфигурация не найдена — нужен п.1 или п.2"; pause; return 1; }
-  mkdir -p "$NGINX_STREAM_DIR" /etc/nginx/streams-available 2>/dev/null || true
+  if ! mkdir -p "$NGINX_STREAM_DIR" /etc/nginx/streams-available 2>/dev/null; then
+    err "Не удалось создать каталоги Nginx для SNI"; pause; return 1
+  fi
   if [[ "$src" != "$SNI_CONF" ]]; then
     cp -f "$src" "$SNI_CONF" || { err "Не удалось восстановить $SNI_CONF"; pause; return 1; }
   fi
   rm -f /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
-  ln -s "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null || \
-    cp -f "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf || true
-  ensure_stream_include
+  if ! ln -s "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null && \
+     ! cp -f "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null; then
+    err "Не удалось создать ссылку streams-available для SNI"; pause; return 1
+  fi
+  ensure_stream_include || { err "Не удалось подключить SNI include в nginx"; pause; return 1; }
   if nginx -t 2>/dev/null; then
-    nginx_reload || true
+    if ! nginx_reload; then
+      err "nginx -t OK, но reload nginx не выполнен"; pause; return 1
+    fi
     log "SNI-связка восстановлена; БД и маршруты не изменялись."
   else
     err "nginx -t не прошёл после восстановления SNI"; nginx -t 2>&1 | tail -6
@@ -344,7 +350,7 @@ rebuild_sni_from_db() {
   [[ "$pd" =~ ^[A-Za-z0-9.-]+$ ]] || { err "Некорректный домен панели"; pause; return 1; }
   local tmp bak rows count=0 id proto port dom backend sec dest
   tmp=$(mktemp "${SNI_CONF}.rebuild.XXXXXX") || { err "Не удалось создать временный SNI-конфиг"; pause; return 1; }
-  rows=$(python3 - "$XUI_DB" <<'PY'
+  if ! rows=$(python3 - "$XUI_DB" <<'PY'
 import sqlite3,json,sys,re
 con=sqlite3.connect(sys.argv[1]); con.row_factory=sqlite3.Row
 skip={'wireguard','amnezia','amneziawg','awg','qwdtt','csqtt','csqdt','mtproto','tun'}
@@ -363,7 +369,11 @@ for r in con.execute("SELECT id,protocol,port,settings,stream_settings FROM inbo
     port=11443 if proto=='tproxy' else int(r['port'])
     print(f'{r["id"]}|{proto}|{port}|{dom}|{backend}|{dest}')
 PY
-) || true
+); then
+    rm -f "$tmp"
+    err "Не удалось прочитать БД при пересборке SNI"
+    pause; return 1
+  fi
   {
     echo 'map $ssl_preread_server_name $backend {'
     echo '    default                       panel_backend;'
@@ -646,6 +656,21 @@ reality_external_dest() {
   d=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),json_extract(stream_settings,'\$.realitySettings.target'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
   d="${d%%:*}"
   [[ -n "$d" && "$d" != "127.0.0.1" && "$d" != "::1" && "$d" != "localhost" ]]
+}
+
+# Единая read-only классификация decoy-политики для inbound.
+decoy_policy_classify() {
+  local id="$1" proto="$2" stream="${3:-}"
+  [[ "$proto" == "tproxy" ]] && { echo tproxy; return 0; }
+  if grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$stream"; then
+    if reality_external_dest "$id"; then echo reality-external; else echo reality-local; fi
+    return 0
+  fi
+  case "$proto" in
+    naive|anytls|trusttunnel|trust-tunnel|hysteria|hysteria2|qwdtt|csqtt|csqdtt|wireguard|amnezia|amneziawg|awg|mtproto|tun)
+      echo unsupported ;;
+    *) echo no-decoy ;;
+  esac
 }
 
 is_udp_proto() {
@@ -6305,14 +6330,16 @@ configure_sni_for_inbound() {
     # создаём decoy и проставляем dest = 127.0.0.1:<порт decoy>
     local stream_chk=""
     stream_chk=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-    if grep -qi reality <<<"$stream_chk" && ! grep -Eq "\"dest\": ?\"127\.0\.0\.1:" <<<"$stream_chk"; then
+    local _policy=""
+    _policy=$(decoy_policy_classify "$id" "$proto" "$stream_chk")
+    if [[ "$_policy" == reality-external ]]; then
+      log "  Reality (#$id) имеет внешний dest — не трогаю"
+      return 0
+    fi
+    if [[ "$_policy" == reality-local ]] && ! grep -Eq "\"dest\": ?\"127\.0\.0\.1:" <<<"$stream_chk"; then
       # Чужой реалити (dest = внешняя цель из списка) — это НЕ поломка:
       # инбаунд спрятан за 443 по SNI цели, decoy/серт ему не нужны
-      if reality_external_dest "$id"; then
-        log "  Reality (#$id) спрятан за 443 по цели «$existing_domain» — не трогаю"
-        return 0
-      fi
-      warn "  Reality dest не локальный — чиню (decoy + dest)"
+      warn "  Reality dest локальный/пустой — чиню (decoy + dest)"
       local tls_port=$(( 4444 + id ))
       while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
       local cp_line="" c="" k=""
@@ -7808,7 +7835,11 @@ sni_cleanup_stale() {
   for row in "${dead_map[@]}"; do
     IFS='|' read -r dom be iid <<<"$row"
     if [[ -n "$iid" ]]; then
-      echo "  map/upstream: $dom → $be (инбаунда #$iid нет)"
+      if [[ "$be" == "inb_${iid}_backend" ]]; then
+        echo "  map/upstream: $dom → $be (инбаунда #$iid нет)"
+      else
+        echo "  map: $dom → $be (у tproxy #$iid должен использоваться tg_backend)"
+      fi
     else
       echo "  map: $dom → $be (не текущий домен панели${cur_panel:+, сейчас: $cur_panel})"
     fi
@@ -7914,7 +7945,8 @@ decoy_ensure_all() {
         dport="$tls_cur"; tls_cur=$((tls_cur+1))
         mk_decoy "$dport" "$dom" "$c" "$k" "/var/www/decoy-$id" "default"
       fi
-      db_protect_suspend reality_set_dest "$id" "$dport" "$dom"
+      db_protect_suspend
+      reality_set_dest "$id" "$dport" "$dom"
       log "  #$id $dom — декой на 127.0.0.1:$dport, Reality dest выставлен"
       line_ok=1
       continue
@@ -8024,8 +8056,9 @@ decoy_pick_inbound() {
       while ss -tlnH "sport = :$dport" 2>/dev/null | grep -q .; do dport=$((dport+1)); done
       mk_decoy "$dport" "$dom" "$c" "$k" "/var/www/decoy-$id" "$tpl"
     fi
-    db_protect_suspend reality_set_dest "$id" "$dport" "$dom"
-    nginx_reload || true
+    db_protect_suspend
+    reality_set_dest "$id" "$dport" "$dom" || { err "Не удалось записать Reality dest для #$id"; pause; return 1; }
+    nginx_reload || { err "Decoy создан, но nginx не перезагрузился"; pause; return 1; }
     log "Decoy #$id ($dom): «$tpl» на 127.0.0.1:$dport"
     pause; return 0
   fi
@@ -8091,7 +8124,10 @@ decoy_reset_all() {
           ok=1
           for d in $ds; do [[ "$d" == "80" || "$d" == "127.0.0.1:80" ]] || ok=0; done
           if (( ok )); then
-            db_protect_suspend sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_remove(settings,'\$.fallbacks') WHERE id=$id;"
+            db_protect_suspend
+            if ! sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET settings=json_remove(settings,'\$.fallbacks') WHERE id=$id;"; then
+              err "Не удалось убрать decoy-fallback у #$id"; continue
+            fi
             restarted=1
             log "  #$id $dom — decoy-fallback (127.0.0.1:80) снят"
             changed=1
@@ -12253,7 +12289,7 @@ auto_full_setup() {
 # ТОЧКА ВХОДА (только при прямом запуске; при source функции доступны для теста)
 # =====================================================================
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  if [[ "${1:-}" == "--check" ]]; then
+  if [[ "${1:-}" == "--check" || "${1:-}" == "--self-test" ]]; then
     detect_env
     stack_audit_readonly
     exit $?
