@@ -7820,6 +7820,12 @@ decoy_pick_inbound() {
   [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
   local -a L=()
   local dom be id proto port mark
+  local preset_id="${1:-}" preset_dom="${2:-}" preset_port=""
+  if [[ -n "$preset_id" ]]; then
+    id="$preset_id"; dom="$preset_dom"
+    proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
+    preset_port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  else
   echo
   echo -e "${B}▸ SNI-инбаунды:${N}"
   while IFS='|' read -r dom be; do
@@ -7843,11 +7849,19 @@ decoy_pick_inbound() {
       dom = $1; sub(/;$/, "", dom); be = $2; sub(/;$/, "", be)
       if (dom != "" && dom != "default" && be ~ /_backend$/ && be !~ /^(panel|agh)_backend$/) print dom "|" be
     }' "$SNI_CONF" 2>/dev/null)
-  [[ ${#L[@]} -eq 0 ]] && { warn "SNI-инбаундов не найдено — сначала п.2"; pause; return 1; }
-  echo
+  fi
+  if [[ -n "$preset_id" ]]; then
+    L=("$dom|$id|$proto|$preset_port")
+  fi
+  [[ ${#L[@]} -eq 0 ]] && { warn "Собственных Reality-инбаундов не найдено"; pause; return 1; }
   local pick=""
-  ask pick "Номер инбаунда (0 — отмена)" "0" '^[0-9]+$'
-  [[ "$pick" == "0" ]] && return 0
+  if [[ -n "$preset_id" ]]; then
+    pick=1
+  else
+    echo
+    ask pick "Номер Reality-инбаунда (0 — отмена)" "0" '^[0-9]+$'
+    [[ "$pick" == "0" ]] && return 0
+  fi
   (( pick > ${#L[@]} )) && { err "Нет такого номера"; pause; return 1; }
   IFS='|' read -r dom id proto port <<<"${L[$((pick-1))]}"
   local st
@@ -7973,19 +7987,43 @@ decoy_reset_all() {
 change_decoy() {
   line; echo -e "${B}   DECOY: ДОСТУПНЫЕ ОБЪЕКТЫ ДЛЯ СМЕНЫ${N}"; line
   stack_ensure
-  echo "  Панель: ${PANEL_DOMAIN:-домен панели определяется далее}"
-  echo "  Reality-инбаунды: только собственный Reality (чужой Reality не меняется)"
-  echo "  Остальные инбаунды: decoy не применяется"
-  echo
-  echo "  1) Сменить decoy домена панели"
-  echo "  2) Выбрать собственный Reality-инбаунд → сменить decoy"
-  echo "  0) Назад"
+  local panel_dom=""
+  panel_dom=$(xui_get subDomain 2>/dev/null || true)
+  [[ -z "$panel_dom" || "$panel_dom" == "null" ]] && panel_dom=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$panel_dom" || "$panel_dom" == "null" ]] && { err "Домен панели не найден — сначала п.1"; pause; return 1; }
+  echo "  Доступные объекты:"
+  echo "   1) Панель — $panel_dom"
+  local -a _decoy_rows=() _decoy_row
+  local _d_dom _d_be _d_id _d_proto _d_st _d_port
+  while IFS='|' read -r _d_dom _d_be; do
+    [[ "$_d_be" =~ ^inb_([0-9]+)_backend$ ]] || continue
+    _d_id="${BASH_REMATCH[1]}"
+    _d_proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$_d_id AND enable=1;" 2>/dev/null || true)
+    [[ "$_d_proto" == "vless" ]] || continue
+    _d_st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
+    grep -qi '"security": *"reality"' <<<"$_d_st" || continue
+    _d_port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
+    _decoy_rows+=("$_d_dom|$_d_id|$_d_port")
+    _decoy_row="${#_decoy_rows[@]}"
+    printf "   %s) Reality #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port"
+  done < <(awk '
+    /^map / { inmap=1; next }
+    inmap && /^}/ { inmap=0 }
+    inmap && /^[[:space:]]/ && NF >= 2 {
+      dom=$1; sub(/;$/, "", dom); be=$2; sub(/;$/, "", be)
+      if (dom != "" && dom != "default" && be ~ /^inb_[0-9]+_backend$/) print dom "|" be
+    }' "$SNI_CONF" 2>/dev/null)
+  echo "   0) Назад"
   local m=""
-  ask m "Выбор" "2" '^[0-2]$'
-  case "$m" in
-    2) decoy_pick_inbound; return 0 ;;
-    0) return 0 ;;
-  esac
+  ask m "Объект" "1" '^[0-9]+$'
+  [[ "$m" == "0" ]] && return 0
+  if (( m > 1 )); then
+    local _ri=$((m-2))
+    (( _ri >= 0 && _ri < ${#_decoy_rows[@]} )) || { err "Нет такого объекта"; pause; return 1; }
+    IFS='|' read -r _pick_dom _pick_id _pick_port <<<"${_decoy_rows[$_ri]}"
+    decoy_pick_inbound "$_pick_id" "$_pick_dom"
+    return $?
+  fi
   # ── 1) decoy домена панели ──
   local panel_conf="$STACK_CONF"
   local panel_dom=""
