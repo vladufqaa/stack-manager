@@ -303,6 +303,38 @@ nginx_ready() {
   command -v nginx >/dev/null 2>&1 && [[ -f /etc/nginx/nginx.conf ]]
 }
 
+# Безопасное восстановление связки SNI-файлов без пересоздания инбаундов.
+# Ничего не меняет в БД и не генерирует новые маршруты.
+sni_repair_links() {
+  line; echo -e "${B}   ВОССТАНОВЛЕНИЕ SNI-РОУТЕРА${N}"; line
+  nginx_ready || { err "nginx или /etc/nginx/nginx.conf отсутствует"; pause; return 1; }
+  local src=""
+  if [[ -f "$SNI_CONF" ]]; then
+    src="$SNI_CONF"
+  elif [[ -f /etc/nginx/streams-available/sni-router.conf ]]; then
+    src="/etc/nginx/streams-available/sni-router.conf"
+  elif [[ -f /etc/nginx/streams-enabled/sni-router.conf ]]; then
+    src="/etc/nginx/streams-enabled/sni-router.conf"
+  fi
+  [[ -n "$src" ]] || { err "SNI-конфигурация не найдена — нужен п.1 или п.2"; pause; return 1; }
+  mkdir -p "$NGINX_STREAM_DIR" /etc/nginx/streams-available 2>/dev/null || true
+  if [[ "$src" != "$SNI_CONF" ]]; then
+    cp -f "$src" "$SNI_CONF" || { err "Не удалось восстановить $SNI_CONF"; pause; return 1; }
+  fi
+  rm -f /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
+  ln -s "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null || \
+    cp -f "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf || true
+  ensure_stream_include
+  if nginx -t 2>/dev/null; then
+    nginx_reload || true
+    log "SNI-связка восстановлена; БД и маршруты не изменялись."
+  else
+    err "nginx -t не прошёл после восстановления SNI"; nginx -t 2>&1 | tail -6
+    pause; return 1
+  fi
+  pause
+}
+
 ensure_deps() {
   local missing=() t
   for t in sqlite3 jq curl ss nginx certbot openssl dig ufw fail2ban-client nc xxd; do
@@ -11589,6 +11621,7 @@ run_menu_action() {
     23) rollback_menu ;;
     24) preinstall_menu ;;
     25) freeze_menu ;;
+    26) sni_repair_links ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -11787,6 +11820,7 @@ main_menu() {
     echo -e "  ${B}23)${N} 💣 Откат и демонтаж стека"
     echo -e "  ${B}24)${N} 📸 Pre-install снимок (состояние до скрипта)"
     echo -e "  ${B}25)${N} ❄️  Заморозка самолечения (серты/инбаунды от автоматики)"
+    echo -e "  ${B}26)${N} 🧩 Восстановить SNI-роутер без пересоздания инбаундов"
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
     line
