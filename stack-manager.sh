@@ -312,8 +312,17 @@ ensure_deps() {
   dpkg -s libnginx-mod-stream >/dev/null 2>&1 || missing+=(libnginx-mod-stream)
   if [[ ${#missing[@]} -gt 0 ]]; then
     log "Установка: ${missing[*]}"
-    apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y "${missing[@]}" >/dev/null 2>&1 || true
+    apt-get update -y >/dev/null 2>&1 || { err "apt-get update не удался — зависимости не установлены"; return 1; }
+    apt-get install -y "${missing[@]}" >/dev/null 2>&1 || { err "apt-get install не удался: ${missing[*]}"; return 1; }
+  fi
+  local _need _miss_after=()
+  for _need in sqlite3 jq curl ss nginx certbot openssl dig ufw fail2ban-client nc xxd; do
+    command -v "$_need" >/dev/null 2>&1 || _miss_after+=("$_need")
+  done
+  dpkg -s libnginx-mod-stream >/dev/null 2>&1 || _miss_after+=(libnginx-mod-stream)
+  if [[ ${#_miss_after[@]} -gt 0 ]]; then
+    err "После установки отсутствуют зависимости: ${_miss_after[*]}"
+    return 1
   fi
   # nginx числится установленным, но /etc/nginx/nginx.conf отсутствует
   # (после демонтажа с rm -rf /etc/nginx apt не возвращает conffiles —
@@ -6649,7 +6658,8 @@ initial_setup() {
   for id in "${INB_IDS[@]}"; do
     [[ "${HIDE[$id]}" == true ]] || continue
     [[ -z "${DECOY_TPL[$id]}" ]] && continue
-    cert_issue "${DOMAIN[$id]}" || warn "  ИТОГ: серт ${DOMAIN[$id]} НЕ выпущен — #$id ($proto) не поднимется (причина выше)"
+    local _cert_proto="${INB_PROTO[$id]:-unknown}"
+    cert_issue "${DOMAIN[$id]}" || warn "  ИТОГ: серт ${DOMAIN[$id]} НЕ выпущен — #$id ($_cert_proto) не поднимется (причина выше)"
   done
   # пути сертификатов → в settings инбаундов (naive/anytls/trusttunnel/tproxy/hysteria)
   sync_inbound_certs
@@ -6659,7 +6669,7 @@ initial_setup() {
   CERT_DEFER=0
   cert_batch_flush || warn "Мультисерт не выпущен — часть доменов может не работать (проверь DNS и п.10)"
 
-  mkdir -p "$NGINX_STREAM_DIR" 2>/dev/null || true
+  mkdir -p "$NGINX_STREAM_DIR" /etc/nginx/streams-available 2>/dev/null || true
   {
     echo "map \$ssl_preread_server_name \$backend {"
     echo "    default                       panel_backend;"
@@ -6682,8 +6692,14 @@ initial_setup() {
     echo "    proxy_timeout 10m;"
     echo "}"
   } > "$SNI_CONF"
+  # Единый источник истины: доступный файл — ссылка на реально включённый.
+  # Так fuse/status/rollback и nginx смотрят на одну и ту же карту.
+  mkdir -p /etc/nginx/streams-available 2>/dev/null || true
+  rm -f /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
+  ln -s "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null || \
+    cp -f "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
 
-  # ПРОВЕРКА: SNI-запись домена панели в nginx — без неё decoy панели (4443)
+  # ПРОВЕРКА: SNI-записи домена панели в nginx — без неё decoy панели (4443)
   # недостижим по домену (сработает только default). Самолечение при наличии.
   if grep -qE "^[[:space:]]*${PANEL_DOMAIN//./\\.}[[:space:]]+panel_backend;" "$SNI_CONF" 2>/dev/null; then
     log "SNI-запись панели в nginx: $PANEL_DOMAIN → panel_backend ✓"
@@ -6911,6 +6927,7 @@ EOF
   ensure_stream_include
   if ! nginx -t 2>/dev/null; then
     err "nginx -t упал:"; nginx -t 2>&1 | tail -5 | sed 's/^/  /'
+    restore_running_services
     return 1
   fi
 
@@ -11370,7 +11387,7 @@ rb_full_rollback() {
     [[ -f "$FW_STATE_DIR/iptables.v6" ]] && ip6tables-restore < "$FW_STATE_DIR/iptables.v6"  2>/dev/null || true
     if [[ "${UFW_WAS_INSTALLED:-0}" == "1" && -f "$FW_STATE_DIR/ufw-config.tar" ]]; then
       tar -xpf "$FW_STATE_DIR/ufw-config.tar" -C / 2>/dev/null || true
-      if [[ "" == "1" ]]; then
+      if [[ "${UFW_WAS_ACTIVE:-0}" == "1" ]]; then
         ufw --force enable >/dev/null 2>&1 || warn "�� ������� �������� UFW"
       else
         ufw --force disable >/dev/null 2>&1 || warn "�� ������� ��������� UFW"
@@ -11930,7 +11947,7 @@ auto_full_setup() {
     # Тип (wildcard/персональный) учтён ВНУТРИ cert_issue: при живом wildcard
     # это no-op (переиспользует его), иначе выпустит персональный.
     if [[ -n "$dom" ]] && { [[ "$net" == "tcp" && "$security" == "tls" ]] || [[ "$proto" == "hysteria" ]]; }; then
-      cert_issue "$dom" || warn "  ИТОГ: серт $dom НЕ выпущен — #${id} (${proto}) не поднимется; доукати позже: Сертификаты → обновить (причина выше)"
+      cert_issue "$dom" || warn "  ИТОГ: серт $dom НЕ выпущен — $name (${proto}) не поднимется; докати позже: Сертификаты → обновить (причина выше)"
     fi
     local remark="${proto}-${transport}"
     [[ "$proto" == "vless" && "$transport" == "tcp"  && "$security" == "reality" ]] && remark="vless-reality"
@@ -12032,7 +12049,7 @@ auto_full_setup() {
 # =====================================================================
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   check_os
-  ensure_deps
+  ensure_deps || { err "Невозможно продолжить без обязательных зависимостей"; exit 1; }
   detect_env
   [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — сервер работает не на свежем ядре. См. п.18 → «Ресурсы»."
 
