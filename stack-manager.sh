@@ -10546,7 +10546,7 @@ stack_audit_readonly() {
   return 0
 }
 
-# п.18 с обёрткой: одиночный прогон или наблюдение каждые 10 сек
+# Наблюдение за стеком: одиночный прогон или обновление каждые 10 сек
 stack_doctor_menu() {
   stack_doctor
   local wm=""
@@ -11937,7 +11937,7 @@ print(line(f"{ngx} nginx  {xui} x-ui  {adg} AdGuard  {f2b} f2b", W))
 print(line(f"👥 инбаунды: {G}{nb}{N}   🔥 decoy-хиты: {Y}{att}{N}   ⛔ баны: {R}{bans}{N}", W))
 print(line(f"🔒 серты: мин. {cs}   💾 диск: {duse}%   📁 {db}", W))
 ufw = f"🚧 UFW {G}active{N}" if ufw_ok == "1" else f"🚧 UFW {R}down{N}"
-print(line(f"{ufw}   🩺 самодиагностика — п.18", W))
+print(line(f"{ufw}   🩺 диагностика: раздел 6", W))
 print(f"{B}└{'─'*W}┘{N}")
 print(f"{D}  └─ ◆ stack-manager · правка: {mtime}{N}")
 PYHDR
@@ -12376,7 +12376,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   check_os
   ensure_deps || { err "Невозможно продолжить без обязательных зависимостей"; exit 1; }
   detect_env
-  [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — сервер работает не на свежем ядре. См. п.18 → «Ресурсы»."
+  [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — сервер работает не на свежем ядре. Откройте раздел 6 → диагностика."
 
   # Первый запуск — предложить pre-install снимок состояния
   if [[ ! -f "$BACKUP_DIR/.pre-install-done" ]]; then
@@ -12405,7 +12405,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   # если серты появились позже установки — дозаписать пути в инбаунды
   sync_inbound_certs
   [[ -f "$WILDCARD_STATE" ]] && WILDCARD_DOMAIN=$(head -n 1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]' || true)
-  # wildcard виден в п.6/п.18 — на старте не шумим
+  # wildcard виден в меню сертификатов и диагностике — на старте не шумим
 
   # ПОРЯДОК ВАЖЕН: сначала ПАНЕЛЬ + её сертификат, потом AdGuard
   # (AdGuard берёт сертификат панели/wildcard для своего https).
