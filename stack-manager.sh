@@ -3280,20 +3280,21 @@ print(f"  tproxy #{iid}: hostname={dom}, серт {'вписан' if os.environ.
 PYTP
   systemctl start x-ui 2>/dev/null || true
   sleep 4
-  # маршрут 443 → tproxy (idempotent UPSERT: upstream есть всегда,
-  # строка домена — всегда АКТУАЛЬНЫЙ tdom; старый домен заменяется)
+  # маршрут 443 → tproxy. Сначала удаляем ВСЕ старые строки этого домена,
+  # затем добавляем ровно одну актуальную запись — это предотвращает conflict
+  # parameter при миграции старого svc-*/inb_* маршрута в tg_backend.
   if [[ -f "$SNI_CONF" ]]; then
     if ! grep -q "upstream tg_backend" "$SNI_CONF"; then
       sed -i "1i upstream tg_backend { server 127.0.0.1:11443; }" "$SNI_CONF" 2>/dev/null || true
     fi
-    if ! grep -qE "^[[:space:]]*${tdom}[[:space:]]+tg_backend;" "$SNI_CONF"; then
-      if grep -qE "^[[:space:]]*[A-Za-z0-9.-]+[[:space:]]+tg_backend;" "$SNI_CONF"; then
-        sed -i -E "s|^([[:space:]]*)[A-Za-z0-9.-]+([[:space:]]+tg_backend;)|\1${tdom}\2|" "$SNI_CONF" 2>/dev/null || true
-      else
-        sed -i "s|^\(    default\)|    ${tdom}              tg_backend;\n\1|" "$SNI_CONF" 2>/dev/null || true
-      fi
-      log "tg web proxy: мап обновлён → $tdom → tg_backend"
-    fi
+    awk -v dom="$tdom" '
+      !($1 == dom && $2 != "") { print }
+    ' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF" || {
+      rm -f "$SNI_CONF.tmp" 2>/dev/null || true
+      warn "tg web proxy: не удалось очистить старые SNI-записи для $tdom"
+    }
+    sni_map_add "$tdom" "tg_backend" || warn "tg web proxy: не удалось добавить SNI-запись $tdom"
+    log "tg web proxy: мап обновлён → $tdom → tg_backend"
   fi
   # доктрина «всё за 443»: 11443 наружу не открываем (и закрываем, если было);
   # UDP-порт здесь — HTTP/3 caddy, наружу не нужен и палится сканерами
