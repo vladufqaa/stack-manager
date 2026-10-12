@@ -54,6 +54,12 @@ CERT_MODE_FILE="/root/stack-backups/cert-mode"
 #   /root/stack-backups/cert-line-<имя>.domains     → SAN этой линии (по строке)
 CERT_LINES_FILE="/root/stack-backups/cert-lines.txt"
 CERT_LINE_FILE_PREFIX="/root/stack-backups/cert-line-"
+# Журнал отката (п.23): что скрипт поменял в панели — то и возвращает
+PANEL_JOURNAL="/root/stack-backups/panel-journal.tsv"
+LISTEN_JOURNAL="/root/stack-backups/inbound-listen.tsv"
+ROWS_JOURNAL="/root/stack-backups/rows-journal.tsv"   # полные строки inbounds/hosts
+JOURNAL_MARK="/root/stack-backups/.panel-journal-started"
+DB_BIN="/usr/bin/sqlite3"
 declare -a CERT_LINES=()
 CERT_MULTI_NAME=""           # динамически = домен панели (cert_multi_name_resolve)
 CERT_DEFER=0
@@ -685,6 +691,301 @@ db_protect_suspend() {
   db_protect_state || return 0
   db_protect_off
   trap 'db_protect_on >/dev/null 2>&1 || true' RETURN
+}
+# =====================================================================
+# ПРАВКА listen ИНБАУНДА (п.2/п.3 отката)
+#   Любая смена listen проходит через эту функцию: она сначала фиксирует
+#   ПРЕЖНЕЕ значение в журнале, и только потом пишет новое. Так откат
+#   возвращает ровно то, что было, и не трогает инбаунды, которых скрипт
+#   не касался. Пустое значение = «по умолчанию 0.0.0.0» (так это хранит
+#   панель) — поэтому «открыть наружу» это '' , а не явный 0.0.0.0.
+# =====================================================================
+db_set_listen() {
+  # $1 = id, $2 = значение ('' | 127.0.0.1 | 0.0.0.0 | что угодно), $3 = journal|direct
+  local id="$1" want="$2" mode="${3:-journal}"
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" ]] && return 1
+  # Значение НЕ ограничиваем списком: в поле может лежать что угодно (в т.ч.
+  # вписанное руками «123.123.12.12»), и откат обязан вернуть именно его.
+  # Единственное требование — отсутствие кавычек и переводов строк, иначе
+  # сломается SQL-литерал (такие значения в listen всё равно нерабочие).
+  if [[ "$want" == *"'"* || "$want" == *$'\n'* ]]; then
+    err "db_set_listen: значение listen содержит кавычку/перевод строки — запись невозможна"
+    return 1
+  fi
+  if [[ "$mode" == "journal" ]]; then
+    panel_journal_note_listen "$id"          # прежнее значение listen
+    panel_journal_capture_row inbounds "$id" # и вся строка целиком
+  fi
+  local sq; sq=$(sql_escape "$want")
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "UPDATE inbounds SET listen='$sq' WHERE id=$id AND COALESCE(listen,'') <> '$sq';" 2>/dev/null || true
+  return 0
+}
+
+# =====================================================================
+# ПОЛНЫЙ СНИМОК СТРОКИ ПЕРЕД ИЗМЕНЕНИЕМ (для отката «ровно как было»)
+#   settings копируется по значениям (panel-journal.tsv), а inbounds/hosts
+#   правятся внутри JSON-полей и строк — там снимаем ВСЮ строку целиком и
+#   при откате возвращаем её дословно (столбцы читаются из схемы в момент
+#   восстановления, поэтому снимок не зависит от версии схемы панели).
+# =====================================================================
+panel_journal_capture_row() {
+  # $1 = inbounds|hosts, $2 = id
+  local kind="$1" id="$2" out="" rc=0
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" ]] && return 0
+  [[ -f "$JOURNAL_MARK" ]] || return 0
+  case "$kind" in inbounds|hosts) ;; *) return 0 ;; esac
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || return 0
+  [[ -s "$ROWS_JOURNAL" ]] && grep -q "^${kind}	${id}	" "$ROWS_JOURNAL" 2>/dev/null && return 0
+  local has=0
+  has=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+        "SELECT COUNT(*) FROM $kind WHERE id=$id;" 2>/dev/null || echo 0)
+  if [[ "$has" == "0" ]]; then
+    printf '%s\t%s\t0\t{}\t%s\n' "$kind" "$id" "$XUI_DB" >> "$ROWS_JOURNAL" 2>/dev/null || true
+    return 0
+  fi
+  out=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+        "SELECT json_object($(inbounds_json_pairs "$kind" "$id")) FROM $kind WHERE id=$id;")
+  rc=$?
+  if [[ $rc -ne 0 || -z "$out" ]]; then
+    # молча терять снимок нельзя: без него откат не вернёт строку
+    warn "journal: не удалось снять снимок строки $kind#$id (код $rc) — откат её не восстановит"
+    return 1
+  fi
+  printf '%s\t%s\t1\t%s\t%s\n' "$kind" "$id" "$out" "$XUI_DB" >> "$ROWS_JOURNAL" 2>/dev/null || true
+  return 0
+}
+
+# "имя", <значение столбца как JSON> для всех столбцов таблицы.
+#   json_extract(col,'$') отдаёт значение с сохранением типа (JSON остаётся
+#   структурой, а не строкой); для скаляров (id/port) extra-клауза CASE просто
+#   отдаёт значение как есть. ВАЖНО: путь именно '$', а не '$.имя' — столбец
+#   сам является JSON-документом, а не объектом с ключом-именем столбца.
+inbounds_json_pairs() {
+  local kind="$1" col parts=""
+  while IFS= read -r col; do
+    [[ -z "$col" ]] && continue
+    [[ -n "$parts" ]] && parts+=","
+    parts+="'$col',(CASE WHEN json_valid(\"$col\") THEN json_extract(\"$col\",'\$') ELSE \"$col\" END)"
+  done < <(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "PRAGMA table_info($kind);" 2>/dev/null | awk -F'|' '{print $2}')
+  [[ -z "$parts" ]] && { printf "'' , NULL"; return 0; }
+  printf '%s' "$parts"
+}
+
+# Обновление строки inbounds с автоматическим снимком для отката
+db_update_inbound() {
+  # $1 = id, $2 = SQL-выражение для SET (например "listen='127.0.0.1'")
+  local id="$1" set_expr="$2" mode="${3:-journal}"
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" || -z "$set_expr" ]] && return 1
+  [[ "$mode" == "journal" ]] && panel_journal_capture_row inbounds "$id"
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET $set_expr WHERE id=$id;" 2>/dev/null || true
+  return 0
+}
+
+# Строка hosts/восстановление всей строки — та же логика для таблицы hosts
+db_capture_hosts() { panel_journal_capture_row hosts "$1"; }
+
+proto_remark() {
+  local proto="$1" stream="${2:-}"
+  case "$proto" in
+    vless) grep -q '"security": *"reality"' <<<"$stream" && echo "reality" || echo "vless" ;;
+    trusttunnel|trust-tunnel) echo "trusttunnel" ;;
+    naive|naiveproxy) echo "naive" ;;
+    mtproto) echo "mtproto" ;;
+    hysteria|hysteria2) echo "hysteria2" ;;
+    qwdtt) echo "qwdtt" ;;
+    csqtt|csqdtt) echo "csqtt" ;;
+    tproxy) echo "webproxy" ;;
+    awg|amneziawg|wireguard) echo "awg" ;;
+    *) echo "$proto" ;;
+  esac
+}
+
+# =====================================================================
+# ЖУРНАЛ ИЗМЕНЕНИЙ ПАНЕЛИ (для честного отката, п.23)
+#   Первая правка каждого объекта фиксирует значение ДО неё; повторные
+#   правки того же объекта в журнал не попадают — при откате вернётся
+#   ровно исходное значение. Объекты, которых скрипт не касался, в журнал
+#   не попадают вообще и откатом не трогаются (п.2 «не трогать чужое»).
+# =====================================================================
+panel_journal_started() {
+  [[ -s "$PANEL_JOURNAL" || -s "$LISTEN_JOURNAL" || -s "$ROWS_JOURNAL" || -f "$JOURNAL_MARK" ]]
+}
+
+panel_journal_note_settings() {
+  # $1 = key (settings.key), $2 = новое значение (для сравнения)
+  local k="$1" newv="$2" cur=""
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
+  # журнал ведём только когда есть точка отсчёта: иначе на уже настроенном
+  # стеке «прежнее» значение — это результат работы скрипта, а не «до него»
+  [[ -f "$JOURNAL_MARK" ]] || return 0
+  [[ -z "$k" ]] && return 0
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || return 0
+  # первая правка ключа уже зафиксирована — повторно не пишем (идемпотентно)
+  [[ -s "$PANEL_JOURNAL" ]] && grep -q "^settings	${k}	" "$PANEL_JOURNAL" 2>/dev/null && return 0
+  cur=$("$DB_BIN" -cmd ".timeout 3000" "$XUI_DB" \
+        "SELECT value FROM settings WHERE key='$k' LIMIT 1;" 2>/dev/null || true)
+  [[ "$cur" == "$newv" ]] && return 0         # не изменится — писать нечего
+  # NULL/отсутствие строки и пустая строка — разные состояния, различаем
+  if [[ -z "$cur" ]]; then
+    cur=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+          "SELECT COUNT(*) FROM settings WHERE key='$k';" 2>/dev/null || echo 0)
+    [[ "$cur" == "0" ]] && cur="__NULL__" || cur="__EMPTY__"
+  fi
+  printf 'settings\t%s\t%s\t%s\n' "$k" "$cur" "$XUI_DB" >> "$PANEL_JOURNAL" 2>/dev/null || true
+}
+
+panel_journal_note_listen() {
+  # $1 = id инбаунда (первую правку listen фиксируем, повторные — нет)
+  local id="$1" cur=""
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" ]] && return 0
+  [[ -f "$JOURNAL_MARK" ]] || return 0
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || return 0
+  [[ -s "$LISTEN_JOURNAL" ]] && grep -q "^${id}	" "$LISTEN_JOURNAL" 2>/dev/null && return 0
+  cur=$("$DB_BIN" -cmd ".timeout 3000" "$XUI_DB" \
+        "SELECT COALESCE(listen,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  if [[ -z "$cur" ]]; then
+    cur=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+          "SELECT COUNT(*) FROM inbounds WHERE id=$id AND listen IS NULL;" 2>/dev/null || echo 0)
+    [[ "$cur" == "0" ]] && cur="__EMPTY__" || cur="__NULL__"
+  fi
+  printf '%s\t%s\t%s\n' "$id" "$cur" "$XUI_DB" >> "$LISTEN_JOURNAL" 2>/dev/null || true
+}
+
+# Применить журнал в обратном порядке: вернуть старые значения.
+# $1 = 1 — тихо (журнал отката, без интерактива)
+panel_journal_apply() {
+  local quiet="${1:-0}" n_set=0 n_listen=0 n_rows=0 skipped=0
+  local key val db id set_clause
+  if [[ -s "$PANEL_JOURNAL" ]]; then
+    db_protect_off
+    while IFS=$'\t' read -r _kind key val db; do
+      [[ -z "$key" || -z "$db" || ! -f "$db" ]] && { skipped=$((skipped+1)); continue; }
+      case "$val" in
+        __NULL__)
+          "$DB_BIN" "$db" "DELETE FROM settings WHERE key='$key';" >/dev/null 2>&1 \
+            && n_set=$((n_set+1)) || skipped=$((skipped+1)) ;;
+        *)
+          local sq=""
+          if [[ "$val" == "__EMPTY__" ]]; then sq=""; else sq=$(sql_escape "$val"); fi
+          "$DB_BIN" "$db" "UPDATE settings SET value='$sq' WHERE key='$key';" >/dev/null 2>&1 \
+            && n_set=$((n_set+1)) || skipped=$((skipped+1)) ;;
+      esac
+    done < "$PANEL_JOURNAL"
+  fi
+  if [[ -s "$ROWS_JOURNAL" ]]; then
+    db_protect_off
+    local rf="" rsql=""
+    rf=$(mktemp /tmp/stack-rows.XXXXXX 2>/dev/null || true)
+    if [[ -n "$rf" ]]; then
+      rsql="$rf.sql"
+      # Готовим SQL по снимкам строк. Пишем во ФАЙЛ явным utf-8: через
+      # sys.stdout нельзя — скрипт выставляет LC_ALL=C, и кириллица в значениях
+      # роняет python с UnicodeEncodeError (откат при этом молча ничего не делал).
+      # Значения экранируются как JSON-строки, поэтому возврат дословный.
+      command -v python3 >/dev/null 2>&1 && python3 - "$ROWS_JOURNAL" "$rsql" >/dev/null 2>"$rf.err" <<'PYROWS'
+import json, os, sqlite3, sys
+
+path, outpath = sys.argv[1], sys.argv[2]
+
+def lit(v):
+    # В SQL-литерал строку отдаём В ОДИНАРНЫХ кавычках: json.dumps даёт двойные,
+    # а SQLite считает "..." идентификатором и падает «unrecognized token».
+    # Одинарные кавычки внутри значения удваиваем — так требует SQL.
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, (int, float)):
+        return json.dumps(v)
+    if isinstance(v, (dict, list)):
+        # json.loads разобрал JSON-колонку в объект — назад в JSON, а НЕ через
+        # str(): str(dict) даёт одинарные кавычки и пишет в БД мусор вместо JSON
+        return "'" + json.dumps(v, ensure_ascii=False).replace("'", "''") + "'"
+    return "'" + str(v).replace("'", "''") + "'"
+
+stmts = []
+with open(path, encoding="utf-8", errors="replace") as fh:
+    lines = [l.rstrip("\n") for l in fh if l.strip()]
+# обратный порядок: последняя зафиксированная строка восстанавливается первой
+for ln in reversed(lines):
+    parts = ln.split("\t")
+    if len(parts) < 4:
+        continue
+    kind, rid, existed, js = parts[0], parts[1], parts[2], parts[3]
+    db = parts[4] if len(parts) > 4 else ""
+    if kind not in ("inbounds", "hosts") or not db or not os.path.exists(db):
+        continue
+    try:
+        data = json.loads(js) if js else {}
+    except Exception:
+        data = {}
+    if existed != "1" or not data:
+        stmts.append("DELETE FROM %s WHERE id=%s;" % (kind, rid))
+        continue
+    try:
+        con = sqlite3.connect(db, timeout=10)
+        cols = [r[1] for r in con.execute("PRAGMA table_info(%s)" % kind).fetchall()]
+        con.close()
+    except Exception:
+        continue
+    use = [c for c in cols if c in data]
+    if not use:
+        continue
+    col_sql = ",".join('"%s"' % c.replace('"', '""') for c in use)
+    vals = ",".join(lit(data[c]) for c in use)
+    stmts.append("INSERT OR REPLACE INTO %s (%s) VALUES (%s);" % (kind, col_sql, vals))
+with open(outpath, "w", encoding="utf-8", errors="replace") as fo:
+    fo.write("\n".join(stmts) + ("\n" if stmts else ""))
+PYROWS
+      if [[ -s "$rsql" ]]; then
+        # один вызов sqlite3 на все строки: быстрее и не теряет ошибки по одной
+        if sqlite3 -cmd ".timeout 3000" "$XUI_DB" < "$rsql" >/dev/null 2>&1; then
+          n_rows=$(grep -c . "$rsql" 2>/dev/null || echo 0)
+        else
+          warn "journal: SQL восстановления строк не выполнился целиком (см. вывод sqlite3 вручную)"
+          skipped=$((skipped+1))
+        fi
+      elif [[ -s "$rf.err" ]]; then
+        # молчать нельзя: это ровно тот случай, когда откат «прошёл», а строки не вернулись
+        warn "journal: не удалось подготовить восстановление строк inbounds/hosts:"
+        head -3 "$rf.err" 2>/dev/null | sed 's/^/    /'
+        skipped=$((skipped+1))
+      fi
+      rm -f "$rf" "$rsql" "$rf.err" 2>/dev/null || true
+    fi
+  fi
+  if [[ -s "$LISTEN_JOURNAL" ]]; then
+    db_protect_off
+    while IFS=$'\t' read -r id val db; do
+      [[ -z "$id" || -z "$db" || ! -f "$db" ]] && { skipped=$((skipped+1)); continue; }
+      case "$val" in
+        __NULL__)  set_clause="listen=NULL" ;;
+        __EMPTY__) set_clause="listen=''" ;;
+        *)         set_clause="listen='$(sql_escape "$val")'" ;;
+      esac
+      "$DB_BIN" "$db" "UPDATE inbounds SET $set_clause WHERE id=$id;" >/dev/null 2>&1 \
+        && n_listen=$((n_listen+1)) || skipped=$((skipped+1))
+    done < "$LISTEN_JOURNAL"
+    unset set_clause
+  fi
+  if [[ "$quiet" != "1" ]]; then
+    log "Журнал отката: настроек панели восстановлено $n_set, listen инбаундов $n_listen, строк inbounds/hosts $n_rows${skipped:+, пропущено: $skipped}"
+  fi
+  [[ "$n_set" -gt 0 || "$n_listen" -gt 0 || "$n_rows" -gt 0 || "$skipped" -gt 0 ]]
+}
+
+panel_journal_clear() {
+  rm -f "$PANEL_JOURNAL" "$LISTEN_JOURNAL" "$ROWS_JOURNAL" "$JOURNAL_MARK" 2>/dev/null || true
+}
+
+# Панель держит состояние в памяти — настройки пишем только при остановленной
+# панели, иначе при рестарте панель перетрёт правку своим состоянием.
+stop_xui_for_edit() {
+  if systemctl is-active --quiet x-ui 2>/dev/null; then
+    systemctl stop x-ui >/dev/null 2>&1 || true
+    sleep 1
+  fi
 }
 
 proto_remark() {
@@ -7550,6 +7851,41 @@ absent_in_list() {  # $1 = список путей, $2 = путь
   return 0
 }
 
+# Атомарная замена каталога из снимка: копируем во временное место, затем mv на
+# место старого. Прежний каталог удаляется ТОЛЬКО после успешной установки нового;
+# если cp/mv не удался — текущий конфиг остаётся нетронутым (раньше было
+# «rm -rf + cp», и провал cp оставлял систему вообще без конфига).
+safe_swap_dir() {   # $1 = источник (из снимка), $2 = целевой каталог
+  local src="$1" dst="$2" t old
+  [[ -d "$src" ]] || return 0
+  t=$(mktemp -d "${dst}.restore.XXXXXX" 2>/dev/null) || { warn "mktemp для $dst не удался — пропускаю"; return 1; }
+  if ! cp -a "$src" "$t/restore" 2>/dev/null; then
+    rm -rf "$t" 2>/dev/null || true
+    warn "копирование $src не удалось — $dst не тронут"
+    return 1
+  fi
+  if [[ -e "$dst" ]]; then
+    old="${dst}.old.$$"
+    if ! mv "$dst" "$old" 2>/dev/null; then
+      rm -rf "$t" 2>/dev/null || true
+      warn "не удалось убрать старый $dst — оставляю как есть"
+      return 1
+    fi
+    if mv "$t/restore" "$dst" 2>/dev/null; then
+      rm -rf "$old" 2>/dev/null || true
+    else
+      mv "$old" "$dst" 2>/dev/null || true
+      rm -rf "$t" 2>/dev/null || true
+      warn "не удалось поставить новый $dst — откат к прежнему"
+      return 1
+    fi
+  else
+    mv "$t/restore" "$dst" 2>/dev/null || { rm -rf "$t" 2>/dev/null || true; return 1; }
+  fi
+  rm -rf "$t" 2>/dev/null || true
+  return 0
+}
+
 restore_pre_install_snapshot() {
   line; echo -e "${B}   ВОССТАНОВЛЕНИЕ ИЗ PRE-INSTALL СНИМКА${N}"; line
   local snaps
@@ -7608,8 +7944,9 @@ restore_pre_install_snapshot() {
     [[ -f "$chosen/nginx/nginx.conf" ]] && cp -a "$chosen/nginx/nginx.conf" /etc/nginx/nginx.conf 2>/dev/null
     for d in sites-available sites-enabled streams-available streams-enabled snippets conf.d; do
       if [[ -d "$chosen/nginx/$d" ]]; then
-        rm -rf "/etc/nginx/$d"
-        cp -a "$chosen/nginx/$d" "/etc/nginx/" 2>/dev/null || true
+        safe_swap_dir "$chosen/nginx/$d" "/etc/nginx/$d" \
+          && log "  /etc/nginx/$d восстановлен" \
+          || warn "  /etc/nginx/$d НЕ восстановлен (см. выше)"
       fi
     done
     log "  /etc/nginx восстановлен"
@@ -7619,16 +7956,14 @@ restore_pre_install_snapshot() {
     [[ -f "$chosen/ufw/iptables.v4" ]] && iptables-restore  < "$chosen/ufw/iptables.v4" 2>/dev/null && log "  iptables v4 восстановлены"
     [[ -f "$chosen/ufw/iptables.v6" ]] && ip6tables-restore < "$chosen/ufw/iptables.v6" 2>/dev/null || true
     if [[ -d "$chosen/ufw/etc-ufw" ]]; then
-      rm -rf /etc/ufw
-      cp -a "$chosen/ufw/etc-ufw" /etc/ufw 2>/dev/null || true
+      safe_swap_dir "$chosen/ufw/etc-ufw" /etc/ufw || warn "  /etc/ufw НЕ восстановлен"
       [[ -f "$chosen/ufw/ufw" ]] && cp -a "$chosen/ufw/ufw" /etc/default/ufw 2>/dev/null || true
       log "  /etc/ufw восстановлен"
     fi
   fi
 
   if [[ -d "$chosen/fail2ban/etc-fail2ban" ]]; then
-    rm -rf /etc/fail2ban
-    cp -a "$chosen/fail2ban/etc-fail2ban" /etc/fail2ban 2>/dev/null || true
+    safe_swap_dir "$chosen/fail2ban/etc-fail2ban" /etc/fail2ban || warn "  /etc/fail2ban НЕ восстановлен"
     log "  /etc/fail2ban восстановлен"
   fi
 
@@ -7641,8 +7976,8 @@ restore_pre_install_snapshot() {
   fi
 
   if [[ -d "$chosen/letsencrypt" ]]; then
-    [[ -d "$chosen/letsencrypt/renewal" ]] && { rm -rf /etc/letsencrypt/renewal; cp -a "$chosen/letsencrypt/renewal" /etc/letsencrypt/ 2>/dev/null; }
-    [[ -d "$chosen/letsencrypt/renewal-hooks" ]] && { rm -rf /etc/letsencrypt/renewal-hooks; cp -a "$chosen/letsencrypt/renewal-hooks" /etc/letsencrypt/ 2>/dev/null; }
+    safe_swap_dir "$chosen/letsencrypt/renewal" /etc/letsencrypt/renewal || warn "  letsencrypt/renewal НЕ восстановлен"
+    safe_swap_dir "$chosen/letsencrypt/renewal-hooks" /etc/letsencrypt/renewal-hooks || warn "  letsencrypt/renewal-hooks НЕ восстановлен"
     [[ -f "$chosen/letsencrypt/cli.ini" ]] && cp -a "$chosen/letsencrypt/cli.ini" /etc/letsencrypt/ 2>/dev/null
     log "  letsencrypt renewal восстановлен"
   fi
@@ -7650,36 +7985,8 @@ restore_pre_install_snapshot() {
   [[ -f "$chosen/stack-decoy" ]] && cp -a "$chosen/stack-decoy" /etc/logrotate.d/ 2>/dev/null || true
 
   if [[ -f "$chosen/AdGuardHome.yaml" && -n "$ADG_CONFIG" ]]; then
-    cp -a "$chosen/AdGuardHome.yaml" "$ADG_CONFIG" && log "  AdGuardHome.yaml восстановлен"
+    cp -a "$chosen/AdGuardHome.yaml" "$ADG_CONFIG" 2>/dev/null && log "  AdGuardHome.yaml восстановлен"
   fi
-
-  # ── ПОЛНЫЙ откат: чего нет в снимке — того до стека не существовало. ──
-  # Убираем артефакты стека, иначе остаётся полу-настроенный «зомби»-стек:
-  # п.1 пишет «уже всё настроено», п.10 видит чужие SAN-файлы и т.д.
-  if [[ ! -f "$chosen/x-ui.db" ]]; then
-    rm -f "$XUI_DB" /etc/x-ui/x-ui.db /usr/local/x-ui/x-ui.db /opt/x-ui/x-ui.db 2>/dev/null || true
-    rm -f /root/panel-credentials.txt 2>/dev/null || true
-    log "  x-ui.db убран (в снимке его не было) — панель поставит п.1"
-  fi
-  if [[ -d "$chosen/nginx" && ! -f "$chosen/nginx/streams-available/sni-router.conf" ]]; then
-    rm -f /etc/nginx/streams-available/sni-router.conf /etc/nginx/streams-enabled/sni-router.conf 2>/dev/null || true
-    log "  sni-router.conf убран (в снимке его не было)"
-  fi
-  [[ -f "$chosen/nginx/sites-available/stack.conf" ]] || rm -f "$STACK_CONF" 2>/dev/null || true
-  if [[ ! -f "$chosen/systemd/stack-heal.timer" ]]; then
-    systemctl disable --now stack-heal.timer 2>/dev/null || true
-    rm -f /etc/systemd/system/stack-heal.timer /etc/systemd/system/stack-heal.service 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
-    log "  таймер самолечения убран (в снимке его не было)"
-  fi
-  if [[ -d "$chosen/letsencrypt" && ! -d "$chosen/letsencrypt/live" ]]; then
-    rm -rf /etc/letsencrypt/live /etc/letsencrypt/archive 2>/dev/null || true
-    log "  серты убраны (в снимке их не было) — п.1 выпустит заново"
-  fi
-  # состояние подсистем стека в снимок не входит — после полного отката ему не место
-  rm -f /etc/letsencrypt/stack-domains.txt /root/stack-backups/cert-lines.txt \
-        /root/stack-backups/cert-mode /root/stack-backups/wildcard-domain \
-        /root/stack-backups/cert-line-*.domains /root/stack-frozen.txt 2>/dev/null || true
 
   log "Запуск сервисов…"
   systemctl start nginx 2>/dev/null || true
@@ -10393,48 +10700,309 @@ rb_remove_nginx() {
 }
 
 # --- 23.6 Полный откат (тихо) -----------------------------------------
+stack_preinstall_db() {
+  local d=""
+  while IFS= read -r d; do
+    [[ -z "$d" ]] && continue
+    [[ -f "$d/x-ui.db" ]] && { printf '%s\n' "$d/x-ui.db"; return 0; }
+  done < <(ls -1dt "$BACKUP_DIR"/pre-install-* 2>/dev/null | grep -v '\.tar\.gz$' || true)
+  return 1
+}
+
+# Возврат НАСТРОЕК ПАНЕЛИ (settings) к значениям из снимка «до скрипта».
+# Трогаются только ключи web*/sub* — инбаунды, пользователи и прочее не читаются
+# и не пишутся. Хост не восстанавливаем (машина та же, а чужие webListen/webPort
+# сломали бы доступ к панели).
+stack_restore_panel_from_snapshot() {
+  local snap_db="$1" sdb="$2"
+  [[ -z "$snap_db" || ! -f "$snap_db" ]] && { warn "Снимок x-ui.db не найден — настройки панели не восстановлены"; return 1; }
+  [[ -z "$sdb" || ! -f "$sdb" ]] && { warn "x-ui.db не найден — настройки панели не восстановлены"; return 1; }
+  command -v python3 >/dev/null 2>&1 || { warn "python3 недоступен — настройки панели не восстановлены"; return 1; }
+  command -v "$DB_BIN" >/dev/null 2>&1 || { warn "sqlite3 недоступен — настройки панели не восстановлены"; return 1; }
+  local res="" res_file=""
+  res_file=$(mktemp /tmp/stack-rst.XXXXXX 2>/dev/null) || return 1
+  python3 - "$snap_db" "$sdb" > /dev/null 2> "$res_file" <<'PYRST2'
+import os, sqlite3, sys
+snap_path, live_path = sys.argv[1], sys.argv[2]
+KEYS = ("webDomain", "webListen", "webPort", "webBasePath", "subDomain", "subListen",
+        "subPort", "subPath", "subURI", "webCertFile", "webKeyFile",
+        "subCertFile", "subKeyFile")
+def read(path):
+    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=5)
+    rows = dict(con.execute("SELECT key, value FROM settings").fetchall())
+    con.close()
+    return rows
+try:
+    snap = read(snap_path)
+except Exception:
+    sys.exit(0)
+try:
+    con = sqlite3.connect(live_path, timeout=10)
+    cur = con.cursor()
+    cur.execute("PRAGMA busy_timeout=5000")
+    cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+    # Настройки, значение которых — путь к СУЩЕСТВУЮЩЕМУ файлу. Если в снимке
+    # путь мёртвый, а в панели сейчас рабочий серт — оставляем рабочий: иначе
+    # откат снимает HTTPS с панели («панель работает по обычному HTTP»).
+    FILE_KEYS = ("webCertFile", "webKeyFile", "subCertFile", "subKeyFile")
+
+    def alive(v):
+        if not v or not str(v).startswith("/"):
+            return False
+        return os.path.isfile(str(v))
+
+    cur_keys = dict(cur.execute("SELECT key, value FROM settings").fetchall())
+    applied, kept = [], []
+    for k in KEYS:
+        if k not in snap:
+            continue
+        old = snap[k]
+        now = cur_keys.get(k)
+        if k in FILE_KEYS and not alive(old) and alive(now):
+            kept.append(k)            # не ломаем работающий серт панели
+            continue
+        if now == old and k in cur_keys:
+            continue
+        if k in cur_keys:
+            cur.execute("UPDATE settings SET value=? WHERE key=?", (old, k))
+        else:
+            cur.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (k, old))
+        applied.append(k)
+    con.commit()
+    con.close()
+except Exception:
+    sys.exit(1)
+sys.stderr.write("RESTORED:%d:%s\nKEPT:%d:%s\n" % (
+    len(applied), ",".join(applied) if applied else "-",
+    len(kept), ",".join(kept) if kept else "-"))
+PYRST2
+  res=$(cat "$res_file" 2>/dev/null || true)
+  rm -f "$res_file" 2>/dev/null || true
+  [[ -z "$res" ]] && { warn "не удалось прочитать снимок — настройки панели не восстановлены"; return 1; }
+  local rline="" kline=""
+  rline=$(grep -m1 '^RESTORED:' <<<"$res" || true)
+  kline=$(grep -m1 '^KEPT:' <<<"$res" || true)
+  if [[ -n "$rline" ]]; then
+    log "Настройки панели из снимка: восстановлено полей ${rline#RESTORED:} "
+  else
+    warn "Настройки панели: снимок прочитан, но применять было нечего"
+  fi
+  if [[ -n "$kline" ]]; then
+    local kn="${kline#KEPT:}"
+    if [[ "${kn%%:*}" != "0" ]]; then
+      # серт панели не тронули: в снимке путь мёртвый, а в панели рабочий
+      log "  сохранён рабочий серт панели (в снимке путь нерабочий): ${kn#*:}"
+    fi
+  fi
+  return 0
+}
+
+# Снять «состояние стека»: маркеры, флаги, триггеры защиты БД, журналы.
+#   $1 = prompt — спрашивать по группам с необратимыми данными (1) или тихо (0)
+# Сертификаты Let's Encrypt и AdGuard Home НЕ трогаются — это и раньше было явно.
+rb_wipe_stack_state() {
+  local prompt="${1:-0}" go="" n=0
+  # 1) журнал изменений: вернуть то, что скрипт правил в панели (п.2/п.3)
+  if panel_journal_started; then
+    log "Возврат настроек панели по журналу изменений (п.2/п.3)…"
+    panel_journal_apply 1 || warn "  журнал применён частично (файлы смотри в $BACKUP_DIR)"
+  fi
+  panel_journal_clear
+
+  # 2) точка отсчёта «первого запуска»: без неё скрипт считает стек собранным (п.1)
+  local -a wipe=(
+    "$BACKUP_DIR/.pre-install-done"
+    "$FROZEN_FILE"
+    "$CERT_MODE_FILE"
+    "$CERT_LINES_FILE"
+    "$WILDCARD_STATE"
+    /root/panel-credentials.txt
+    /root/adguard-credentials.txt
+    /root/.stack-src
+  )
+  local f
+  for f in "${wipe[@]}"; do
+    rm -f "$f" 2>/dev/null && { n=$((n+1)); log "  снято: $f"; }
+  done
+  rm -f "$CERT_LINE_FILE_PREFIX"*.domains 2>/dev/null || true
+
+  # 3) триггеры защиты БД + вспомогательные таблицы (ставятся скриптом)
+  if [[ -n "$XUI_DB" && -f "$XUI_DB" ]] && db_protect_state; then
+    db_protect_remove && log "  защита БД: триггеры и hosts_shadow сняты"
+  fi
+  # Файлы линий сертов: удаляем по префиксу, т.к. имена линий заранее неизвестны
+  rm -f "$CERT_LINE_FILE_PREFIX"*.domains 2>/dev/null || true
+  # Триггеры, которые ставит ensure_shareonly_triggers: пересоздаются при
+  # следующей установке, зато новая установка не получит «УЖЕ СУЩЕСТВУЕТ»
+  if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+    local _tg=""
+    while IFS= read -r _tg; do
+      [[ -n "$_tg" ]] && sqlite3 "$XUI_DB" "DROP TRIGGER IF EXISTS \"$_tg\";" 2>/dev/null || true
+    done < <(sqlite3 "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'lucx_shareonly%';" 2>/dev/null || true)
+  fi
+
+  # 4) конфиги и данные прежней установки (только своё)
+  local -a data=(
+    /etc/fail2ban/jail.d/decoy-login.local
+    /etc/fail2ban/filter.d/decoy-login.conf
+    /etc/logrotate.d/stack-decoy
+  )
+  [[ -n "${DECOY_LOG_ACCESS:-}" ]] && data+=("$DECOY_LOG_ACCESS")
+  for f in "${data[@]}"; do
+    rm -f "$f" 2>/dev/null || true
+  done
+  [[ -n "${DECOY_LOGIN_DIR:-}" && "$DECOY_LOGIN_DIR" == /var/www/* ]] && rm -rf "$DECOY_LOGIN_DIR" 2>/dev/null || true
+  rm -rf /var/www/decoy-[0-9]* 2>/dev/null || true
+
+  # 5) данные, которые мог править пользователь — спрашиваем отдельно
+  local cert_domains="/etc/letsencrypt/stack-domains.txt"
+  if [[ -f "$cert_domains" ]]; then
+    if [[ "$prompt" == "1" && -t 0 ]]; then
+      askyn go "Списки доменов сертификатов ($cert_domains и cert-lines*.domains) тоже снять?" "n"
+    else
+      go=false
+    fi
+    if [[ "$go" == true ]]; then
+      rm -f "$cert_domains" 2>/dev/null || true
+      log "  снято: $cert_domains"
+    else
+      warn "  оставлено: $cert_domains (список доменов сертификатов)"
+    fi
+  fi
+  if [[ -d /root/stack-backups ]]; then
+    local old_ans
+    old_ans=$(find /root/stack-backups -maxdepth 1 -name 'ans-auto-*.txt' 2>/dev/null | wc -l)
+    if [[ "${old_ans:-0}" -gt 0 ]]; then
+      if [[ "$prompt" == "1" && -t 0 ]]; then
+        askyn go "Удалить сохранённые файлы автоответов установки ($old_ans шт.)?" "y"
+      else
+        go=true
+      fi
+      [[ "$go" == true ]] && rm -f /root/stack-backups/ans-auto-*.txt 2>/dev/null || true
+    fi
+  fi
+  rm -f /root/ans-auto-*.txt 2>/dev/null || true
+  log "Состояние стека снято (файлов и записей: $n + журнал)"
+  return 0
+}
+
+# Полный сброс «состояния стека» + возврат настроек панели из снимка.
+# $1 = 1 — спрашивать по группам (ручной пункт меню), 0 — тихо (полный откат)
+stack_reset_state() {
+  local prompt="${1:-1}"
+  local snap_db="" sdb=""
+  snap_db=$(stack_preinstall_db 2>/dev/null || true)
+  sdb="${XUI_DB:-}"
+  [[ -f "$sdb" ]] || sdb="/etc/x-ui/x-ui.db"
+  if [[ -z "$snap_db" ]]; then
+    warn "Снимок «до скрипта» не найден:"
+    warn "  • «первичная настройка уже выполнена» больше не появится, маркеры сняты;"
+    warn "  • но исходные настройки панели (домен, порты, пути) вернуть не из чего —"
+    warn "    задайте их в п.1 или восстановите снимок вручную (п.24)."
+  fi
+  local xui_was=""
+  if systemctl is-active --quiet x-ui 2>/dev/null; then
+    xui_was=1; stop_xui_for_edit
+  fi
+  # 1) маркеры, флаги, журнал изменений и данные прежней установки
+  rb_wipe_stack_state "$prompt"
+  # 2) исходные настройки панели из снимка «до скрипта»
+  if [[ -n "$snap_db" ]]; then
+    stack_restore_panel_from_snapshot "$snap_db" "$sdb"
+  fi
+  [[ -n "$xui_was" ]] && systemctl start x-ui >/dev/null 2>&1 || true
+  return 0
+}
+
+# --- 23.0 Снять состояние стека (п.1/п.2/п.3 отката, отдельным пунктом) --
+rb_reset_state_menu() {
+  line; echo -e "${B}   СНЯТЬ СОСТОЯНИЕ СТЕКА${N}"; line
+  echo "  Возвращает панель и систему к состоянию «скрипт ещё не запускался»:"
+  echo "    • listen инбаундов — как было до правок скрипта (только то, что он менял)"
+  echo "    • настройки панели (домен, порты, пути, серты панели) — из снимка «до скрипта»"
+  echo "    • маркеры стека: .pre-install-done, заморозка, режим/линии сертов,"
+  echo "      wildcard-флаг, креды панели и AdGuard, URL самообновления"
+  echo "    • триггеры защиты БД и служебные таблицы (hosts_shadow, sm_pending)"
+  echo "    • jail/filter decoy-login, decoy-логи, login-шаблоны"
+  echo
+  echo "  ${G}НЕ трогается:${N} инбаунды и клиенты панели, AdGuard Home,"
+  echo "  серты Let's Encrypt, снимки в /root/stack-backups/pre-install-*."
+  echo "  Конфиги nginx (stack.conf, sni-router.conf) снимаются пунктами 4–5."
+  echo
+  local snap_db=""
+  snap_db=$(stack_preinstall_db 2>/dev/null || true)
+  if [[ -n "$snap_db" ]]; then
+    log "Снимок «до скрипта»: $snap_db"
+  else
+    warn "Снимок «до скрипта» не найден — настройки панели вернуть не из чего."
+  fi
+  local go=""
+  askyn go "Выполнить?" "n"
+  [[ "$go" == true ]] || { log "Отменено"; pause; return 0; }
+  audit "rollback: снятие состояния стека"
+  systemctl stop x-ui 2>/dev/null || true
+  stack_reset_state 1
+  systemctl start x-ui 2>/dev/null || true
+  log "Готово. Панель: настройки и listen возвращены, маркеры стека сняты."
+  log "  Проверить: п.1 не должен писать «первичная настройка уже выполнена»."
+  pause
+}
+
 rb_full_rollback() {
   line; echo -e "${R}   ПОЛНЫЙ ОТКАТ СТЕКА${N}"; line
   echo "  Будет выполнено (без вопросов, по шагам):"
   echo "    1) Бэкап x-ui.db и nginx-конфигов стека"
   echo "    2) Удаление служб и интеграций (stack-heal, decoy-login jail, certbot hook)"
   echo "    3) Удаление конфигов и каталогов стека"
-  echo "    4) Открытие панели/подписок/инбаундов наружу (0.0.0.0)"
-  echo "    5) UFW: восстановление из снимка (если есть), иначе reset + открытие слушающегося"
-  echo "    6) Удаление nginx (пакет + конфиги)"
+  echo "    4) Возврат состояния панели: настройки из снимка «до скрипта»,"
+  echo "       listen инбаундов — как было, снятие маркеров стека (п.1/п.2/п.3)"
+  echo "    5) Открытие панели/подписок/инбаундов наружу (значение по умолчанию)"
+  echo "    6) UFW: восстановление из снимка (если есть), иначе reset + открытие слушающегося"
+  echo "    7) Удаление nginx (пакет + конфиги)"
   echo
-  echo "  ${G}НЕ трогается:${N} AdGuard Home, серты Let's Encrypt в /etc/letsencrypt/live/, x-ui.db."
+  echo "  ${G}НЕ трогается:${N} AdGuard Home, серты Let's Encrypt в /etc/letsencrypt/live/, инбаунды и клиенты панели."
+  echo "  Инбаунды, созданные скриптом, остаются в панели — удалять их можно п.3."
   echo
   local sure=""
   ask sure "Для подтверждения введи YES" "" '^YES$'
   [[ "$sure" == "YES" ]] || { log "Отменено"; pause; return 0; }
   audit "rollback: ПОЛНЫЙ ОТКАТ СТЕКА (silent)"
 
-  log "[1/6] Бэкап…"
+  log "[1/7] Бэкап…"
   auto_backup_stack >/dev/null 2>&1 || true
 
-  log "[2/6] Службы и интеграции…"
+  log "[2/7] Службы и интеграции…"
   uninstall_heal_timer >/dev/null 2>&1 || true
   rm -f /etc/fail2ban/jail.d/decoy-login.local /etc/fail2ban/filter.d/decoy-login.conf 2>/dev/null || true
   rm -f /etc/letsencrypt/renewal-hooks/deploy/stack-cert-mirror.sh 2>/dev/null || true
   systemctl restart fail2ban >/dev/null 2>&1 || true
 
-  log "[3/6] Конфиги и каталоги стека…"
+  log "[3/7] Конфиги и каталоги стека…"
   rm -f /etc/nginx/sites-enabled/stack.conf /etc/nginx/sites-available/stack.conf 2>/dev/null || true
   rm -f /etc/nginx/streams-enabled/sni-router.conf /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
   rm -f /etc/nginx/snippets/decoy-headers.conf /etc/logrotate.d/stack-decoy 2>/dev/null || true
   rm -rf /var/www/panel-decoy /var/www/decoy-templates /var/www/decoy-login 2>/dev/null || true
-  rm -rf /var/www/decoy-* 2>/dev/null || true
+  rm -rf /var/www/decoy-[0-9]* /var/www/decoy-login 2>/dev/null || true
 
-  log "[4/6] Открытие портов наружу…"
+  log "[4/7] Состояние панели: настройки, listen инбаундов, маркеры стека…"
+  # ПАНЕЛЬ ОСТАНОВЛЕНА: stack_reset_state пишет в БД только при мёртвой панели,
+  # иначе панель перетрёт правки своим состоянием при рестарте (см. п.1/п.2/п.3).
   systemctl stop x-ui 2>/dev/null || true
-  xui_set_setting webListen '0.0.0.0'
-  xui_set_setting subListen '0.0.0.0'
-  sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-    "UPDATE inbounds SET listen='0.0.0.0' WHERE COALESCE(listen,'') IN ('127.0.0.1','::1');" 2>/dev/null || true
+  stack_reset_state 0 || warn "  состояние панели возвращено не полностью (см. вывод выше)"
+
+  log "[5/7] Открытие портов наружу (значение по умолчанию панели)…"
+  # '' для панели == 0.0.0.0: пишем именно «пусто», как это хранила панель до
+  # скрипта, а не явный 0.0.0.0 (иначе откат меняет то, чего не менял — п.3).
+  xui_set_setting webListen ''
+  xui_set_setting subListen ''
+  local _lid
+  while IFS= read -r _lid; do
+    [[ -n "$_lid" ]] && db_set_listen "$_lid" '' direct
+  done < <(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+           "SELECT id FROM inbounds WHERE COALESCE(listen,'') IN ('127.0.0.1','::1');" 2>/dev/null || true)
   systemctl start x-ui 2>/dev/null || true
 
-  log "[5/6] UFW…"
+  log "[6/7] UFW…"
   # в полном откате действуем тихо: если снимок есть — восстанавливаем его логику
   # без интерактивного запроса (restore_firewall_state спрашивает — обходим)
   if [[ -f "$FW_STATE_DIR/saved" ]]; then
@@ -10443,7 +11011,11 @@ rb_full_rollback() {
     [[ -f "$FW_STATE_DIR/iptables.v6" ]] && ip6tables-restore < "$FW_STATE_DIR/iptables.v6"  2>/dev/null || true
     if [[ "${UFW_WAS_INSTALLED:-0}" == "1" && -f "$FW_STATE_DIR/ufw-config.tar" ]]; then
       tar -xpf "$FW_STATE_DIR/ufw-config.tar" -C / 2>/dev/null || true
-      [[ "${UFW_WAS_ACTIVE:-0}" == "1" ]] && ufw --force enable >/dev/null 2>&1 || ufw --force disable >/dev/null 2>&1
+      if [[ "" == "1" ]]; then
+        ufw --force enable >/dev/null 2>&1 || warn "�� ������� �������� UFW"
+      else
+        ufw --force disable >/dev/null 2>&1 || warn "�� ������� ��������� UFW"
+      fi
     fi
     rm -f "$FW_STATE_DIR/saved"
     log "  восстановлено из снимка $FW_STATE_DIR (тихо)"
@@ -10464,7 +11036,7 @@ rb_full_rollback() {
     log "  reset + открыто всё слушающееся"
   fi
 
-  log "[6/6] Удаление nginx…"
+  log "[7/7] Удаление nginx…"
   systemctl stop nginx 2>/dev/null || true
   systemctl disable nginx 2>/dev/null || true
   DEBIAN_FRONTEND=noninteractive apt-get purge -y nginx nginx-common nginx-full libnginx-mod-stream >/dev/null 2>&1 || true
@@ -10510,7 +11082,8 @@ rollback_menu() {
     echo "  3) 🛠️  Службы и интеграции стека"
     echo "  4) 📁 Конфиги и каталоги стека"
     echo "  5) 🗑️  Удалить nginx (пакет + конфиги)"
-    echo "  6) 💣 ПОЛНЫЙ ОТКАТ (всё выше, тихо, подтверждение YES)"
+    echo "  6) 🧨 Снять состояние стека (настройки панели, listen, маркеры)"
+    echo "  7) 💣 ПОЛНЫЙ ОТКАТ (всё выше, тихо, подтверждение YES)"
     echo "  0) Назад"
     line
     local c=""
@@ -10521,7 +11094,8 @@ rollback_menu() {
       3) rb_services ;;
       4) rb_configs ;;
       5) rb_remove_nginx ;;
-      6) rb_full_rollback ;;
+      6) rb_reset_state_menu ;;
+      7) rb_full_rollback ;;
       0) return 0 ;;
       *) sleep 1 ;;
     esac
