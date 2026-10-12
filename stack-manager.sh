@@ -3728,11 +3728,56 @@ cert_mode_ask() {
   return 0
 }
 
+# Реальное наличие wildcard, а не только флаг wildcard-domain.
+cert_wildcard_valid() {
+  local base="${1:-${WILDCARD_DOMAIN:-}}" pem
+  [[ -n "$base" ]] || return 1
+  pem="/etc/letsencrypt/live/$base/fullchain.pem"
+  [[ -f "$pem" ]] || return 1
+  openssl x509 -noout -ext subjectAltName -in "$pem" 2>/dev/null \
+    | grep -qE "DNS:\*\.${base//./\\.}([,[:space:]]|$)"
+}
+
+# Явный тип сертификатов для первоначальной установки/п.1.
+# $1 == force — спрашивать заново даже при выборе в текущем shell.
+cert_type_ask() {
+  local force="${1:-}" cm=""
+  [[ -t 0 ]] || { [[ -n "${CERT_MODE_CHOICE:-}" ]] || CERT_MODE_CHOICE="personal"; return 0; }
+  if [[ -n "${CERT_MODE_CHOICE:-}" && "$force" != "force" ]]; then return 0; fi
+  echo
+  echo -e "${B}  Тип сертификатов для инбаундов${N}"
+  echo "  1) Wildcard Cloudflare DNS-01 — один cert для всех поддоменов зоны"
+  echo "  2) Персональные HTTP-01 — отдельный cert для каждого домена"
+  if [[ -n "${WILDCARD_DOMAIN:-}" ]]; then
+    if cert_wildcard_valid "$WILDCARD_DOMAIN"; then
+      echo -e "  ${G}✓ Реальный wildcard *.$WILDCARD_DOMAIN найден${N}"
+    else
+      echo -e "  ${Y}! Флаг wildcard есть, но реальный cert *.$WILDCARD_DOMAIN не найден${N}"
+    fi
+  fi
+  ask cm "Выбор [1/2]" "1" '^[12]$'
+  if [[ "$cm" == "1" ]]; then
+    CERT_MODE_CHOICE="wildcard"
+    log "Тип сертификатов: wildcard Cloudflare DNS-01"
+    if [[ -n "${WILDCARD_DOMAIN:-}" ]] && ! cert_wildcard_valid "$WILDCARD_DOMAIN"; then
+      warn "Выбран wildcard, но реального сертификата *.$WILDCARD_DOMAIN нет."
+      cert_wildcard_issue "$WILDCARD_DOMAIN" || warn "Wildcard не выпущен — причина показана выше; выбор wildcard сохранён."
+    elif [[ -z "${WILDCARD_DOMAIN:-}" ]]; then
+      cert_wildcard_issue || warn "Wildcard не выпущен — причина показана выше; выбор wildcard сохранён."
+    fi
+  else
+    CERT_MODE_CHOICE="personal"
+    log "Тип сертификатов: персональные HTTP-01"
+  fi
+}
+
 cert_mode_menu() {
   cert_mode_load
   line; echo -e "${B}   ЛОГИКА ВЫПУСКА СЕРТИФИКАТОВ${N}"; line
   echo "  Текущий режим: ${CERT_MODE:-<не задан>}"
   cert_mode_ask force
+  echo
+  echo "  Тип сертификатов выбирается при запуске п.1/первоначальной установке."
   pause
 }
 
@@ -6337,6 +6382,9 @@ initial_setup() {
     le_email_save "$EMAIL"
   fi
   PLAN_EMAIL_DONE=1
+  # Тип сертификата выбирается явно в анкете п.1, до создания инбаундов.
+  # Без force: auto_full_setup уже спросил его перед вызовом п.1.
+  cert_type_ask
   if [[ -t 0 ]]; then
     ask_panel_creds || return 1
     PLAN_CREDS_DONE=1
@@ -11756,22 +11804,8 @@ auto_full_setup() {
     ask vk "VK call hashes для qwdtt/csqtt (через запятую, БЕЗ пробелов; Enter — пропустить)" "" '^[a-zA-Z0-9,_-]*$'
   fi
 
-  # --- 2b) Тип сертификатов — ЕДИНАЯ ветка установки. Тип влияет только на
-  #         ВЫПУСК (один wildcard vs персональные на каждый домен), порядок
-  #         вопросов одинаковый. Выбор запоминается: cert_issue не переспрашивает.
-  if [[ -z "${CERT_MODE_CHOICE:-}" ]]; then
-    if [[ -t 0 ]]; then
-      echo "  Сертификаты:"
-      echo "   1) Wildcard Cloudflare — один серт на $base и все поддомены (нужен API-токен)"
-      echo "   2) Персональные — отдельный серт на каждый домен (HTTP-01)"
-      local cm=""
-      ask cm "Выбор [1/2]" "2" '^[12]$'
-      [[ "$cm" == "1" ]] && CERT_MODE_CHOICE="wildcard" || CERT_MODE_CHOICE="personal"
-    else
-      CERT_MODE_CHOICE="personal"
-    fi
-  fi
-  log "Тип сертификатов: ${CERT_MODE_CHOICE}"
+  # --- 2b) Тип сертификатов — единый явный выбор установки.
+  cert_type_ask force
 
   # --- 3) SNI-домены для TLS-инбаундов (Enter — префикс по умолчанию)
   local -A PREFIX=( [vless-tcp]="r" [vless-xhttp]="rx" [naive-naive]="n" [anytls-anytls]="at" [trusttunnel-trusttunnel]="tt" [hysteria-hysteria]="h" )
