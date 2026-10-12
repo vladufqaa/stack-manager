@@ -11805,22 +11805,31 @@ preinstall_menu() {
 routing_diagnostics_menu() {
   while :; do
     line; echo -e "${B}   МАРШРУТИЗАЦИЯ И ДИАГНОСТИКА${N}"; line
-    echo "  1) Полный read-only аудит стека"
-    echo "  2) Проверка стека с наблюдением"
-    echo "  3) Очистить устаревшие SNI-записи"
-    echo "  4) Пересобрать SNI из текущей БД"
-    echo "  5) Гигиена nginx"
-    echo "  6) Стелс-аудит"
+    echo "  1) Диагностика стека"
+    echo "  2) Очистить устаревшие SNI-записи"
+    echo "  3) Пересобрать SNI из текущей БД"
+    echo "  4) Гигиена nginx"
     echo "  0) Назад"
     local c=""
-    ask c "Выбор" "1" '^[0-6]$'
+    ask c "Выбор" "1" '^[0-4]$'
     case "$c" in
-      1) stack_audit_readonly; pause ;;
-      2) stack_doctor_menu ;;
-      3) sni_cleanup_stale; pause ;;
-      4) rebuild_sni_from_db ;;
-      5) nginx_hygiene ;;
-      6) stealth_audit ;;
+      1)
+        echo
+        echo "  1) Полный read-only аудит"
+        echo "  2) Наблюдение за стеком"
+        echo "  3) Стелс-аудит"
+        echo "  0) Назад"
+        local d=""
+        ask d "Диагностика" "1" '^[0-3]$'
+        case "$d" in
+          1) stack_audit_readonly; pause ;;
+          2) stack_doctor_menu ;;
+          3) stealth_audit ;;
+        esac
+        ;;
+      2) sni_cleanup_stale; pause ;;
+      3) rebuild_sni_from_db ;;
+      4) nginx_hygiene ;;
       0) return 0 ;;
     esac
   done
