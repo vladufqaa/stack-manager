@@ -7827,6 +7827,10 @@ decoy_pick_inbound() {
     id="${BASH_REMATCH[1]}"
     proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
     [[ -z "$proto" ]] && continue
+    st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    # В меню смены decoy показываем только собственный Reality.
+    [[ "$proto" == "vless" ]] || continue
+    grep -qi '"security": *"reality"' <<<"$st" || continue
     port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     mark="декоя нет"
     stack_decoy_meta "$dom" >/dev/null 2>&1 && mark="декой есть"
@@ -7882,26 +7886,8 @@ decoy_pick_inbound() {
     log "Decoy #$id ($dom): «$tpl» на 127.0.0.1:$dport"
     pause; return 0
   fi
-  if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$st"; then
-    local has_fb want=""
-    has_fb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-    if [[ -z "$has_fb" || "$has_fb" == "[]" || "$has_fb" == "null" ]]; then
-      askyn want "Включить заглушку для #$id ($dom): пробой браузером → сайт на :80?" "y"
-      if [[ "$want" == true ]]; then
-        db_protect_suspend sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":80}]') WHERE id=$id;"
-        systemctl restart x-ui >/dev/null 2>&1 || true
-        log "Fallback включен: посторонний видит сайт :80, клиенты — VLESS."
-      fi
-    else
-      askyn want "Fallback уже включен — убрать его у #$id ($dom)?" "n"
-      if [[ "$want" == true ]]; then
-        db_protect_suspend sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_remove(settings,'\$.fallbacks') WHERE id=$id;"
-        systemctl restart x-ui >/dev/null 2>&1 || true
-        log "Fallback убран."
-      fi
-    fi
-    pause; return 0
-  fi
+  # Обычный TLS/тunnel-инбаунд не является доступным decoy-объектом.
+  # Штатная схема меню — только собственный Reality и панель.
   case "$proto" in
     naive|anytls|trusttunnel|trust-tunnel|hy2|hysteria)
       warn "$proto ($dom): TLS терминирует sidecar LucX — nginx-декой в цепочку не вставить (сломает протокол)."
@@ -7985,22 +7971,22 @@ decoy_reset_all() {
 }
 
 change_decoy() {
-  line; echo -e "${B}   DECOY ДЛЯ SNI-ДОМЕНОВ${N}"; line
+  line; echo -e "${B}   DECOY: ДОСТУПНЫЕ ОБЪЕКТЫ ДЛЯ СМЕНЫ${N}"; line
   stack_ensure
-  echo "  1) Восстановить штатную схему (только Reality + панель)"
-  echo "  2) Выбрать Reality-инбаунд → назначить/сменить его decoy"
-  echo "  3) Сменить decoy домена панели"
-  echo "  4) Убрать лишние decoy: как изначально (только Reality + панель)"
+  echo "  Панель: ${PANEL_DOMAIN:-домен панели определяется далее}"
+  echo "  Reality-инбаунды: только собственный Reality (чужой Reality не меняется)"
+  echo "  Остальные инбаунды: decoy не применяется"
+  echo
+  echo "  1) Сменить decoy домена панели"
+  echo "  2) Выбрать собственный Reality-инбаунд → сменить decoy"
   echo "  0) Назад"
   local m=""
-  ask m "Выбор" "2" '^[0-4]$'
+  ask m "Выбор" "2" '^[0-2]$'
   case "$m" in
-    1) decoy_reset_all; return 0 ;;
     2) decoy_pick_inbound; return 0 ;;
-    4) decoy_reset_all; return 0 ;;
     0) return 0 ;;
   esac
-  # ── 3) decoy домена панели ──
+  # ── 1) decoy домена панели ──
   local panel_conf="$STACK_CONF"
   local panel_dom=""
   panel_dom=$(xui_get subDomain 2>/dev/null || true)
