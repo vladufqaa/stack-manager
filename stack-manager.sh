@@ -7927,11 +7927,13 @@ decoy_ensure_all() {
     dest=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
       "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),json_extract(stream_settings,'\$.realitySettings.target'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     dest="${dest%%:*}"
-    if [[ -n "$dest" && "$dest" != "127.0.0.1" ]]; then
-      echo "  #$id $dom — чужой Reality: пропуск (спрятан за SNI цели)"
+    local policy=""
+    policy=$(decoy_policy_classify "$id" "$proto" "$st")
+    if [[ "$policy" == reality-external ]]; then
+      echo "  #$id $dom — внешний Reality: пропуск (decoy не применяется)"
       continue
     fi
-    if [[ "$proto" == "vless" ]] && grep -qi '"security": *"reality"' <<<"$st"; then
+    if [[ "$policy" == reality-local ]]; then
       local meta="" cp_line c="" k=""
       meta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
       if [[ -n "$meta" ]]; then
