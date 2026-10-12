@@ -12064,12 +12064,22 @@ print_menu_actions() {
 }
 
 fast_menu_header() {
-  local nb=0 ufw_state="down"
+  local nb=0 ufw_state="down" ngx xui adg f2b
   [[ -f "$XUI_DB" ]] && nb=$(sqlite3 -cmd ".timeout 1000" "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
   ufw_is_active && ufw_state="active"
-  echo
-  echo -e "${B}  nginx: $(systemctl is-active nginx 2>/dev/null || echo unknown)  |  x-ui: $(systemctl is-active x-ui 2>/dev/null || echo unknown)  |  UFW: $ufw_state  |  inbounds: ${nb:-0}${N}"
-  echo
+  ngx=$(systemctl is-active nginx 2>/dev/null || echo unknown)
+  xui=$(systemctl is-active x-ui 2>/dev/null || echo unknown)
+  adg="—"; [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && adg=$(systemctl is-active "$ADG_SERVICE" 2>/dev/null || echo unknown)
+  f2b=$(systemctl is-active fail2ban 2>/dev/null || echo unknown)
+  line
+  echo -e "${B}      🛰️  STACK-MANAGER  ·  SNI-STACK${N}"
+  echo -e "${D}      LucX/x-ui  ·  nginx 443  ·  Reality  ·  decoy  ·  AdGuard${N}"
+  line
+  printf "  %-14s %-12s  %-14s %-12s\n" "nginx" "$ngx" "x-ui" "$xui"
+  printf "  %-14s %-12s  %-14s %-12s\n" "AdGuard" "$adg" "fail2ban" "$f2b"
+  printf "  %-14s %-12s  %-14s %s\n" "UFW" "$ufw_state" "inbounds" "${nb:-0} active"
+  echo -e "${D}  Быстрый переход: 1–7 разделы  ·  0 выход  ·  полный аудит — раздел 6${N}"
+  line
 }
 
 main_menu() {
