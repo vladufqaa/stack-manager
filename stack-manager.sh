@@ -5842,6 +5842,7 @@ reality_set_dest() {
   if [[ -n "$dom" && "$dom" != "www.microsoft.com" ]] && ! grep -q "\"$dom\"" <<<"$new_stream"; then
     new_stream=$(sed -E "s/\"serverNames\"[[:space:]]*:[[:space:]]*\[[^]]*\]/\"serverNames\":[\"$dom\"]/" <<<"$new_stream")
   fi
+  panel_journal_capture_row inbounds "$id"   # снимок строки для отката (п.2/п.3)
   sqlite3 "$XUI_DB" "UPDATE inbounds SET stream_settings='$new_stream' WHERE id=$id;" 2>/dev/null || true
   log "  Reality dest → 127.0.0.1:$decoy_port (decoy nginx)"
   return 0
@@ -5874,6 +5875,7 @@ hosts_upsert() {   # <inbound_id> <address> [sni]
   cols=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ')
   local remark
   remark=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT remark FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  panel_journal_capture_row hosts "$id"   # снимок строки для отката (п.2/п.3)
   sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
   local fields="inbound_id,address,port" vals="$id,'$dom',443"
   grep -qw remark       <<<"$cols" && { fields+=",remark";       vals+=",'$(printf '%s' "$remark" | sed "s/'/''/g")'"; }
@@ -5936,12 +5938,131 @@ reality_ext_hide() {
   return 0
 }
 
+inbound_is_xhttp_tls() {   # <stream_json> → 0, если network=xhttp и security=tls
+  local s="$1"
+  [[ -z "$s" ]] && return 1
+  { grep -qi '"network": *"xhttp"' <<<"$s" || grep -qi '"network":"xhttp"' <<<"$s"; } || return 1
+  grep -Eq '"security": ?"tls"' <<<"$s" || return 1
+  return 0
+}
+
+# hosts-запись CDN-профиля: адрес/SNI/Host header = домен CDN
+# (по образцу hosts_upsert, но с заполненным host_header и SNI=CDN)
+hosts_cdn_upsert() {   # <inbound_id> <cdn_domain>
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
+  local id="$1" cdn="$2"
+  [[ -z "$id" || -z "$cdn" ]] && return 0
+  local has_hosts
+  has_hosts=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
+  [[ -z "$has_hosts" ]] && return 0
+  local cols
+  cols=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ')
+  panel_journal_capture_row hosts "$id"   # снимок строки для отката (п.2/п.3)
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
+  local fields="inbound_id,address,port" vals="$id,'$cdn',443"
+  grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'CDN'"; }
+  grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",'$cdn'"; }
+  grep -qw host_header <<<"$cols" && { fields+=",host_header"; vals+=",'$cdn'"; }
+  grep -qw fingerprint <<<"$cols" && { fields+=",fingerprint"; vals+=",'firefox'"; }
+  grep -qw is_disabled <<<"$cols" && { fields+=",is_disabled"; vals+=",0"; }
+  grep -qw enable      <<<"$cols" && { fields+=",enable";      vals+=",1"; }
+  if sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null; then
+    log "  hosts: #$id → $cdn:443 (адрес/SNI/Host header = CDN) ✓"
+  else
+    warn "  hosts: CDN-вставка для #$id не прошла — проверь схему таблицы hosts"
+  fi
+  return 0
+}
+
+# Вопрос про CDN + настройка CDN-профиля. Возвращает:
+#   0 — инбаунд настроен как CDN (вызвавшему пункту дальше ничего делать не надо)
+#   1 — не xhttp+tls или пользователь ответил «нет» (продолжить обычную логику)
+xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
+  local id="$1" proto="$2" port="$3"
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" ]] && return 1
+  local stream=""
+  stream=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  inbound_is_xhttp_tls "$stream" || return 1
+  echo
+  echo -e "${B}Инбаунд #$id ($proto): VLESS + XHTTP + TLS${N}"
+  local use_cdn=""
+  askyn use_cdn "Это соединение будет работать через CDN?" "n"
+  if [[ "$use_cdn" != true ]]; then
+    log "  CDN не используется — обычная настройка (адрес/SNI = SNI-домен)"
+    return 1
+  fi
+  local cdn_dom="" origin_dom=""
+  ask cdn_dom    "Домен, привязанный к CDN (например cdn.example.com)" "cdn.example.com" '^[a-zA-Z0-9.-]+$'
+  ask origin_dom "ORIGIN-домен (A-запись → этот сервер)"              "ts.example.com"  '^[a-zA-Z0-9.-]+$'
+  # база ORIGIN-домена = первая метка (ts.mediadok.xyz → ts)
+  local base="${origin_dom%%.*}"
+  local new_path="/api/stream/${base}.ts"
+  # серт для ORIGIN: TLS терминирует сам Xray
+  local cp_line="" cert="" key=""
+  cp_line=$(cert_paths "$origin_dom") || true
+  if [[ -z "$cp_line" ]]; then
+    cert_issue "$origin_dom" >/dev/null 2>&1 || true
+    cp_line=$(cert_paths "$origin_dom") || true
+  fi
+  [[ -z "$cp_line" ]] && warn "  серт для $origin_dom не найден — после настройки проверь выпуск сертификата"
+  # правки БД — только при остановленной панели (иначе перетрёт из памяти)
+  local xui_was=""
+  if systemctl is-active --quiet x-ui 2>/dev/null; then
+    xui_was=1
+    systemctl stop x-ui >/dev/null 2>&1 || true
+    sleep 1
+  fi
+  panel_journal_capture_row inbounds "$id"   # снимок строки для отката (п.2/п.3)
+  local sql="UPDATE inbounds SET stream_settings=json_set(stream_settings,"
+  sql+="'\$.tlsSettings.serverName','$origin_dom',"
+  sql+="'\$.xhttpSettings.host','$origin_dom',"
+  sql+="'\$.xhttpSettings.path','$new_path',"
+  sql+="'\$.xhttpSettings.mode','packet-up',"
+  sql+="'\$.xhttpSettings.uplinkHTTPMethod','GET',"
+  sql+="'\$.xhttpSettings.uplinkChunkSize',2048,"
+  sql+="'\$.xhttpSettings.uplinkDataPlacement','header',"
+  sql+="'\$.xhttpSettings.uplinkDataKey','X-Data')"
+  sql+=" WHERE id=$id;"
+  local err_out
+  err_out=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "$sql" 2>&1) || {
+    err "SQL: $err_out"; [[ "$xui_was" == 1 ]] && systemctl start x-ui >/dev/null 2>&1; return 1;
+  }
+  # сертификат в tlsSettings (отдельным шагом: если массива certificates нет — не валим настройку)
+  if [[ -n "$cp_line" ]]; then
+    cert="${cp_line%% *}"; key="${cp_line##* }"
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+      "UPDATE inbounds SET stream_settings=json_set(stream_settings,'\$.tlsSettings.certificates[0].certificateFile','$cert','\$.tlsSettings.certificates[0].keyFile','$key') WHERE id=$id;" 2>/dev/null \
+      || warn "  сертификат в tlsSettings не прописан (нет массива certificates) — пропущено"
+  fi
+  db_set_listen "$id" '127.0.0.1' direct 2>/dev/null || true
+  # SNI-роутер: ORIGIN-домен → инбаунд (клиент-CDN и прямой клиент приходят с SNI ORIGIN)
+  sni_upstream_add "inb_${id}_backend" "$port"
+  sni_map_add "$origin_dom" "inb_${id}_backend"
+  SNI_USED["$origin_dom"]="inb_${id}_backend"
+  hosts_cdn_upsert "$id" "$cdn_dom"
+  [[ "$xui_was" == 1 ]] && { systemctl start x-ui >/dev/null 2>&1 || true; sleep 2; }
+  nginx_reload || true
+  echo
+  log "CDN-профиль инбаунда #$id настроен:"
+  log "  ORIGIN: $origin_dom — SNI-роутер → inb_${id}_backend, serverName/host = ORIGIN"
+  log "  CDN:    $cdn_dom — hosts: адрес/SNI/Host header = CDN"
+  log "  Путь:   $new_path · mode=packet-up · аплинк GET + X-Data (chunk 2048)"
+  return 0
+}
+
 configure_sni_for_inbound() {
   local id="$1" proto="$2" port="$3" panel_domain="$4" pre_domain="${5:-}" pre_tpl="${6:-}"
   is_udp_proto "$proto" && { warn "UDP ($proto) не маршрутизируется через SNI."; return 0; }
   [[ ! -f "$SNI_CONF" ]] && { err "$SNI_CONF не найден — сначала выполните 'Первичную настройку SNI-роутера' (пункт 1)."; return 1; }
   sni_used_load
   [[ -n "$panel_domain" ]] && SNI_USED["$panel_domain"]="${SNI_USED[$panel_domain]:-panel_backend}"
+
+  # === VLESS XHTTP + TLS: вопрос «через CDN?».
+  # Если пользователь ответил «да» — инбаунд полностью настроен как CDN-профиль
+  # (ORIGIN в SNI-роутере, hosts с доменом CDN) и обычная логика не нужна.
+  if xhttp_cdn_setup "$id" "$proto" "$port"; then
+    return 0
+  fi
 
   local existing_domain=""
   existing_domain=$(grep -E "^\s+\S+\s+inb_${id}_backend" "$SNI_CONF" 2>/dev/null | awk '{print $1}' || true)
@@ -6903,6 +7024,13 @@ fix_inbound() {
   if ! grep -Eqi '"security": ?"tls"|"security":"tls"|reality' <<<"$stream" \
      && [[ "$proto" != naive* && "$proto" != "anytls" && "$proto" != trust* ]]; then
     warn "С данным типом подключения скрипт не работает: #$id ($proto, TLS/Reality не найдены в stream_settings)."
+    return 0
+  fi
+
+  # === VLESS XHTTP + TLS: вопрос «через CDN?».
+  # Важно: без этого хука ветка TLS ниже переписала бы xhttp-инбаунд в голый tcp.
+  if xhttp_cdn_setup "$id" "$proto" "$port"; then
+    pause
     return 0
   fi
 
