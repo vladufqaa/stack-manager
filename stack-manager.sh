@@ -12063,33 +12063,22 @@ print_menu_actions() {
   echo -e "  ${B} 7)${N} ⚙️  Панель и AdGuard"
 }
 
+fast_menu_header() {
+  local nb=0 ufw_state="down"
+  [[ -f "$XUI_DB" ]] && nb=$(sqlite3 -cmd ".timeout 1000" "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
+  ufw_is_active && ufw_state="active"
+  echo
+  echo -e "${B}  nginx: $(systemctl is-active nginx 2>/dev/null || echo unknown)  |  x-ui: $(systemctl is-active x-ui 2>/dev/null || echo unknown)  |  UFW: $ufw_state  |  inbounds: ${nb:-0}${N}"
+  echo
+}
+
 main_menu() {
+  # Инициализация decoy и окружения выполняется до входа в цикл, а не при каждом возврате.
+  detect_env >/dev/null 2>&1 || true
   decoy_full_init || true
-  local W=58
   while :; do
     clear
-    detect_env >/dev/null 2>&1 || true     # состояние для шапки
-    local adg_dot="➖" nb att bans amin="" cd crt duse ufw_ok
-    [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && adg_dot=$(svc_dot "$ADG_SERVICE")
-    ufw_ok=0; ufw_is_active && ufw_ok=1
-    nb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
-    att=$(tail -n 20000 "$DECOY_LOG_ACCESS" 2>/dev/null | grep -c "$(date +%d/%b/%Y)" 2>/dev/null); att=${att:-0}
-    # баны по ВСЕМ jail'ам (decoy-login + sshd + recidive…), не только decoy
-    bans=0
-    for j in $(fail2ban-client status 2>/dev/null | sed -n 's/^.*Jail list:\s*//p' | tr ',' ' '); do
-      n=$(fail2ban-client get "$j" banip 2>/dev/null | wc -w)
-      bans=$((bans + ${n:-0}))
-    done
-    for crt in /etc/letsencrypt/live/*/fullchain.pem; do
-      [[ -f "$crt" ]] || continue
-      cd=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$crt" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
-      [[ -z "$amin" || "$cd" -lt "$amin" ]] && amin=$cd
-    done
-    amin=${amin:-—}
-    duse=$(df -Pm / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
-    menu_header "$(svc_dot nginx)" "$(svc_dot x-ui)" "$adg_dot" "$(svc_dot fail2ban)" \
-      "$ufw_ok" "${nb:-0}" "${att:-0}" "${bans:-0}" "$amin" "${duse:-?}" \
-      "$(basename "${XUI_DB:-нет}")" "$(date -r "$0" '+%d.%m.%y %H:%M')"
+    fast_menu_header
     print_menu_actions
     echo
     echo -e "  ${B} 0)${N} 🚪 Выход   ${Y}(q в любом вопросе — выход в меню)${N}"
