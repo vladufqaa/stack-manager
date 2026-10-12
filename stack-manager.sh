@@ -7790,19 +7790,10 @@ decoy_ensure_all() {
       line_ok=1
       continue
     fi
-    if [[ "$proto" == "vless" ]] && grep -qi '"security": *"tls"' <<<"$st"; then
-      local fb
-      fb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-      if [[ -z "$fb" || "$fb" == "[]" || "$fb" == "null" ]]; then
-        db_protect_suspend sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":\"127.0.0.1:80\"}]') WHERE id=$id;"
-        log "  #$id $dom — vless/tls: fallback → 127.0.0.1:80 (заглушка браузеру)"
-        line_ok=1
-      else
-        echo "  #$id $dom — fallback уже настроен"
-      fi
-      continue
-    fi
-    echo "  #$id $dom ($proto) — декой не применим (протокол/transport отвечает сам)"
+    # Штатная схема: decoy только у собственного Reality и панели.
+    # Обычный TLS/VLESS fallback больше не включаем — он не является decoy
+    # для этой схемы и раньше приводил к лишним «декоям» у инбаундов.
+    echo "  #$id $dom ($proto) — decoy не назначается (штатно только Reality)"
   done < <(awk '
     /^map / { inmap=1; next }
     inmap && /^}/ { inmap=0 }
@@ -7936,10 +7927,16 @@ decoy_reset_all() {
   stack_ensure
   [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
   local id dom be proto st fb ds d ok changed=0 restarted=0
-  while IFS='|' read -r dom be; do
-    [[ "$be" =~ ^inb_([0-9]+)_backend$ ]] || continue
-    id="${BASH_REMATCH[1]}"
-    proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
+  # Идём по всей БД, а не только по SNI-карте: лишний decoy/fallback
+  # должен удаляться даже у инбаунда с потерянным маршрутом.
+  while IFS='|' read -r id proto; do
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    dom=$(awk -v want="inb_${id}_backend" '
+      /^map / { inmap=1; next }
+      inmap && /^}/ { inmap=0 }
+      inmap && $2 == want { d=$1; sub(/;$/, "", d); print d; exit }
+    ' "$SNI_CONF" 2>/dev/null || true)
+    be="inb_${id}_backend"
     [[ -z "$proto" ]] && continue
     st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     if [[ "$proto" == "vless" ]] && grep -qi '"security": *"reality"' <<<"$st"; then
@@ -7975,13 +7972,8 @@ decoy_reset_all() {
         fi
       fi
     fi
-  done < <(awk '
-    /^map / { inmap=1; next }
-    inmap && /^}/ { inmap=0 }
-    inmap && /^[[:space:]]/ && NF >= 2 {
-      dom = $1; sub(/;$/, "", dom); be = $2; sub(/;$/, "", be)
-      if (dom != "" && dom != "default" && be ~ /_backend$/ && be !~ /^(panel|agh)_backend$/) print dom "|" be
-    }' "$SNI_CONF" 2>/dev/null)
+  done < <(sqlite3 -separator '|' -cmd ".timeout 3000" "$XUI_DB" \
+    "SELECT id, protocol FROM inbounds WHERE enable=1 ORDER BY id;" 2>/dev/null || true)
   (( restarted )) && systemctl restart x-ui >/dev/null 2>&1 || true
   if (( changed )); then
     nginx_reload || true
@@ -7995,15 +7987,15 @@ decoy_reset_all() {
 change_decoy() {
   line; echo -e "${B}   DECOY ДЛЯ SNI-ДОМЕНОВ${N}"; line
   stack_ensure
-  echo "  1) Раздать decoy всем SNI-инбаундам (кроме TG WEB-PROXY)"
-  echo "  2) Выбрать инбаунд → назначить/сменить его decoy"
+  echo "  1) Восстановить штатную схему (только Reality + панель)"
+  echo "  2) Выбрать Reality-инбаунд → назначить/сменить его decoy"
   echo "  3) Сменить decoy домена панели"
-  echo "  4) Убрать decoy инбаундов: как изначально (только Reality + панель)"
+  echo "  4) Убрать лишние decoy: как изначально (только Reality + панель)"
   echo "  0) Назад"
   local m=""
   ask m "Выбор" "2" '^[0-4]$'
   case "$m" in
-    1) decoy_ensure_all; return 0 ;;
+    1) decoy_reset_all; return 0 ;;
     2) decoy_pick_inbound; return 0 ;;
     4) decoy_reset_all; return 0 ;;
     0) return 0 ;;
