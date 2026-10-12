@@ -11859,7 +11859,7 @@ diagnostics_maintenance_menu() {
     line; echo -e "${B}   ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ${N}"; line
     echo "  1) Статус стека"
     echo "  2) Маршрутизация и диагностика"
-    echo "  3) Сменить пароли admin"
+    echo "  3) Сменить пароли LucX UI / AdGuard Home"
     echo "  4) Обновить скрипт"
     echo "  5) Заморозка самолечения"
     echo "  0) Назад"
