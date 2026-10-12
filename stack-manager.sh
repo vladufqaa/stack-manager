@@ -11809,32 +11809,89 @@ routing_diagnostics_menu() {
   done
 }
 
+setup_routing_menu() {
+  while :; do
+    line; echo -e "${B}   УСТАНОВКА И МАРШРУТИЗАЦИЯ${N}"; line
+    echo "  1) Первичная настройка SNI-роутера"
+    echo "  2) Инбаунды: проверка, добавление, удаление, домены"
+    echo "  0) Назад"
+    local c=""; ask c "Выбор" "1" '^[0-2]$'
+    case "$c" in 1) initial_setup ;; 2) inbounds_manage_menu ;; 0) return 0 ;; esac
+  done
+}
+decoy_domains_menu() {
+  while :; do
+    line; echo -e "${B}   DECOY И ДОМЕНЫ${N}"; line
+    echo "  1) Сменить decoy"
+    echo "  2) Каталог decoy-шаблонов"
+    echo "  3) Сменить домен inbound"
+    echo "  0) Назад"
+    local c=""; ask c "Выбор" "1" '^[0-3]$'
+    case "$c" in 1) change_decoy ;; 2) view_decoy_templates ;; 3) inbound_change_domain ;; 0) return 0 ;; esac
+  done
+}
+certificates_menu() { certs_menu; }
+security_firewall_menu() {
+  while :; do
+    line; echo -e "${B}   БЕЗОПАСНОСТЬ И FIREWALL${N}"; line
+    echo "  1) Баны, decoy-login, fail2ban"
+    echo "  2) Правила firewall"
+    echo "  3) Восстановить состояние firewall"
+    echo "  0) Назад"
+    local c=""; ask c "Выбор" "1" '^[0-3]$'
+    case "$c" in 1) security_menu ;; 2) firewall_menu ;; 3) restore_firewall_state ;; 0) return 0 ;; esac
+  done
+}
+backups_rollback_menu() {
+  while :; do
+    line; echo -e "${B}   БЭКАПЫ И ОТКАТ${N}"; line
+    echo "  1) Сделать бэкап"
+    echo "  2) Восстановить из бэкапа"
+    echo "  3) Откат и демонтаж стека"
+    echo "  4) Pre-install snapshot"
+    echo "  0) Назад"
+    local c=""; ask c "Выбор" "1" '^[0-4]$'
+    case "$c" in 1) backup_config ;; 2) restore_config ;; 3) rollback_menu ;; 4) preinstall_menu ;; 0) return 0 ;; esac
+  done
+}
+diagnostics_maintenance_menu() {
+  while :; do
+    line; echo -e "${B}   ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ${N}"; line
+    echo "  1) Статус стека"
+    echo "  2) Маршрутизация и диагностика"
+    echo "  3) Сменить пароли admin"
+    echo "  4) Обновить скрипт"
+    echo "  5) Заморозка самолечения"
+    echo "  0) Назад"
+    local c=""; ask c "Выбор" "1" '^[0-5]$'
+    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) freeze_menu ;; 0) return 0 ;; esac
+  done
+}
+panel_adguard_menu() {
+  while :; do
+    line; echo -e "${B}   ПАНЕЛЬ И ADGUARD${N}"; line
+    echo "  1) Управление LucX/3x-ui"
+    echo "  2) Управление AdGuard Home"
+    echo "  0) Назад"
+    local c=""; ask c "Выбор" "1" '^[0-2]$'
+    case "$c" in 1) panel_manage; pause ;; 2) adguard_manage; pause ;; 0) return 0 ;; esac
+  done
+}
+
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
   audit "menu:${1:-}"     # каждое обращение к пункту — в журнал действий
   case "$1" in
-    1) initial_setup ;;
+    1) setup_routing_menu ;;
     2) inbounds_manage_menu ;;
     3) routing_diagnostics_menu ;;
-    4) change_decoy ;;
-    5) view_decoy_templates ;;
-    6) show_status ;;
-    7) security_menu ;;
-    8) backup_config ;;
-    9) restore_config ;;
-    10) certs_menu ;;
-    11) firewall_menu ;;
-    12) restore_firewall_state ;;
-    13) panel_manage; pause ;;
-    14) adguard_manage; pause ;;
-    16) change_admin_passwords; pause ;;
-    17) update_self; pause ;;
-    23) rollback_menu ;;
-    24) preinstall_menu ;;
-    25) freeze_menu ;;
-    26) rebuild_sni_from_db ;;
-    27) stack_audit_readonly; pause ;;
+    4) decoy_domains_menu ;;
+    5) certificates_menu ;;
+    6) security_firewall_menu ;;
+    7) backups_rollback_menu ;;
+    8) diagnostics_maintenance_menu ;;
+    9) panel_adguard_menu ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -11982,25 +12039,13 @@ freeze_menu() {
 
 print_menu_actions() {
   echo
-  echo -e "  ${B} 1)${N} 🧭 Первичная настройка SNI-роутера"
-  echo -e "  ${B} 2)${N} 🧪 Инбаунды: проверка, добавление, удаление, домены"
-  echo -e "  ${B} 3)${N} 🧭 Маршрутизация и диагностика"
-  echo -e "  ${B} 4)${N} 🎭 Сменить decoy для SNI-домена"
-  echo -e "  ${B} 5)${N} 🖼️  Каталог decoy-шаблонов"
-  echo -e "  ${B} 6)${N} 📊 Показать статус"
-  echo -e "  ${B} 7)${N} 🛡️  Безопасность: баны, деко-логины, fail2ban"
-  echo -e "  ${B} 8)${N} 💾 Бэкап конфигурации"
-  echo -e "  ${B} 9)${N} ♻️  Восстановить из бэкапа"
-  echo -e "  ${B}10)${N} 🔒 Управление сертификатами"
-  echo -e "  ${B}11)${N} 🚧 Файрвол: только нужные порты"
-  echo -e "  ${B}12)${N} 🧯 Восстановить состояние фаервола"
-  echo -e "  ${B}13)${N} 📥 Панель 3x-ui/LucX: определить, обновить до LucX, установить/удалить"
-  echo -e "  ${B}14)${N} 🛰️  AdGuard Home: установить / удалить"
-  echo -e "  ${B}16)${N} 🔑 Сменить пароли admin (панель / AdGuard)"
-  echo -e "  ${B}17)${N} ⬇️  Обновить скрипт с GitHub"
-  echo -e "  ${B}23)${N} 💣 Откат и демонтаж стека"
-  echo -e "  ${B}24)${N} 📸 Pre-install снимок (состояние до скрипта)"
-  echo -e "  ${B}25)${N} ❄️  Заморозка самолечения (серты/инбаунды от автоматики)"
+  echo -e "  ${B} 1)${N} 🧭 Установка и маршрутизация"
+  echo -e "  ${B} 2)${N} 🎭 Decoy и домены"
+  echo -e "  ${B} 3)${N} 🔒 Сертификаты"
+  echo -e "  ${B} 4)${N} 🛡️  Безопасность и firewall"
+  echo -e "  ${B} 5)${N} 💾 Бэкапы и откат"
+  echo -e "  ${B} 6)${N} 🩺 Диагностика и обслуживание"
+  echo -e "  ${B} 7)${N} ⚙️  Панель и AdGuard"
 }
 
 main_menu() {
