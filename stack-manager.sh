@@ -11416,11 +11416,19 @@ rollback_menu() {
     clear
     line; echo -e "${B}   ОТКАТ И ДЕМОНТАЖ СТЕКА${N}"; line
     local heal="нет" jail="нет" hook="нет" ngx="нет" sni="нет" snap="нет"
-    systemctl list-unit-files 2>/dev/null | grep -q '^stack-heal\.' && heal="да"
+    # Проверяем фактические файлы/состояние, а не только список unit-файлов:
+    # после частичного отката unit может остаться disabled, а SNI — в enabled.
+    if [[ -f /etc/systemd/system/stack-heal.timer || -f /etc/systemd/system/stack-heal.service ]] || \
+       systemctl is-enabled --quiet stack-heal.timer 2>/dev/null || \
+       systemctl is-active --quiet stack-heal.timer 2>/dev/null; then
+      heal="да"
+    fi
     [[ -f /etc/fail2ban/jail.d/decoy-login.local ]] && jail="да"
     [[ -x /etc/letsencrypt/renewal-hooks/deploy/stack-cert-mirror.sh ]] && hook="да"
     command -v nginx >/dev/null 2>&1 && ngx="да"
-    [[ -f /etc/nginx/streams-available/sni-router.conf ]] && sni="да"
+    if [[ -f /etc/nginx/streams-enabled/sni-router.conf || -f /etc/nginx/streams-available/sni-router.conf ]]; then
+      sni="да"
+    fi
     [[ -f "$FW_STATE_DIR/saved" ]] && snap="да"
     echo "  Текущее состояние стека:"
     printf "    nginx:                 %s\n" "$ngx"
