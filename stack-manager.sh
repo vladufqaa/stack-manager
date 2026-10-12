@@ -4236,6 +4236,21 @@ cert_issue_line() {
   cert_line_domains_load "$line"
   [[ ${#CERT_LINE_DOMAINS[@]} -eq 0 ]] && { warn "Линия $line пуста — выпуск не нужен"; return 0; }
 
+  # ── Wildcard-зона: линия базы wildcard выпускается через DNS-01 с *.<зона> ──
+  # Мульти-SAN перевыпуск через webroot затирал "*.зона" из SAN (HTTP-01 не умеет
+  # wildcard) — линия оставалась БЕЗ покрытия, флаг wildcard при этом жил, и
+  # cert_paths раздавал серт, не покрывающий новые поддомены. Теперь линия
+  # wildcard-зоны всегда содержит -d "<зона>" -d "*.<зона>" и идёт через
+  # dns-cloudflare (если токен сохранён).
+  local _wc_fix=false
+  if [[ -z "$WILDCARD_DOMAIN" && -f "$WILDCARD_STATE" ]]; then
+    WILDCARD_DOMAIN=$(head -n 1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]' || true)
+  fi
+  if [[ -n "$WILDCARD_DOMAIN" && "$line" == "$WILDCARD_DOMAIN" && -f "$CF_CREDS" ]] \
+     && grep -q 'dns_cloudflare_api_token' "$CF_CREDS" 2>/dev/null; then
+    _wc_fix=true
+  fi
+
   # CN
   local cn="" pd=""
   pd=$(xui_get webDomain 2>/dev/null || true)
@@ -4294,11 +4309,15 @@ cert_issue_line() {
   # Идемпотентность: если SAN совпадает и срок > 30 дн — не выпускаем
   local ldir="/etc/letsencrypt/live/$line"
   if [[ -f "$ldir/fullchain.pem" ]]; then
-    local cur_san want_san left
+    local cur_san want_san left _wc_missing=false
     cur_san=$(openssl x509 -noout -ext subjectAltName -in "$ldir/fullchain.pem" 2>/dev/null \
               | grep -oE 'DNS:[^,]+' | sed 's/DNS://g' | tr -d ' ' | sort | tr '\n' ',')
+    if [[ "$_wc_fix" == true && "$cur_san" != *"*.$WILDCARD_DOMAIN"* ]]; then
+      _wc_missing=true
+      warn "Линия «$line»: wildcard *.$WILDCARD_DOMAIN потерян в SAN — перевыплускаю с ним"
+    fi
     want_san=$(printf '%s\n' "${CERT_LINE_DOMAINS[@]}" | sort -u | tr '\n' ',')
-    if [[ "${cur_san%,}" == "${want_san%,}" ]]; then
+    if [[ "$_wc_missing" == false && "${cur_san%,}" == "${want_san%,}" ]]; then
       left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
       if (( left > 30 )); then
         log "Линия «$line» актуальна (${#CERT_LINE_DOMAINS[@]} дм., ~$left дн)"
@@ -4321,6 +4340,9 @@ cert_issue_line() {
     [[ "$d" == "$cn" ]] && continue
     cargs+=(-d "$d")
   done
+  if [[ "$_wc_fix" == true ]]; then
+    cargs+=(-d "$WILDCARD_DOMAIN" -d "*.$WILDCARD_DOMAIN")
+  fi
 
   log "Выпуск линии «$line» (CN=$cn, ${#CERT_LINE_DOMAINS[@]} дм.)…"
   mkdir -p /var/www/html 2>/dev/null || true
@@ -4337,19 +4359,38 @@ cert_issue_line() {
   fi
 
   local out=""
+  if [[ "$_wc_fix" == true ]]; then
+    # wildcard возможен только через DNS-01 Cloudflare
+    out=$(certbot certonly --dns-cloudflare \
+          --dns-cloudflare-credentials "$CF_CREDS" \
+          --dns-cloudflare-propagation-seconds 30 \
+          --non-interactive --agree-tos \
+          --email "$EMAIL" --cert-name "$line" --force-renewal \
+          "${cargs[@]}" 2>&1 || true)
+  else
   out=$(certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos \
         --email "$EMAIL" --cert-name "$line" --force-renewal \
         "${cargs[@]}" 2>&1 || true)
+  fi
 
   if [[ ! -f "$ldir/fullchain.pem" || ! -f "$ldir/privkey.pem" ]]; then
     local nginx_was=""
     if systemctl is-active --quiet nginx 2>/dev/null; then
       nginx_was=1; systemctl stop nginx 2>/dev/null || true
     fi
+    if [[ "$_wc_fix" == true ]]; then
+      out="$out
+$(certbot certonly --dns-cloudflare \
+      --dns-cloudflare-credentials "$CF_CREDS" \
+      --dns-cloudflare-propagation-seconds 30 \
+      --non-interactive --agree-tos --email "$EMAIL" --cert-name "$line" \
+      --force-renewal "${cargs[@]}" 2>&1 || true)"
+    else
     out="$out
 $(certbot certonly --standalone --non-interactive --agree-tos \
         --email "$EMAIL" --cert-name "$line" --force-renewal \
         "${cargs[@]}" 2>&1 || true)"
+    fi
     [[ -n "$nginx_was" ]] && systemctl start nginx 2>/dev/null || true
   fi
 
