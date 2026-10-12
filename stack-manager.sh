@@ -639,6 +639,15 @@ suburi_build() {
   printf 'https://%s%s' "$dom" "$sp"
 }
 
+# Консервативно определяет внешний Reality по фактическому dest/target,
+# а не по закрытому списку REALITY_TARGETS.
+reality_external_dest() {
+  local id="$1" d=""
+  d=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),json_extract(stream_settings,'\$.realitySettings.target'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  d="${d%%:*}"
+  [[ -n "$d" && "$d" != "127.0.0.1" && "$d" != "::1" && "$d" != "localhost" ]]
+}
+
 is_udp_proto() {
   case "$1" in
     hysteria|hysteria2|wireguard|amnezia|amneziawg|awg|qwdtt|csqdtt|csqtt|kroute|krout|krw) return 0 ;;
@@ -3425,12 +3434,9 @@ sync_inbound_certs() {
       local rdest="" rt2
       rdest=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
       rdest="${rdest%%:*}"
-      if [[ -n "$rdest" && "$rdest" != "127.0.0.1" ]]; then
-        continue   # чужой реалити — самолечению серт/decoy не требуются
+      if reality_external_dest "$id"; then
+        continue   # внешний Reality — cert/decoy не требуются
       fi
-      for rt2 in "${REALITY_TARGETS[@]}"; do
-        [[ "$dom" == "$rt2" ]] && continue 2   # домен = цель из списка → пропускаем
-      done
       local cline2 c_cert c_key want_port droot
       cline2=$(cert_lineage_for "$dom")
       if [[ -z "$cline2" ]]; then
@@ -6292,11 +6298,7 @@ configure_sni_for_inbound() {
     if grep -qi reality <<<"$stream_chk" && ! grep -Eq "\"dest\": ?\"127\.0\.0\.1:" <<<"$stream_chk"; then
       # Чужой реалити (dest = внешняя цель из списка) — это НЕ поломка:
       # инбаунд спрятан за 443 по SNI цели, decoy/серт ему не нужны
-      local _t_hit=false _t
-      for _t in "${REALITY_TARGETS[@]}"; do
-        [[ "$existing_domain" == "$_t" ]] && { _t_hit=true; break; }
-      done
-      if [[ "$_t_hit" == true ]]; then
+      if reality_external_dest "$id"; then
         log "  Reality (#$id) спрятан за 443 по цели «$existing_domain» — не трогаю"
         return 0
       fi
