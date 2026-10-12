@@ -11785,6 +11785,30 @@ preinstall_menu() {
   done
 }
 
+routing_diagnostics_menu() {
+  while :; do
+    line; echo -e "${B}   МАРШРУТИЗАЦИЯ И ДИАГНОСТИКА${N}"; line
+    echo "  1) Полный read-only аудит стека"
+    echo "  2) Проверка стека с наблюдением"
+    echo "  3) Очистить устаревшие SNI-записи"
+    echo "  4) Пересобрать SNI из текущей БД"
+    echo "  5) Гигиена nginx"
+    echo "  6) Стелс-аудит"
+    echo "  0) Назад"
+    local c=""
+    ask c "Выбор" "1" '^[0-6]$'
+    case "$c" in
+      1) stack_audit_readonly; pause ;;
+      2) stack_doctor_menu ;;
+      3) sni_cleanup_stale; pause ;;
+      4) rebuild_sni_from_db ;;
+      5) nginx_hygiene ;;
+      6) stealth_audit ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
@@ -11792,6 +11816,7 @@ run_menu_action() {
   case "$1" in
     1) initial_setup ;;
     2) inbounds_manage_menu ;;
+    3) routing_diagnostics_menu ;;
     4) change_decoy ;;
     5) view_decoy_templates ;;
     6) show_status ;;
@@ -11803,14 +11828,8 @@ run_menu_action() {
     12) restore_firewall_state ;;
     13) panel_manage; pause ;;
     14) adguard_manage; pause ;;
-    15) sni_cleanup_stale; pause ;;
     16) change_admin_passwords; pause ;;
     17) update_self; pause ;;
-    18) stack_doctor_menu; pause ;;
-    19) inbounds_live; pause ;;
-    20) inbound_change_domain ;;
-    21) nginx_hygiene ;;
-    22) stealth_audit ;;
     23) rollback_menu ;;
     24) preinstall_menu ;;
     25) freeze_menu ;;
@@ -11965,6 +11984,7 @@ print_menu_actions() {
   echo
   echo -e "  ${B} 1)${N} 🧭 Первичная настройка SNI-роутера"
   echo -e "  ${B} 2)${N} 🧪 Инбаунды: проверка, добавление, удаление, домены"
+  echo -e "  ${B} 3)${N} 🧭 Маршрутизация и диагностика"
   echo -e "  ${B} 4)${N} 🎭 Сменить decoy для SNI-домена"
   echo -e "  ${B} 5)${N} 🖼️  Каталог decoy-шаблонов"
   echo -e "  ${B} 6)${N} 📊 Показать статус"
@@ -11976,17 +11996,11 @@ print_menu_actions() {
   echo -e "  ${B}12)${N} 🧯 Восстановить состояние фаервола"
   echo -e "  ${B}13)${N} 📥 Панель 3x-ui/LucX: определить, обновить до LucX, установить/удалить"
   echo -e "  ${B}14)${N} 🛰️  AdGuard Home: установить / удалить"
-  echo -e "  ${B}15)${N} 🧹 Очистка SNI: записи без инбаундов"
   echo -e "  ${B}16)${N} 🔑 Сменить пароли admin (панель / AdGuard)"
   echo -e "  ${B}17)${N} ⬇️  Обновить скрипт с GitHub"
-  echo -e "  ${B}18)${N} 🩺 Самодиагностика (проверка стека)"
-  echo -e "  ${B}21)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
-  echo -e "  ${B}22)${N} 🕶 Стелс-аудит (глазами Shodan/Censys)"
   echo -e "  ${B}23)${N} 💣 Откат и демонтаж стека"
   echo -e "  ${B}24)${N} 📸 Pre-install снимок (состояние до скрипта)"
   echo -e "  ${B}25)${N} ❄️  Заморозка самолечения (серты/инбаунды от автоматики)"
-  echo -e "  ${B}26)${N} 🔄 Пересобрать SNI из текущей БД (без пересоздания инбаундов)"
-  echo -e "  ${B}27)${N} 🔍 Полный read-only аудит стека"
 }
 
 main_menu() {
