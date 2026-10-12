@@ -11884,14 +11884,12 @@ run_menu_action() {
   audit "menu:${1:-}"     # каждое обращение к пункту — в журнал действий
   case "$1" in
     1) setup_routing_menu ;;
-    2) inbounds_manage_menu ;;
-    3) routing_diagnostics_menu ;;
-    4) decoy_domains_menu ;;
-    5) certificates_menu ;;
-    6) security_firewall_menu ;;
-    7) backups_rollback_menu ;;
-    8) diagnostics_maintenance_menu ;;
-    9) panel_adguard_menu ;;
+    2) decoy_domains_menu ;;
+    3) certificates_menu ;;
+    4) security_firewall_menu ;;
+    5) backups_rollback_menu ;;
+    6) diagnostics_maintenance_menu ;;
+    7) panel_adguard_menu ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
