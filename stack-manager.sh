@@ -6873,6 +6873,40 @@ EOF
     [[ "$do_create" == true ]] && create_inbounds_menu
   fi
 
+  # --- Стелс-контроль п.1: TCP-инбаунды, не попавшие за 443 ---
+  # После отката/восстановления инбаунды остаются в БД, а п.1 создаёт свои
+  # только при пустой БД (не трогать боевые). Честно показать непрятанные
+  # и предложить починку сразу — иначе это всплывёт только в п.15.
+  local _hid _proto _port _remark _miss=()
+  while IFS='|' read -r _hid _proto _port _remark; do
+    [[ -z "$_hid" ]] && continue
+    is_udp_proto "$_proto" && continue
+    [[ "$_proto" == "tproxy" ]] && continue   # tg web proxy: маршрут ведёт setup_tproxy_web (выше)
+    grep -qE "inb_${_hid}_backend;" "$SNI_CONF" 2>/dev/null && continue
+    _miss+=("${_hid}|${_proto}|${_port}|${_remark}")
+  done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, remark FROM inbounds WHERE enable=1;" 2>/dev/null || true)
+  if [[ ${#_miss[@]} -gt 0 ]]; then
+    echo
+    warn "TCP-инбаунды НЕ за 443 (в SNI-карте их нет — снаружи при закрытом UFW не работают):"
+    local _r
+    for _r in "${_miss[@]}"; do
+      IFS='|' read -r _hid _proto _port _remark <<<"$_r"
+      echo "    • #$_hid ${_remark:-без-имени} $_proto:$$_port"
+    done
+    if [[ -t 0 ]]; then
+      local _fix=false
+      askyn _fix "Прогнать «Починить инбаунд» для каждого сейчас?" "y"
+      if [[ "$_fix" == true ]]; then
+        for _r in "${_miss[@]}"; do
+          IFS='|' read -r _hid _proto _port _remark <<<"$_r"
+          fix_inbound "$_hid"
+        done
+      fi
+    else
+      warn "  (не-интерактивный режим) спрячьте вручную: п.19 → инбаунд → «Починить», затем п.11 заново"
+    fi
+  fi
+
   log "Первичная настройка завершена."
   if [[ "$panel_decoy" == "adguard" ]]; then
     echo
@@ -7002,6 +7036,8 @@ tunnel_inbound_fill() {
 # ПОЧИНКА ИНБАУНДА: SNI + сертификат + Reality dest (каноническая перезапись)
 # =====================================================================
 fix_inbound() {
+  # $1 (необязательно) — ID инбаунда; без аргумента спрашивает
+  local _arg_id="${1:-}"
   line; echo -e "${B}   ПОЧИНИТЬ ИНБАУНД (SNI + CERT + DEST)${N}"; line
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { err "x-ui.db не найден"; return 1; }
   [[ ! -f "$SNI_CONF" ]] && { err "Нет $SNI_CONF — сначала выполните п.1"; return 1; }
@@ -7009,7 +7045,12 @@ fix_inbound() {
   sqlite3 -header -column "$XUI_DB" "SELECT id, protocol, port, remark FROM inbounds WHERE enable=1;" 2>/dev/null || true
   echo
   local id=""
-  ask id "ID инбаунда" "" '^[0-9]+$'
+  if [[ -n "$_arg_id" ]]; then
+    id="$_arg_id"
+    log "Инбаунд: #$id"
+  else
+    ask id "ID инбаунда" "" '^[0-9]+$'
+  fi
   local proto="" port="" stream=""
   while IFS='|' read -r p po st; do proto="$p"; port="$po"; stream="$st"; done \
     < <(sqlite3 "$XUI_DB" "SELECT protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
