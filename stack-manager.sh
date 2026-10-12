@@ -6881,7 +6881,12 @@ EOF
   while IFS='|' read -r _hid _proto _port _remark; do
     [[ -z "$_hid" ]] && continue
     is_udp_proto "$_proto" && continue
-    [[ "$_proto" == "tproxy" ]] && continue   # tg web proxy: маршрут ведёт setup_tproxy_web (выше)
+    if [[ "$_proto" == "tproxy" ]]; then
+      # спец-бэкенды tproxy: tg_backend (setup_tproxy_web) / "tproxy" (меню)
+      grep -qE '^\s+\S+\s+(tproxy|tg_backend);' "$SNI_CONF" 2>/dev/null && continue
+      _miss+=("${_hid}|${_proto}|${_port}|${_remark}")
+      continue
+    fi
     grep -qE "inb_${_hid}_backend;" "$SNI_CONF" 2>/dev/null && continue
     _miss+=("${_hid}|${_proto}|${_port}|${_remark}")
   done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, remark FROM inbounds WHERE enable=1;" 2>/dev/null || true)
@@ -6899,7 +6904,11 @@ EOF
       if [[ "$_fix" == true ]]; then
         for _r in "${_miss[@]}"; do
           IFS='|' read -r _hid _proto _port _remark <<<"$_r"
-          fix_inbound "$_hid"
+          if [[ "$_proto" == "tproxy" ]]; then
+            setup_tproxy_web   # у tproxy своя ветка: hostname+серт+сайт+маршрут
+          else
+            fix_inbound "$_hid"
+          fi
         done
       fi
     else
@@ -7233,6 +7242,14 @@ add_inbound() {
   while IFS='|' read -r _id _proto _port; do
     [[ -z "$_id" || -z "$_proto" ]] && continue
     is_udp_proto "$_proto" && continue
+    if [[ "$_proto" == "tproxy" ]]; then
+      # tproxy прячется через спец-бэкенды (tg_backend от setup_tproxy_web
+      # или "tproxy"), а не inb_<id>_backend — проверяем их, иначе
+      # спрятанный tproxy вечно попадает в «непрятанные»
+      grep -qE '^\s+\S+\s+(tproxy|tg_backend);' "$SNI_CONF" 2>/dev/null && continue
+      UNHID+=("$_id|$_proto|$_port")
+      continue
+    fi
     grep -qE "^\s+\S+\s+inb_${_id}_backend" "$SNI_CONF" 2>/dev/null && continue
     # чужой reality (dest = внешняя цель) уже спрятан за 443 по SNI цели
     _st=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$_id;" 2>/dev/null || true)
