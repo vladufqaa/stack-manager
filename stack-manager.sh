@@ -10570,6 +10570,27 @@ fmt_bytes() {   # <bytes> → человекочитаемо
   else echo "${b} Б"; fi
 }
 
+# Единый экран диагностики и управления инбаундами.
+inbounds_manage_menu() {
+  while :; do
+    line; echo -e "${B}   ИНБАУНДЫ: ПРОВЕРКА И УПРАВЛЕНИЕ${N}"; line
+    echo "  1) Проверить все инбаунды (live-таблица)"
+    echo "  2) Добавить / проверить inbound"
+    echo "  3) Удалить inbound или только его SNI-привязку"
+    echo "  4) Сменить домен inbound"
+    echo "  0) Назад"
+    local c=""
+    ask c "Выбор" "1" '^[0-4]$'
+    case "$c" in
+      1) inbounds_live; pause ;;
+      2) add_inbound; pause ;;
+      3) remove_inbound; pause ;;
+      4) inbound_change_domain ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
 # п.19: live-таблица по всем инбаундам — порт слушает?, серт (дней), клиенты, трафик
 inbounds_live() {
   line; echo -e "${B}   ИНБАУНДЫ — LIVE${N}"; line
@@ -11770,8 +11791,7 @@ run_menu_action() {
   audit "menu:${1:-}"     # каждое обращение к пункту — в журнал действий
   case "$1" in
     1) initial_setup ;;
-    2) add_inbound; pause ;;
-    3) remove_inbound; pause ;;
+    2) inbounds_manage_menu ;;
     4) change_decoy ;;
     5) view_decoy_templates ;;
     6) show_status ;;
@@ -11944,8 +11964,7 @@ freeze_menu() {
 print_menu_actions() {
   echo
   echo -e "  ${B} 1)${N} 🧭 Первичная настройка SNI-роутера"
-  echo -e "  ${B} 2)${N} ➕ Добавить / проверить inbound"
-  echo -e "  ${B} 3)${N} 🗑️  Удалить inbound"
+  echo -e "  ${B} 2)${N} 🧪 Инбаунды: проверка, добавление, удаление, домены"
   echo -e "  ${B} 4)${N} 🎭 Сменить decoy для SNI-домена"
   echo -e "  ${B} 5)${N} 🖼️  Каталог decoy-шаблонов"
   echo -e "  ${B} 6)${N} 📊 Показать статус"
@@ -11961,8 +11980,6 @@ print_menu_actions() {
   echo -e "  ${B}16)${N} 🔑 Сменить пароли admin (панель / AdGuard)"
   echo -e "  ${B}17)${N} ⬇️  Обновить скрипт с GitHub"
   echo -e "  ${B}18)${N} 🩺 Самодиагностика (проверка стека)"
-  echo -e "  ${B}19)${N} 📡 Инбаунды: live-таблица"
-  echo -e "  ${B}20)${N} 🔀 Сменить домен инбаунда (без пересоздания)"
   echo -e "  ${B}21)${N} 🧽 Гигиена nginx (server_tokens, заголовки, логи)"
   echo -e "  ${B}22)${N} 🕶 Стелс-аудит (глазами Shodan/Censys)"
   echo -e "  ${B}23)${N} 💣 Откат и демонтаж стека"
