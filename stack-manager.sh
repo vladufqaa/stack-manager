@@ -4726,7 +4726,10 @@ cert_issue() {
       log "  cert $d: используется wildcard *.${WILDCARD_DOMAIN:-$wbase}"
       return 0
     fi
-    warn "  wildcard не выпущен — выпускаю персональный cert для $d"
+    warn "  wildcard НЕ выпущен (токен Cloudflare / DNS-01?) — для $d выпускаю персональный"
+    warn "  ВАЖНО: остальные серты этой установки тоже пойдут персональными (фолбэк сессии)."
+    warn "  Вернуть wildcard потом: меню сертификатов → Wildcard Cloudflare → включить,"
+    warn "  затем перепривязать пути (п.10 — пересборка). Причина отказа выше в выводе."
     CERT_MODE_CHOICE="personal"
   fi
 
