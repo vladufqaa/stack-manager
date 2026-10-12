@@ -10521,7 +10521,24 @@ stack_audit_readonly() {
     dbcount=$(sqlite3 -readonly -cmd '.timeout 3000' "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || true)
     [[ "$dbcount" =~ ^[0-9]+$ ]] && pass "x-ui.db читается: $dbcount включённых inbounds" || fail "x-ui.db не читается"
     dbbad=$(sqlite3 -readonly -cmd '.timeout 3000' "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1 AND (port IS NULL OR port<=0 OR json_valid(COALESCE(settings,''))=0 OR json_valid(COALESCE(stream_settings,''))=0);" 2>/dev/null || echo -1)
-    [[ "$dbbad" == 0 ]] && pass "JSON и порты inbounds валидны" || fail "Проблемные inbounds: $dbbad"
+    if [[ "$dbbad" == 0 ]]; then
+      pass "JSON и порты inbounds валидны"
+    elif [[ "$dbbad" == -1 ]]; then
+      fail "Не удалось проверить JSON и порты inbounds"
+    else
+      fail "Проблемные inbounds: $dbbad"
+      # Выводим конкретную строку и конкретную причину, а не только счётчик.
+      while IFS='|' read -r _iid _proto _port _remark _pbad _sbad _tbad; do
+        [[ -n "$_iid" ]] || continue
+        local _why=()
+        [[ "$_pbad" == 1 ]] && _why+=("порт=${_port:-пусто}")
+        [[ "$_sbad" == 1 ]] && _why+=("settings: невалидный JSON")
+        [[ "$_tbad" == 1 ]] && _why+=("stream_settings: невалидный JSON")
+        local _label="#$_iid ${_proto:-?}"
+        [[ -n "$_remark" ]] && _label+=" ($_remark)"
+        warn "  $_label — ${_why[*]}"
+      done < <(sqlite3 -readonly -separator '|' -cmd '.timeout 3000' "$XUI_DB" "SELECT id, protocol, COALESCE(port,''), COALESCE(remark,''), CASE WHEN port IS NULL OR port<=0 THEN 1 ELSE 0 END, CASE WHEN json_valid(COALESCE(settings,''))=0 THEN 1 ELSE 0 END, CASE WHEN json_valid(COALESCE(stream_settings,''))=0 THEN 1 ELSE 0 END FROM inbounds WHERE enable=1 AND (port IS NULL OR port<=0 OR json_valid(COALESCE(settings,''))=0 OR json_valid(COALESCE(stream_settings,''))=0) ORDER BY id;" 2>/dev/null || true)
+    fi
   else
     fail "x-ui.db не найден"
   fi
