@@ -290,6 +290,19 @@ check_os() {
 # =====================================================================
 # УТИЛИТЫ
 # =====================================================================
+# Единые проверки состояния стека — не дублировать проверки путей по меню.
+sni_router_present() {
+  [[ -f "$SNI_CONF" || -f /etc/nginx/streams-enabled/sni-router.conf || -f /etc/nginx/streams-available/sni-router.conf ]]
+}
+stack_heal_present() {
+  [[ -f /etc/systemd/system/stack-heal.timer || -f /etc/systemd/system/stack-heal.service ]] || \
+    systemctl is-enabled --quiet stack-heal.timer 2>/dev/null || \
+    systemctl is-active --quiet stack-heal.timer 2>/dev/null
+}
+nginx_ready() {
+  command -v nginx >/dev/null 2>&1 && [[ -f /etc/nginx/nginx.conf ]]
+}
+
 ensure_deps() {
   local missing=() t
   for t in sqlite3 jq curl ss nginx certbot openssl dig ufw fail2ban-client nc xxd; do
@@ -11456,17 +11469,11 @@ rollback_menu() {
     local heal="нет" jail="нет" hook="нет" ngx="нет" sni="нет" snap="нет"
     # Проверяем фактические файлы/состояние, а не только список unit-файлов:
     # после частичного отката unit может остаться disabled, а SNI — в enabled.
-    if [[ -f /etc/systemd/system/stack-heal.timer || -f /etc/systemd/system/stack-heal.service ]] || \
-       systemctl is-enabled --quiet stack-heal.timer 2>/dev/null || \
-       systemctl is-active --quiet stack-heal.timer 2>/dev/null; then
-      heal="да"
-    fi
+    stack_heal_present && heal="да"
     [[ -f /etc/fail2ban/jail.d/decoy-login.local ]] && jail="да"
     [[ -x /etc/letsencrypt/renewal-hooks/deploy/stack-cert-mirror.sh ]] && hook="да"
-    command -v nginx >/dev/null 2>&1 && ngx="да"
-    if [[ -f /etc/nginx/streams-enabled/sni-router.conf || -f /etc/nginx/streams-available/sni-router.conf ]]; then
-      sni="да"
-    fi
+    nginx_ready && ngx="да"
+    sni_router_present && sni="да"
     [[ -f "$FW_STATE_DIR/saved" ]] && snap="да"
     echo "  Текущее состояние стека:"
     printf "    nginx:                 %s\n" "$ngx"
