@@ -2615,7 +2615,7 @@ create_inbounds_menu() {
 
     # --- Reality: свой/чужой — тот же вопрос, что и в авто-установке ---
     local rmode=""
-    if [[ ( "$proto" == "vless" || "$proto" == "trojan" ) && "$security" == "reality" ]]; then
+    if [[ "$security" == "reality" ]]; then
       echo
       echo "  $name:"
       echo "   1) Чужой реалити «найти цели» — за 443 по SNI цели, серт НЕ нужен"
@@ -2628,14 +2628,14 @@ create_inbounds_menu() {
     local sni_domain="" rdtpl=""
     if [[ "$proto" == "qwdtt" || "$proto" == "csqtt" ]]; then
       sni_domain=""   # чистый UDP, SNI не нужен
-    elif [[ "$proto" == "vless" && "$security" == "reality" && "$rmode" == "1" ]]; then
+    elif [[ "$security" == "reality" && "$rmode" == "1" ]]; then
       # чужой реалити: живая проверка кандидатов + выбор цели (как в панели)
       local tgt=""
       reality_target_menu tgt "$name"
       REALITY_EXT_TARGET="$tgt"
       printf '%s' "$tgt" > /tmp/.reality-found-target 2>/dev/null || true
       log "  $name: цель → $tgt (dest+serverNames, за 443 по SNI цели)"
-    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ) || ( ( "$proto" == "vless" || "$proto" == "trojan" ) && "$security" == "reality" ) ]]; then
+    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ) || "$security" == "reality" ]]; then
       echo
       if [[ -z "$panel_domain" ]]; then
         panel_domain="${PANEL_DOMAIN:-}"
@@ -12589,7 +12589,7 @@ auto_full_setup() {
     local pfx="${PREFIX[$proto-$transport]:-}"
     local port sn="" dom="${SELDOM[$proto-$transport]:-}"
     # ── Reality: режим + цель/домен — прямо здесь, перед портом
-    if [[ ( "$proto" == "vless" || "$proto" == "trojan" ) && "$security" == "reality" ]]; then
+    if [[ "$security" == "reality" ]]; then
       local e_key="$proto-$transport" rmode=""
       if [[ -t 0 ]]; then
         echo
