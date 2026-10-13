@@ -11878,8 +11878,9 @@ rb_full_rollback() {
   stack_reset_state 0 || warn "  состояние панели возвращено не полностью (см. вывод выше)"
   # Убираем SNI-привязки hosts, созданные стеком, сохраняя сами inbounds/клиентов.
   if [[ -f "$XUI_DB" ]]; then
-    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE port=443; DELETE FROM hosts_shadow; DELETE FROM sm_pending;" >/dev/null 2>&1 || true
-    log "  hosts-привязки SNI удалены (inbounds и клиенты сохранены)"
+    hosts_ownership_ensure
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE port=443 AND EXISTS (SELECT 1 FROM sm_hosts_owned o WHERE o.inbound_id=hosts.inbound_id AND o.port=hosts.port AND o.address=COALESCE(hosts.address,'') AND o.sni=COALESCE(hosts.sni,'')); DELETE FROM sm_hosts_owned; DELETE FROM hosts_shadow; DELETE FROM sm_pending;" >/dev/null 2>&1 || true
+    log "  hosts-привязки, созданные скриптом, удалены (чужие hosts и inbounds сохранены)"
   fi
   log "[5/7] Открытие портов наружу (значение по умолчанию панели)…"
   # '' для панели == 0.0.0.0: пишем именно «пусто», как это хранила панель до
