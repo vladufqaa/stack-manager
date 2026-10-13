@@ -3784,9 +3784,11 @@ uninstall_heal_timer() {
 # МУЛЬТИСЕРТ (единый серт на все домены стека) + сохранение email LE
 # =====================================================================
 le_email_load() {
-  [[ -n "$EMAIL" ]] && return 0
+  [[ "$EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]] && return 0
+  EMAIL=""
   [[ -s "$LE_EMAIL_FILE" ]] && EMAIL=$(head -n1 "$LE_EMAIL_FILE" 2>/dev/null | tr -d '[:space:]')
-  [[ -n "$EMAIL" ]] && return 0
+  [[ "$EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]] && return 0
+  EMAIL=""
   return 1
 }
 le_email_save() {
@@ -7148,6 +7150,15 @@ EOF
     local do_create=false
     [[ "$PLAN_CREATE" == true ]] && do_create=true
     [[ "$do_create" == true ]] && create_inbounds_menu
+  elif [[ "$PLAN_CREATE" == true ]]; then
+    log "Активные инбаунды уже есть ($inb_count) — существующие не трогаю."
+    if [[ -t 0 ]]; then
+      local add_more=false
+      askyn add_more "Запустить мастер и добавить новые инбаунды?" "n"
+      [[ "$add_more" == true ]] && create_inbounds_menu
+    else
+      log "Добавить новые можно через раздел 1 → управление инбаундами."
+    fi
   fi
 
   # --- Стелс-контроль п.1: TCP-инбаунды, не попавшие за 443 ---
