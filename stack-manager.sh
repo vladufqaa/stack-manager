@@ -2718,7 +2718,9 @@ create_inbounds_menu() {
           hcp=$(cert_paths "$sni_domain" 2>/dev/null || true)
           hcert="${hcp%% *}"; hkey="${hcp##* }"
           if [[ -n "$hcert" && -f "$hcert" && -f "$hkey" ]]; then
-            mk_decoy "$hdecoy_port" "$sni_domain" "$hcert" "$hkey" "/var/www/decoy-hysteria-$new_id" "default" "status404=1"
+            local htpl="default"
+            decoy_template_choose htpl "Decoy для Hysteria #$new_id ($sni_domain)" "default"
+            mk_decoy "$hdecoy_port" "$sni_domain" "$hcert" "$hkey" "/var/www/decoy-hysteria-$new_id" "$htpl" "status404=1"
             sni_upstream_add "hysteria_${new_id}_web" "$hdecoy_port"
             sni_map_add "$sni_domain" "hysteria_${new_id}_web"
             nginx_reload || true
@@ -8103,7 +8105,14 @@ decoy_pick_inbound() {
     proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
     [[ -z "$proto" ]] && continue
     st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-    # В меню смены decoy показываем только собственный Reality.
+    # В меню смены decoy показываем собственный Reality и Hysteria TCP-decoy.
+    if [[ "$proto" == "hysteria" ]]; then
+      L+=("$dom|$id|$proto|$port")
+      mark="декой есть"
+      stack_decoy_meta "$dom" >/dev/null 2>&1 || mark="декоя нет"
+      printf "  %2d) #%-3s %-30s %-9s :%-5s %s\n" "${#L[@]}" "$id" "$dom" "$proto" "$port" "$mark"
+      continue
+    fi
     [[ "$proto" == "vless" ]] || continue
     grep -qi '"security": *"reality"' <<<"$st" || continue
     port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$id;" 2>/dev/null || true)
@@ -8145,6 +8154,24 @@ decoy_pick_inbound() {
   fi
   if [[ -n "$dest" && "$dest" != "127.0.0.1" ]]; then
     warn "Чужой Reality ($dom → $dest): decoy не нужен — домен спрятан за SNI цели."
+    pause; return 0
+  fi
+  if [[ "$proto" == "hysteria" ]]; then
+    local tpl="" meta dport="" c="" k="" root="" hcp hport
+    decoy_template_choose tpl "Decoy для Hysteria #$id ($dom)" "default"
+    hcp=$(cert_paths "$dom" 2>/dev/null || true)
+    [[ -z "$hcp" ]] && { err "Серта $dom нет — decoy отложен"; pause; return 1; }
+    c="${hcp%% *}"; k="${hcp##* }"
+    meta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
+    if [[ -n "$meta" ]]; then read -r dport root _ _ <<<"$meta"; else
+      dport=$((47000 + id)); while ss -tlnH "sport = :$dport" 2>/dev/null | grep -q .; do dport=$((dport+1)); done
+      root="/var/www/decoy-hysteria-$id"
+    fi
+    mk_decoy "$dport" "$dom" "$c" "$k" "$root" "$tpl" "status404=1"
+    sni_upstream_add "hysteria_${id}_web" "$dport"
+    sni_map_add "$dom" "hysteria_${id}_web"
+    nginx_reload || true
+    log "Hysteria #$id: TCP-decoy обновлён, UDP-инбаунд не изменён"
     pause; return 0
   fi
   if [[ "$proto" == "vless" ]] && grep -qi '"security": *"reality"' <<<"$st"; then
