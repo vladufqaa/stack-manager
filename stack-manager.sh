@@ -8246,7 +8246,12 @@ decoy_pick_inbound() {
     local tpl="" meta dport="" c="" k="" root="" hcp hport
     decoy_template_choose tpl "Decoy для Hysteria #$id ($dom)" "default"
     hcp=$(cert_paths "$dom" 2>/dev/null || true)
-    [[ -z "$hcp" ]] && { err "Серта $dom нет — decoy отложен"; pause; return 1; }
+    if [[ -z "$hcp" && "$dom" != "__missing_sni__" ]]; then
+      warn "Сертификат $dom не найден — пытаюсь выпустить его для HTTPS-decoy"
+      cert_issue "$dom" || true
+      hcp=$(cert_paths "$dom" 2>/dev/null || true)
+    fi
+    [[ -z "$hcp" ]] && { err "Серта $dom нет — decoy отложен; сначала выпусти сертификат в разделе «Сертификаты»"; pause; return 1; }
     c="${hcp%% *}"; k="${hcp##* }"
     meta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
     if [[ -n "$meta" ]]; then read -r dport root _ _ <<<"$meta"; else
