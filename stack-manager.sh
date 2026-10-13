@@ -8069,7 +8069,7 @@ decoy_ensure_all() {
     dest=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
       "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),json_extract(stream_settings,'\$.realitySettings.target'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     dest="${dest%%:*}"
-    if [[ "$proto" == "hysteria" ]]; then
+    if [[ "$proto" == "hysteria" || "$proto" == "hysteria2" ]]; then
       hmeta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
       if [[ -z "$hmeta" ]]; then
         hcp=$(cert_paths "$dom" 2>/dev/null || true)
@@ -8164,7 +8164,7 @@ decoy_pick_inbound() {
     st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     # В меню смены decoy показываем собственный Reality и Hysteria TCP-decoy.
     port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-    if [[ "$proto" == "hysteria" ]]; then
+    if [[ "$proto" == "hysteria" || "$proto" == "hysteria2" ]]; then
       L+=("$dom|$id|$proto|$port")
       mark="декой есть"
       stack_decoy_meta "$dom" >/dev/null 2>&1 || mark="декоя нет"
@@ -8214,7 +8214,7 @@ decoy_pick_inbound() {
     warn "Чужой Reality ($dom → $dest): decoy не нужен — домен спрятан за SNI цели."
     pause; return 0
   fi
-  if [[ "$proto" == "hysteria" ]]; then
+  if [[ "$proto" == "hysteria" || "$proto" == "hysteria2" ]]; then
     local tpl="" meta dport="" c="" k="" root="" hcp hport
     decoy_template_choose tpl "Decoy для Hysteria #$id ($dom)" "default"
     hcp=$(cert_paths "$dom" 2>/dev/null || true)
