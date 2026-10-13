@@ -8095,7 +8095,7 @@ decoy_ensure_all() {
     inmap && /^}/ { inmap=0 }
     inmap && /^[[:space:]]/ && NF >= 2 {
       dom = $1; sub(/;$/, "", dom); be = $2; sub(/;$/, "", be)
-      if (dom != "" && dom != "default" && be ~ /_backend$/ && be !~ /^(panel|agh)_backend$/) print dom "|" be
+      if (dom != "" && dom != "default" && ((be ~ /_backend$/ && be !~ /^(panel|agh)_backend$/) || be ~ /^hysteria_[0-9]+_web$/)) print dom "|" be
     }' "$SNI_CONF" 2>/dev/null)
   if (( line_ok )); then
     nginx_reload || true
@@ -8150,7 +8150,7 @@ decoy_pick_inbound() {
     inmap && /^}/ { inmap=0 }
     inmap && /^[[:space:]]/ && NF >= 2 {
       dom = $1; sub(/;$/, "", dom); be = $2; sub(/;$/, "", be)
-      if (dom != "" && dom != "default" && be ~ /_backend$/ && be !~ /^(panel|agh)_backend$/) print dom "|" be
+      if (dom != "" && dom != "default" && ((be ~ /_backend$/ && be !~ /^(panel|agh)_backend$/) || be ~ /^hysteria_[0-9]+_web$/)) print dom "|" be
     }' "$SNI_CONF" 2>/dev/null)
   fi
   if [[ -n "$preset_id" ]]; then
