@@ -504,8 +504,9 @@ NGINXCFG
       [[ -f /etc/nginx/nginx.conf ]] && log "  создан минимальный базовый /etc/nginx/nginx.conf"
     fi
     if [[ ! -f /etc/nginx/nginx.conf ]]; then
-      err "  /etc/nginx/nginx.conf не удалось восстановить"
-      err "  Проверь apt-get update и пакет nginx-common вручную"
+      err "  nginx.conf не восстановлен: проверь состояние nginx-пакетов и DNS репозитория"
+      err "  Выполни: apt-get update && apt-get install -y --reinstall nginx nginx-common"
+      return 1
     else
       log "  /etc/nginx восстановлен"
     fi
