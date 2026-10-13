@@ -11892,7 +11892,20 @@ setup_routing_menu() {
     echo "  2) Инбаунды: проверка, добавление, удаление, домены"
     echo "  0) Назад"
     local c=""; ask c "Выбор" "1" '^[0-2]$'
-    case "$c" in 1) initial_setup ;; 2) inbounds_manage_menu ;; 0) return 0 ;; esac
+    case "$c" in
+      1)
+        initial_setup
+        local _setup_rc=$?
+        if [[ $_setup_rc -eq 0 ]]; then
+          echo
+          echo -e "${G}Первичная настройка завершена.${N}"
+          pause
+        fi
+        return "$_setup_rc"
+        ;;
+      2) inbounds_manage_menu ;;
+      0) return 0 ;;
+    esac
   done
 }
 decoy_domains_menu() {
