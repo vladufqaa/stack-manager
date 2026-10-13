@@ -8565,6 +8565,14 @@ change_decoy() {
     if [[ -f "$tpl_src" ]]; then
       cp -f "$tpl_src" "$PANEL_DECOY_DIR/index.html" 2>/dev/null || true
       chown www-data:www-data "$PANEL_DECOY_DIR/index.html" 2>/dev/null || true
+      # Одной замены index.html недостаточно: после удаления AdGuard или
+      # прежней смены decoy в stack.conf мог остаться return 302 /404.html.
+      # Пересобираем только корневой location панели, сохраняя webBasePath
+      # и subPath подписки.
+      panel_decoy_apply stub "$PANEL_DECOY_DIR" || {
+        warn "Не удалось применить корневой location decoy панели"
+        return 1
+      }
       nginx_reload || true
       log "Decoy панели сменён на «$tpl»"
     else
