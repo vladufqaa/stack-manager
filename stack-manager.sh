@@ -2723,7 +2723,7 @@ create_inbounds_menu() {
           if [[ -n "$hcert" && -f "$hcert" && -f "$hkey" ]]; then
             local htpl="default"
             decoy_template_choose htpl "Decoy для Hysteria #$new_id ($sni_domain)" "default"
-            mk_decoy "$hdecoy_port" "$sni_domain" "$hcert" "$hkey" "/var/www/decoy-hysteria-$new_id" "$htpl" "status404=1"
+            mk_decoy "$hdecoy_port" "$sni_domain" "$hcert" "$hkey" "/var/www/decoy-hysteria-$new_id" "$htpl"
             sni_upstream_add "hysteria_${new_id}_web" "$hdecoy_port"
             sni_map_add "$sni_domain" "hysteria_${new_id}_web"
             nginx_reload || true
@@ -8086,7 +8086,7 @@ decoy_ensure_all() {
         if [[ -n "$hcp" ]]; then
           hc="${hcp%% *}"; hk="${hcp##* }"; hport=$((47000 + id))
           while ss -tlnH "sport = :$hport" 2>/dev/null | grep -q .; do hport=$((hport+1)); done
-          mk_decoy "$hport" "$dom" "$hc" "$hk" "/var/www/decoy-hysteria-$id" "default" "status404=1" || continue
+          mk_decoy "$hport" "$dom" "$hc" "$hk" "/var/www/decoy-hysteria-$id" "default" || continue
           sni_upstream_add "hysteria_${id}_web" "$hport"
           sni_map_add "$dom" "hysteria_${id}_web"
           line_ok=1
@@ -8245,7 +8245,7 @@ decoy_pick_inbound() {
       dport=$((47000 + id)); while ss -tlnH "sport = :$dport" 2>/dev/null | grep -q .; do dport=$((dport+1)); done
       root="/var/www/decoy-hysteria-$id"
     fi
-    mk_decoy "$dport" "$dom" "$c" "$k" "$root" "$tpl" "status404=1"
+    mk_decoy "$dport" "$dom" "$c" "$k" "$root" "$tpl"
     sni_upstream_add "hysteria_${id}_web" "$dport"
     sni_map_add "$dom" "hysteria_${id}_web"
     nginx_reload || true
