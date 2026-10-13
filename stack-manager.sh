@@ -8397,8 +8397,21 @@ change_decoy() {
     inmap && /^}/ { inmap=0 }
     inmap && /^[[:space:]]/ && NF >= 2 {
       dom=$1; sub(/;$/, "", dom); be=$2; sub(/;$/, "", be)
-      if (dom != "" && dom != "default" && be ~ /^inb_[0-9]+_backend$/) print dom "|" be
+      if (dom != "" && dom != "default" && (be ~ /^inb_[0-9]+_backend$/ || be ~ /^hysteria_[0-9]+_web$/)) print dom "|" be
     }' "$SNI_CONF" 2>/dev/null)
+  # Hysteria может быть в БД, но ещё не иметь SNI-map (например, после
+  # восстановления старого бэкапа). Добавляем её напрямую из stream_settings.
+  while IFS='|' read -r _hid _hproto _hport; do
+    [[ -n "$_hid" ]] || continue
+    _d_dom=$(sqlite3 -noheader "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.tlsSettings.serverName'),json_extract(settings,'\$.tlsSettings.serverName'),'') FROM inbounds WHERE id=$_hid;" 2>/dev/null | head -1 || true)
+    [[ -n "$_d_dom" && "$_d_dom" != "null" ]] || continue
+    local _seen=false _row
+    for _row in "${_decoy_rows[@]}"; do [[ "${_row%%|*}" == "$_d_dom" ]] && _seen=true; done
+    [[ "$_seen" == true ]] && continue
+    _decoy_rows+=("$_d_dom|$_hid|$_hport")
+    _decoy_row="${#_decoy_rows[@]}"
+    printf "   %s) Hysteria #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_hid" "$_d_dom" "$_hport"
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE port>0 AND lower(protocol) LIKE '%hysteria%' ORDER BY id;" 2>/dev/null || true)
   echo "   0) Назад"
   local m=""
   ask m "Объект" "1" '^[0-9]+$'
