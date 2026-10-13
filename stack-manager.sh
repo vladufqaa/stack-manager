@@ -481,9 +481,31 @@ ensure_deps() {  local missing=() t
       fi
       rm -rf "$_ngx_tmp" 2>/dev/null || true
     fi
+    # Последний fallback: минимальный рабочий конфиг. Он достаточен для
+    # последующей сборки stack.conf и SNI-router; пакетный conffile мог быть
+    # недоступен из-за DNS/репозитория или нестандартного состояния dpkg.
     if [[ ! -f /etc/nginx/nginx.conf ]]; then
-      warn "  /etc/nginx/nginx.conf не восстановлен автоматически"
-      warn "  Выполни: apt-get download nginx-common && dpkg-deb -x nginx-common_*.deb /"
+      cat > /etc/nginx/nginx.conf <<'NGINXCFG'
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+error_log /var/log/nginx/error.log;
+events { worker_connections 1024; }
+stream { include /etc/nginx/streams-enabled/*.conf; }
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    access_log /var/log/nginx/access.log;
+    sendfile on;
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
+}
+NGINXCFG
+      [[ -f /etc/nginx/nginx.conf ]] && log "  создан минимальный базовый /etc/nginx/nginx.conf"
+    fi
+    if [[ ! -f /etc/nginx/nginx.conf ]]; then
+      err "  /etc/nginx/nginx.conf не удалось восстановить"
+      err "  Проверь apt-get update и пакет nginx-common вручную"
     else
       log "  /etc/nginx восстановлен"
     fi
