@@ -8404,7 +8404,10 @@ change_decoy() {
   while IFS='|' read -r _hid _hproto _hport; do
     [[ -n "$_hid" ]] || continue
     _d_dom=$(sqlite3 -noheader "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.tlsSettings.serverName'),json_extract(settings,'\$.tlsSettings.serverName'),'') FROM inbounds WHERE id=$_hid;" 2>/dev/null | head -1 || true)
-    [[ -n "$_d_dom" && "$_d_dom" != "null" ]] || continue
+    if [[ -z "$_d_dom" || "$_d_dom" == "null" ]]; then
+      _d_dom=$(sqlite3 -noheader "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$_hid;" 2>/dev/null | grep -oE '"serverName"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*"serverName"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+    fi
+    [[ -z "$_d_dom" || "$_d_dom" == "null" ]] && _d_dom="__missing_sni__"
     local _seen=false _row
     for _row in "${_decoy_rows[@]}"; do [[ "${_row%%|*}" == "$_d_dom" ]] && _seen=true; done
     [[ "$_seen" == true ]] && continue
