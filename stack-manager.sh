@@ -468,8 +468,22 @@ ensure_deps() {  local missing=() t
     fi
     if [[ ! -f /etc/nginx/nginx.conf ]]; then
       mkdir -p /etc/nginx/{sites-available,sites-enabled,streams-available,streams-enabled,snippets,conf.d} 2>/dev/null || true
-      warn "  /etc/nginx/nginx.conf всё ещё отсутствует — nginx-common не восстановил conffile"
-      warn "  Выполни: apt-get install --reinstall -o Dpkg::Options::=--force-confmiss nginx-common"
+      # После ручного rm -rf dpkg иногда считает nginx.conf «удалённым
+      # администратором» и не возвращает conffile даже с reinstall. В этом
+      # случае берём штатный конфиг непосредственно из deb-пакета.
+      local _ngx_tmp="" _got=""
+      _ngx_tmp=$(mktemp -d /tmp/nginx-common.XXXXXX 2>/dev/null || true)
+      if [[ -n "$_ngx_tmp" ]] && (cd "$_ngx_tmp" && apt-get download nginx-common >/dev/null 2>&1); then
+        _got=$(ls -1t "$_ngx_tmp"/nginx-common_*.deb 2>/dev/null | head -1 || true)
+        if [[ -n "$_got" ]]; then
+          dpkg-deb --fsys-tarfile "$_got" 2>/dev/null | tar -xOf - ./etc/nginx/nginx.conf > /etc/nginx/nginx.conf 2>/dev/null || true
+        fi
+      fi
+      rm -rf "$_ngx_tmp" 2>/dev/null || true
+    fi
+    if [[ ! -f /etc/nginx/nginx.conf ]]; then
+      warn "  /etc/nginx/nginx.conf не восстановлен автоматически"
+      warn "  Выполни: apt-get download nginx-common && dpkg-deb -x nginx-common_*.deb /"
     else
       log "  /etc/nginx восстановлен"
     fi
