@@ -3723,9 +3723,11 @@ PYDEDUP
     systemctl restart AdGuardHome 2>/dev/null || systemctl restart adguardhome 2>/dev/null || true
     log "  дедуп: AdGuard переведён на live и перезапущен"
   fi
+  # Не удаляем /root/cert: это может быть рабочее хранилище сертификатов,
+  # созданное панелью или администратором. Перепривязка ссылок выше безопасна,
+  # но уничтожение каталога при откате/самолечении недопустимо.
   if [[ -d /root/cert ]]; then
-    rm -rf /root/cert 2>/dev/null || true
-    [[ -d /root/cert ]] || log "  дедуп: зеркало /root/cert удалено — серты только в /etc/letsencrypt/live/"
+    log "  дедуп: /root/cert сохранён (удаление отключено; панельные сертификаты не трогаются)"
   fi
   return 0
 }
