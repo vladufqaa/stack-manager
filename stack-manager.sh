@@ -11552,6 +11552,7 @@ rb_wipe_stack_state() {
   # 2) точка отсчёта «первого запуска»: без неё скрипт считает стек собранным (п.1)
   local -a wipe=(
     "$BACKUP_DIR/.pre-install-done"
+    "$BACKUP_DIR/.stack-ever-ran"
     "$FROZEN_FILE"
     "$CERT_MODE_FILE"
     "$CERT_LINES_FILE"
@@ -12558,7 +12559,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — сервер работает не на свежем ядре. Откройте раздел 6 → диагностика."
 
   # Первый запуск — предложить pre-install снимок состояния
-  if [[ ! -f "$BACKUP_DIR/.pre-install-done" ]]; then
+  if [[ ! -f "$BACKUP_DIR/.pre-install-done" && ! -f "$BACKUP_DIR/.stack-ever-ran" ]]; then
     echo
     warn "Первый запуск скрипта в этой системе."
     echo "  Рекомендуется сохранить снимок ТЕКУЩЕГО состояния — всех файлов,"
@@ -12576,6 +12577,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     fi
     echo
   fi
+  # Фиксируем сам факт запуска отдельно от pre-install snapshot: полный откат
+  # может удалить .pre-install-done, но не должен превращать повторный запуск
+  # в «первый» и снова предлагать снимок без необходимости.
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+  touch "$BACKUP_DIR/.stack-ever-ran" 2>/dev/null || true
   # Автобэкап x-ui.db + nginx-конфигов стека (последние 5 копий)
   auto_backup_stack
   # deploy-hook renew (сертиф. живут в live/, зеркала нет) + дедупликация
