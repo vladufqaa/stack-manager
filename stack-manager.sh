@@ -8247,6 +8247,18 @@ decoy_pick_inbound() {
     decoy_template_choose tpl "Decoy для Hysteria #$id ($dom)" "default"
     hcp=$(cert_paths "$dom" 2>/dev/null || true)
     if [[ -z "$hcp" && "$dom" != "__missing_sni__" ]]; then
+      # Wildcard может использоваться панелью, даже если маркер wildcard
+      # скрипта потерян после восстановления backup. Берём фактические пути
+      # сертификата панели и проверяем их наличие — новый ACME-серт не нужен.
+      local _wc _wk
+      _wc=$(xui_get webCertFile 2>/dev/null || true)
+      _wk=$(xui_get webKeyFile 2>/dev/null || true)
+      if [[ -f "$_wc" && -f "$_wk" ]]; then
+        hcp="$_wc $_wk"
+        log "Использую действующий сертификат панели для $dom (включая wildcard)"
+      fi
+    fi
+    if [[ -z "$hcp" && "$dom" != "__missing_sni__" ]]; then
       warn "Сертификат $dom не найден — пытаюсь выпустить его для HTTPS-decoy"
       cert_issue "$dom" || true
       hcp=$(cert_paths "$dom" 2>/dev/null || true)
