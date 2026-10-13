@@ -1782,10 +1782,18 @@ PYPDA
       nginx_reload || true
       log "Корень домена панели → $mode (nginx перезагружен)"
     else
-      err "nginx -t не прошёл после смены корня панели:"
-      nginx -t 2>&1 | tail -4 | sed 's/^/    /'
+      err "nginx -t не прошёл после смены корня панели — откатываю stack.conf"
+      if [[ -s "$panel_conf_bak" ]]; then
+        cp -f "$panel_conf_bak" "$STACK_CONF" 2>/dev/null || true
+        nginx -t 2>&1 | tail -4 | sed 's/^/    /'
+      fi
+      rc=1
     fi
+  elif [[ -s "$panel_conf_bak" ]]; then
+    # Python-редактор не должен оставлять частично изменённый конфиг.
+    cp -f "$panel_conf_bak" "$STACK_CONF" 2>/dev/null || true
   fi
+  rm -f "$panel_conf_bak" 2>/dev/null || true
   return $rc
 }
 
