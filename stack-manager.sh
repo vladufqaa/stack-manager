@@ -589,10 +589,10 @@ sni_domain_taken() { [[ -n "$(sni_domain_owner "$@")" ]]; }
 #   $1 = имя переменной результата, $2 = id инбаунда, $3 = домен по умолчанию
 # ВАЖНО: переменная результата НЕ должна называться d/p/r/in — это локали ask()
 ask_sni_domain() {
-  local __v="$1" __id="$2" __def="$3" d_val owner
+  local __v="$1" __id="$2" __def="$3" __label="${4:-SNI-домен для #${__id}}" d_val owner
   while :; do
     d_val=""
-    ask d_val "SNI-домен для #${__id}" "$__def" '^[a-zA-Z0-9.-]+$'
+    ask d_val "$__label" "$__def" '^[a-zA-Z0-9.-]+$'
     [[ -z "$d_val" ]] && { err "Пустой домен."; continue; }
     owner=$(sni_domain_owner "$d_val" "$__id")
     if [[ -n "$owner" ]]; then
@@ -6856,6 +6856,8 @@ initial_setup() {
     [[ "${HIDE[$id]}" == true ]] || continue
 
     local def="svc-$id.example.com"
+    local is_reality=false
+    [[ "$proto" == "vless" ]] && grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"${INB_STREAM[$id]}" && is_reality=true
     case "$proto" in
       anytls) def="at.example.com";;
       trusttunnel|trust-tunnel) def="tt.example.com";;
@@ -6864,12 +6866,15 @@ initial_setup() {
       vless) def="r.example.com";;
     esac
     local d_new=""
-    ask_sni_domain d_new "$id" "$def"
+    if [[ "$is_reality" == true ]]; then
+      ask_sni_domain d_new "$id" "$def" "SNI-домен для Reality #$id (домен будет использоваться клиентом)"
+    else
+      ask_sni_domain d_new "$id" "$def"
+    fi
     DOMAIN[$id]="$d_new"
 
-    local is_reality=false
-    [[ "$proto" == "vless" ]] && grep -q '"security": *"reality"' <<<"${INB_STREAM[$id]}" && is_reality=true
-    # decoy-порт нужен ТОЛЬКО Reality (dest для рукопожатия); шаблон заглушки — выбор пользователя
+    # Для Reality явно выбираем страницу, которая будет показана при
+    # открытии SNI в браузере; это отдельная decoy-заглушка, не протокол.
     if [[ "$is_reality" == true ]]; then
       local dtpl=""
       decoy_template_choose dtpl "Decoy-заглушка для #$id (страница на его SNI-домене)" "corporate"
