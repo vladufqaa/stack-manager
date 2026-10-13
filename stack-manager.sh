@@ -8197,14 +8197,15 @@ decoy_pick_inbound() {
     }' "$SNI_CONF" 2>/dev/null)
     # Добавляем Hysteria даже при старом/отсутствующем SNI-map.
     while IFS='|' read -r hid hproto hport hdom; do
-      [[ -n "$hid" && -n "$hdom" ]] || continue
+      [[ -n "$hid" ]] || continue
+      [[ -z "$hdom" ]] && hdom="__missing_sni__"
       local already=false item
       for item in "${L[@]}"; do [[ "${item%%|*}" == "$hdom" ]] && already=true; done
       [[ "$already" == true ]] && continue
       L+=("$hdom|$hid|$hproto|$hport")
       mark="декоя нет"; stack_decoy_meta "$hdom" >/dev/null 2>&1 && mark="декой есть"
       printf "  %2d) #%-3s %-30s %-9s :%-5s %s\n" "${#L[@]}" "$hid" "$hdom" "$hproto" "$hport" "$mark"
-    done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT i.id,i.protocol,i.port,COALESCE(NULLIF((SELECT sni FROM hosts WHERE inbound_id=i.id AND port=443 LIMIT 1),''),NULLIF((SELECT address FROM hosts WHERE inbound_id=i.id AND port=443 LIMIT 1),''),NULLIF(json_extract(i.stream_settings,'\$.tlsSettings.serverName'),''),NULLIF(json_extract(i.stream_settings,'\$.serverName'),''),NULLIF(json_extract(i.stream_settings,'\$.hysteriaSettings.serverName'),''),NULLIF(json_extract(i.stream_settings,'\$.realitySettings.serverNames[0]'),'')) FROM inbounds i WHERE i.enable=1 AND lower(i.protocol) IN ('hysteria','hysteria2') ORDER BY i.id;" 2>/dev/null || true)
+    done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT i.id,i.protocol,i.port,COALESCE(NULLIF((SELECT sni FROM hosts WHERE inbound_id=i.id AND port=443 LIMIT 1),''),NULLIF((SELECT address FROM hosts WHERE inbound_id=i.id AND port=443 LIMIT 1),''),NULLIF(json_extract(i.stream_settings,'\$.tlsSettings.serverName'),''),NULLIF(json_extract(i.settings,'\$.tlsSettings.serverName'),''),NULLIF(json_extract(i.stream_settings,'\$.serverName'),''),NULLIF(json_extract(i.settings,'\$.serverName'),''),NULLIF(json_extract(i.stream_settings,'\$.hysteriaSettings.serverName'),''),NULLIF(json_extract(i.settings,'\$.hysteriaSettings.serverName'),''),NULLIF(json_extract(i.stream_settings,'\$.realitySettings.serverNames[0]'),'')) FROM inbounds i WHERE i.enable=1 AND lower(i.protocol) IN ('hysteria','hysteria2') ORDER BY i.id;" 2>/dev/null || true)
   fi
   if [[ -n "$preset_id" ]]; then
     L=("$dom|$id|$proto|$preset_port")
