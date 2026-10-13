@@ -459,11 +459,20 @@ ensure_deps() {  local missing=() t
     local _ngx_pkgs
     _ngx_pkgs=$(dpkg -l 2>/dev/null | awk '/^ii/ && $2 ~ /nginx/ {print $2}' | tr '\n' ' ')
     [[ -z "$_ngx_pkgs" ]] && _ngx_pkgs="nginx nginx-common nginx-full"
-    apt-get install -y --reinstall $_ngx_pkgs >/dev/null 2>&1 || true
+    apt-get install -y --reinstall -o Dpkg::Options::=--force-confmiss $_ngx_pkgs >/dev/null 2>&1 || true
     if [[ ! -f /etc/nginx/nginx.conf ]]; then
-      apt-get install -y --reinstall -o Dpkg::Options::=--force-confmiss nginx >/dev/null 2>&1 || true
+      # nginx.conf и базовые каталоги принадлежат nginx-common, а не всегда
+      # пакету nginx. force-confmiss нужен для conffile, удалённого вручную.
+      apt-get install -y --reinstall -o Dpkg::Options::=--force-confmiss \
+        nginx nginx-common nginx-core nginx-full >/dev/null 2>&1 || true
     fi
-    [[ -f /etc/nginx/nginx.conf ]] && log "  /etc/nginx восстановлен" || warn "  /etc/nginx/nginx.conf всё ещё отсутствует — покажи apt-get install --reinstall nginx"
+    if [[ ! -f /etc/nginx/nginx.conf ]]; then
+      mkdir -p /etc/nginx/{sites-available,sites-enabled,streams-available,streams-enabled,snippets,conf.d} 2>/dev/null || true
+      warn "  /etc/nginx/nginx.conf всё ещё отсутствует — nginx-common не восстановил conffile"
+      warn "  Выполни: apt-get install --reinstall -o Dpkg::Options::=--force-confmiss nginx-common"
+    else
+      log "  /etc/nginx восстановлен"
+    fi
   fi
 }
 
