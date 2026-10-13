@@ -5973,7 +5973,7 @@ decoy_template_choose() {
   printf "  %2d) %-15s %s\n" "$__custom_num" "custom" "▶ Свой сайт — папка со статикой (index.html и т.д.)" >&2
   echo >&2
   local __c=""
-  ask __c "$prompt" "$default" '^[0-9]+$|^[a-z:_/.-]+$' 2>/dev/null || { printf -v "$__result" '%s' "$default"; return 0; }
+  ask __c "$prompt" "$default" '^[0-9]+$|^[a-z:_/.-]+$' || { printf -v "$__result" '%s' "$default"; return 0; }
   if [[ "$__c" == "custom" || "$__c" == "$__custom_num" || "$__c" == custom:* ]]; then
     local __path=""
     [[ "$__c" == custom:* ]] && __path="${__c#custom:}"
@@ -6005,11 +6005,14 @@ decoy_template_choose() {
   fi
   if [[ "$__c" =~ ^[0-9]+$ ]]; then
     if (( __c >= 1 && __c <= ${#NAMES[@]} )); then
+      log "Выбран decoy-шаблон: ${NAMES[$((__c-1))]}" >&2
       printf -v "$__result" '%s' "${NAMES[$((__c-1))]}"
     else
+      log "Выбор decoy вне списка — используется: $default" >&2
       printf -v "$__result" '%s' "$default"
     fi
   else
+    log "Выбран decoy-шаблон: $__c" >&2
     printf -v "$__result" '%s' "$__c"
   fi
 }
