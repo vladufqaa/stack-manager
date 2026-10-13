@@ -6550,7 +6550,14 @@ initial_setup() {
   fi
   le_email_load || true
   [[ "$EMAIL" == "none" || ! "$EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]] && EMAIL=""
-  if [[ -z "$EMAIL" ]]; then
+  if [[ -n "$EMAIL" ]]; then
+    local _keep_le_email=false
+    askyn _keep_le_email "Использовать сохранённый email Let's Encrypt: $EMAIL? (n — указать другой)" "y"
+    if [[ "$_keep_le_email" != true ]]; then
+      ask EMAIL "Новый email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
+      le_email_save "$EMAIL"
+    fi
+  else
     ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
     le_email_save "$EMAIL"
   fi
