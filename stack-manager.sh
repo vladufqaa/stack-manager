@@ -1703,13 +1703,16 @@ panel_decoy_apply() {
   local mode="$1" custom_path="${2:-}"
   [[ -f "$STACK_CONF" ]] || return 1
   grep -q "listen 127.0.0.1:4443" "$STACK_CONF" 2>/dev/null || return 1
-  local adg_port=""
+  local adg_port="" panel_path=""
   adg_port=$(adg_config_port 2>/dev/null || true)
   [[ -z "$adg_port" ]] && adg_port="${ADG_WEB_PORT:-3000}"
-  PD_MODE="$mode" PD_PORT="$adg_port" PD_DIR="$PANEL_DECOY_DIR" PD_CUSTOM="$custom_path" python3 - "$STACK_CONF" <<'PYPDA'
+  panel_path=$(xui_get webBasePath 2>/dev/null || true)
+  panel_path="/${panel_path#/}"; panel_path="${panel_path%/}/"
+  PD_MODE="$mode" PD_PORT="$adg_port" PD_DIR="$PANEL_DECOY_DIR" PD_CUSTOM="$custom_path" PD_PATH="$panel_path" python3 - "$STACK_CONF" <<'PYPDA'
 import sys, os
 mode, adg_port, pdir = os.environ["PD_MODE"], os.environ["PD_PORT"], os.environ["PD_DIR"]
 custom = os.environ.get("PD_CUSTOM", "")
+panel_path = os.environ.get("PD_PATH", "/")
 path = sys.argv[1]
 src = open(path).read()
 if mode == "custom" and custom:
@@ -1747,7 +1750,7 @@ while i < len(lines):
     l = lines[i]
     if "listen 127.0.0.1:4443" in l:
         in4443 = True
-    if in4443 and l.strip().startswith("location / {"):
+    if in4443 and l.strip().startswith("location ") and l.strip().endswith("{") and l.strip() != ("location " + panel_path + " {"):
         j = i
         while j < len(lines) and lines[j].rstrip() != "    }":
             j += 1
