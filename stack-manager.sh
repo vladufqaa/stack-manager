@@ -1703,7 +1703,9 @@ panel_decoy_apply() {
   local mode="$1" custom_path="${2:-}"
   [[ -f "$STACK_CONF" ]] || return 1
   grep -q "listen 127.0.0.1:4443" "$STACK_CONF" 2>/dev/null || return 1
-  local adg_port="" panel_path=""
+  local adg_port="" panel_path="" panel_conf_bak=""
+  panel_conf_bak=$(mktemp /tmp/stack-conf.XXXXXX 2>/dev/null || true)
+  [[ -n "$panel_conf_bak" ]] && cp -f "$STACK_CONF" "$panel_conf_bak" 2>/dev/null || true
   adg_port=$(adg_config_port 2>/dev/null || true)
   [[ -z "$adg_port" ]] && adg_port="${ADG_WEB_PORT:-3000}"
   panel_path=$(xui_get webBasePath 2>/dev/null || true)
@@ -1750,10 +1752,20 @@ while i < len(lines):
     l = lines[i]
     if "listen 127.0.0.1:4443" in l:
         in4443 = True
-    if in4443 and l.strip().startswith("location ") and l.strip().endswith("{") and l.strip() != ("location " + panel_path + " {"):
-        j = i
-        while j < len(lines) and lines[j].rstrip() != "    }":
+    # Меняем только отдельный корневой location / — никогда не трогаем
+    # webBasePath панели и subPath подписки.
+    if in4443 and l.strip() == "location / {" and panel_path != "/":
+        j = i + 1
+        depth = 1
+        while j < len(lines):
+            s = lines[j].strip()
+            if s.endswith("{"): depth += 1
+            if s == "}":
+                depth -= 1
+                if depth == 0: break
             j += 1
+        if j >= len(lines):
+            sys.exit(2)
         out.append(block)
         done = True
         i = j + 1
@@ -10112,17 +10124,41 @@ uninstall_adguard() {
   systemctl daemon-reload 2>/dev/null || true
   rm -rf /opt/AdGuardHome 2>/dev/null || true
 
-  # stack.conf: location / (прокси на AdGuard) → заглушка
+  # stack.conf: только полный location / (прокси на удалённый AdGuard)
+  # заменяем безопасно: старый awk обрывал вложенный блок и мог оставить
+  # stack.conf с незакрытой фигурной скобкой.
   if [[ -f "$STACK_CONF" ]] && grep -q "proxy_pass https\?://127.0.0.1:[0-9]*;" "$STACK_CONF"; then
-    local tmp
-    tmp=$(mktemp)
-    awk '
-      /^    location \/ \{/ { instub=1; print; print "        return 302 /404.html;"; next }
-      instub && /^    \}$/ { instub=0; print; next }
-      instub { next }
-      { print }
-    ' "$STACK_CONF" > "$tmp" 2>/dev/null && mv "$tmp" "$STACK_CONF"
-    nginx_reload || true
+    local tmp=""
+    tmp=$(mktemp) || true
+    STACK_CONF_IN="$STACK_CONF" STACK_CONF_OUT="$tmp" python3 - <<'PYADG'
+import os, sys
+src = open(os.environ['STACK_CONF_IN'], encoding='utf-8').read().splitlines()
+out=[]; i=0; replaced=False
+while i < len(src):
+    if src[i].strip() == 'location / {':
+        j=i+1; depth=1
+        while j < len(src):
+            s=src[j].strip()
+            if s.endswith('{'): depth += 1
+            if s == '}':
+                depth -= 1
+                if depth == 0: break
+            j += 1
+        block='\n'.join(src[i:j+1]) if j < len(src) else ''
+        if j < len(src) and 'proxy_pass https://127.0.0.1:' in block:
+            out += ['    location / {', '        return 302 /404.html;', '    }']
+            i=j+1; replaced=True; continue
+    out.append(src[i]); i += 1
+if replaced:
+    open(os.environ['STACK_CONF_OUT'], 'w', encoding='utf-8').write('\n'.join(out)+'\n')
+else:
+    sys.exit(2)
+PYADG
+    if [[ -s "$tmp" ]] && mv "$tmp" "$STACK_CONF"; then
+      nginx -t >/dev/null 2>&1 && nginx_reload || warn "nginx конфигурация требует проверки после удаления AdGuard"
+    else
+      rm -f "$tmp" 2>/dev/null || true
+    fi
   fi
   ADG_PRESENT=false
   log "AdGuard Home удалён. Бэкап конфига: /root/adguard-backup-*.tar.gz"
