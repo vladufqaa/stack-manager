@@ -9978,7 +9978,12 @@ STACK_SRC_URL="$(cat /root/.stack-src 2>/dev/null || echo 'https://raw.githubuse
 
 update_self() {
   line; echo -e "${B}   ОБНОВЛЕНИЕ СКРИПТА С GITHUB${N}"; line
-  local cur="/root/stack-manager.sh" tmp="/root/stack-manager.sh.new"
+  # Сравниваем именно запущенный файл, а не безусловно /root/stack-manager.sh:
+  # при запуске копии из другого пути старый код ошибочно сообщал «идентичен».
+  local cur="${BASH_SOURCE[0]}" tmp=""
+  cur=$(readlink -f "$cur" 2>/dev/null || printf '%s' "$cur")
+  [[ -f "$cur" ]] || cur="/root/stack-manager.sh"
+  tmp="${cur}.new"
   local src_url="$STACK_SRC_URL"
   ask src_url "Raw-URL скрипта (Enter — сохранённый)" "$src_url" '^https?://'
   log "Качаю: $src_url"
