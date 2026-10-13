@@ -11884,7 +11884,12 @@ stack_reset_state() {
   if [[ -n "$snap_db" ]]; then
     stack_restore_panel_from_snapshot "$snap_db" "$sdb"
   fi
-  [[ -n "$xui_was" ]] && systemctl start x-ui >/dev/null 2>&1 || true
+  if [[ -n "$xui_was" ]]; then
+    # После восстановления БД panel/xray может держать старую конфигурацию
+    # Reality в памяти; именно поэтому ручное вкл/выкл инбаунда «лечит» его.
+    systemctl restart x-ui >/dev/null 2>&1 || systemctl start x-ui >/dev/null 2>&1 || true
+    sleep 3
+  fi
   return 0
 }
 
