@@ -3915,9 +3915,11 @@ cert_type_ask() {
   [[ -t 0 ]] || { [[ -n "${CERT_MODE_CHOICE:-}" ]] || CERT_MODE_CHOICE="personal"; return 0; }
   if [[ -n "${CERT_MODE_CHOICE:-}" && "$force" != "force" ]]; then return 0; fi
   echo
-  echo -e "${B}  Тип сертификатов для инбаундов${N}"
-  echo "  1) Wildcard Cloudflare DNS-01 — один cert для всех поддоменов зоны"
-  echo "  2) Персональные HTTP-01 — отдельный cert для каждого домена"
+  echo -e "${B}  Сертификаты: тип выпуска и линии${N}"
+  echo "  1) Wildcard Cloudflare DNS-01 + A: одна линия на всё"
+  echo "  2) Wildcard Cloudflare DNS-01 + B: линия на базовый домен"
+  echo "  3) Персональные HTTP-01 + A: одна линия на всё"
+  echo "  4) Персональные HTTP-01 + B: линия на базовый домен"
   if [[ -n "${WILDCARD_DOMAIN:-}" ]]; then
     if cert_wildcard_valid "$WILDCARD_DOMAIN"; then
       echo -e "  ${G}✓ Реальный wildcard *.$WILDCARD_DOMAIN найден${N}"
@@ -3925,19 +3927,23 @@ cert_type_ask() {
       echo -e "  ${Y}! Флаг wildcard есть, но реальный cert *.$WILDCARD_DOMAIN не найден${N}"
     fi
   fi
-  ask cm "Выбор [1/2]" "1" '^[12]$'
-  if [[ "$cm" == "1" ]]; then
-    CERT_MODE_CHOICE="wildcard"
-    log "Тип сертификатов: wildcard Cloudflare DNS-01"
+  ask cm "Выбор [1/4]" "2" '^[1-4]$'
+  case "$cm" in
+    1) CERT_MODE_CHOICE="wildcard"; cert_mode_save A ;;
+    2) CERT_MODE_CHOICE="wildcard"; cert_mode_save B ;;
+    3) CERT_MODE_CHOICE="personal"; cert_mode_save A ;;
+    4) CERT_MODE_CHOICE="personal"; cert_mode_save B ;;
+  esac
+  if [[ "$CERT_MODE_CHOICE" == "wildcard" ]]; then
+    log "Тип сертификатов: wildcard Cloudflare DNS-01 (линии: $CERT_MODE)"
     if [[ -n "${WILDCARD_DOMAIN:-}" ]] && ! cert_wildcard_valid "$WILDCARD_DOMAIN"; then
       warn "Выбран wildcard, но реального сертификата *.$WILDCARD_DOMAIN нет."
-      cert_wildcard_issue "$WILDCARD_DOMAIN" || warn "Wildcard не выпущен — причина показана выше; выбор wildcard сохранён."
+      cert_wildcard_issue "$WILDCARD_DOMAIN" || warn "Wildcard не выпущен — причина показана выше; выбор сохранён."
     elif [[ -z "${WILDCARD_DOMAIN:-}" ]]; then
-      cert_wildcard_issue || warn "Wildcard не выпущен — причина показана выше; выбор wildcard сохранён."
+      cert_wildcard_issue || warn "Wildcard не выпущен — причина показана выше; выбор сохранён."
     fi
   else
-    CERT_MODE_CHOICE="personal"
-    log "Тип сертификатов: персональные HTTP-01"
+    log "Тип сертификатов: персональные HTTP-01 (линии: $CERT_MODE)"
   fi
 }
 
