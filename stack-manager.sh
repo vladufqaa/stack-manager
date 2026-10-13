@@ -11893,12 +11893,27 @@ try:
     if not cols: raise SystemExit(0)
     q=','.join('"%s"'%c.replace('"','""') for c in cols)
     n=0
+    # Если скрипт менял SNI, текущая hosts-строка уже существует, поэтому
+    # INSERT OR IGNORE недостаточен. Удаляем только строки, отмеченные нашим
+    # реестром владения, затем вставляем snapshot-значение (например google.com).
+    owned = lo.execute("SELECT inbound_id,port,address,sni FROM sm_hosts_owned").fetchall() if lo.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sm_hosts_owned'").fetchone() else []
+    for iid, port, addr, sni in owned:
+        lo.execute("DELETE FROM hosts WHERE inbound_id=? AND port=? AND COALESCE(address,'')=? AND COALESCE(sni,'')=?", (iid,port,addr,sni))
     for row in so.execute('SELECT %s FROM hosts' % q):
         marks=','.join('?' for _ in cols)
         try:
             cur=lo.execute('INSERT OR IGNORE INTO hosts (%s) VALUES (%s)'%(q,marks), row)
             n += cur.rowcount if cur.rowcount > 0 else 0
         except Exception: pass
+    # Реестр должен указывать уже на восстановленный SNI, иначе следующий
+    # откат/смена decoy не найдёт строку google.com.
+    if owned and all(x in cols for x in ('inbound_id','port','address','sni')):
+        keys={(int(a),int(b)) for a,b,_,_ in owned}
+        lo.execute('DELETE FROM sm_hosts_owned')
+        for row in so.execute('SELECT %s FROM hosts' % q):
+            d=dict(zip(cols,row)); k=(int(d['inbound_id']),int(d['port']))
+            if k in keys:
+                lo.execute('INSERT OR IGNORE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES(?,?,?,?)', (k[0],k[1],d.get('address') or '',d.get('sni') or ''))
     lo.commit(); so.close(); lo.close(); print('HOSTS_RESTORED:%d'%n)
 except SystemExit: pass
 except Exception: sys.exit(1)
