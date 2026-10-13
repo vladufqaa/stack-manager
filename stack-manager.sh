@@ -8372,6 +8372,9 @@ decoy_reset_all() {
 
 change_decoy() {
   line; echo -e "${B}   DECOY: ДОСТУПНЫЕ ОБЪЕКТЫ ДЛЯ СМЕНЫ${N}"; line
+  # change_decoy может вызываться из главного меню без предварительного
+  # detect_env; без него XUI_DB пуст и fallback-поиск Hysteria не выполняется.
+  detect_env
   stack_ensure
   local panel_dom=""
   panel_dom=$(xui_get subDomain 2>/dev/null || true)
