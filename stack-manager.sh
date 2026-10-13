@@ -12488,8 +12488,8 @@ auto_full_setup() {
     echo "n"                                    # файрвол: настроим сами ниже
   } > "$ansf"
   log "Первичная настройка (автоответы: $ansf)…"
-  initial_setup < "$ansf" >/tmp/auto-setup.log 2>&1 || warn "initial_setup вернул ошибку — смотри /tmp/auto-setup.log"
-  grep -E "\[\+\]|\[!\]|\[x\]" /tmp/auto-setup.log 2>/dev/null | tail -12
+  initial_setup < "$ansf" > >(tee /tmp/stack-initial-setup.log /tmp/auto-setup.log) 2>&1 || warn "initial_setup вернул ошибку — смотри /tmp/stack-initial-setup.log"
+  grep -E "\[\+\]|\[!\]|\[x\]" /tmp/stack-initial-setup.log 2>/dev/null | tail -12
 
   # --- 2с) Логин/пароль AdGuard, заданные при установке: применяем ВСЕГДА
   #         (даже если у AdGuard уже были пользователи — выбор пользователя важнее)
