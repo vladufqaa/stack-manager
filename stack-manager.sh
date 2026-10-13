@@ -10,7 +10,7 @@
 # =====================================================================
 set -o pipefail
 
-G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'; B='\033[0;36m'; N='\033[0m'
+G=$'\033[0;32m'; R=$'\033[0;31m'; Y=$'\033[1;33m'; B=$'\033[0;36m'; N=$'\033[0m'
 log()  { echo -e "${G}[+]${N} $*"; }
 warn() { echo -e "${Y}[!]${N} $*"; }
 err()  { echo -e "${R}[x]${N} $*" >&2; }
@@ -4511,11 +4511,13 @@ cert_issue_line() {
   if [[ -z "$EMAIL" ]]; then
     EMAIL=$(certbot show_account 2>/dev/null | grep -iE 'Email' | awk -F: '{print $2}' | tr -d ' ' | head -1 || true)
   fi
+  if [[ -z "$EMAIL" && -t 0 ]]; then
+    ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
+    le_email_save "$EMAIL"
+  fi
   if [[ -z "$EMAIL" ]]; then
-    local eb="${cn#*.}"
-    [[ "$eb" != *.* ]] && eb="$cn"
-    EMAIL="admin@$eb"
-    [[ "$EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]] || { err "cert: EMAIL='$EMAIL' не похож на адрес"; return 1; }
+    err "cert: email Let's Encrypt не задан. Укажи EMAIL или задай его в разделе сертификатов."
+    return 1
   fi
   le_email_save "$EMAIL" || true
 
@@ -4858,6 +4860,7 @@ certs_view() {
   echo -e "${B}▸ Все сертификаты в /etc/letsencrypt/live/:${N}"
   certbot certificates 2>/dev/null | sed 's/^/  /' || true
   echo
+  le_email_load || true
   echo -e "${B}▸ Email Let's Encrypt:${N} ${EMAIL:-<не задан>}   (файл: $LE_EMAIL_FILE)"
   pause
 }
@@ -4895,12 +4898,13 @@ cert_issue() {
   # переиспользует существующую линию и плодит дубли (-0001, -0002…)
   # ВАЖНО: базу отрезаем только если остаётся ещё точка — иначе для домена
   # вида zone.ru (две метки) получаем admin@ru и отказ ACME-сервера.
-  if [[ -z "$EMAIL" ]]; then
-    local eb="${d#*.}"
-    [[ "$eb" != *.* ]] && eb="$d"
-    EMAIL="admin@$eb"
-    [[ "$EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]] || { err "  cert $d: EMAIL='$EMAIL' не похож на адрес — задай EMAIL и перезапусти"; return 1; }
+  le_email_load || true
+  if [[ -z "$EMAIL" && -t 0 ]]; then
+    ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
+    le_email_save "$EMAIL"
   fi
+  [[ -n "$EMAIL" ]] || { err "  cert $d: email Let's Encrypt не задан — укажи EMAIL или задай его в разделе сертификатов"; return 1; }
+  le_email_save "$EMAIL" || true
 
   # --- проверка: сертификат уже установлен → переустанавливать не нужно ---
   if [[ "$in_wc_zone" == true ]]; then
@@ -11573,7 +11577,7 @@ rb_reset_state_menu() {
   echo "    • триггеры защиты БД и служебные таблицы (hosts_shadow, sm_pending)"
   echo "    • jail/filter decoy-login, decoy-логи, login-шаблоны"
   echo
-  echo "  ${G}НЕ трогается:${N} инбаунды и клиенты панели, AdGuard Home,"
+  echo -e "  ${G}НЕ трогается:${N} инбаунды и клиенты панели, AdGuard Home,"
   echo "  серты Let's Encrypt, снимки в /root/stack-backups/pre-install-*."
   echo "  Конфиги nginx (stack.conf, sni-router.conf) снимаются пунктами 4–5."
   echo
@@ -11608,8 +11612,8 @@ rb_full_rollback() {
   echo "    6) UFW: восстановление из снимка (если есть), иначе reset + открытие слушающегося"
   echo "    7) Удаление nginx (пакет + конфиги)"
   echo
-  echo "  ${G}НЕ трогается:${N} AdGuard Home, серты Let's Encrypt в /etc/letsencrypt/live/, инбаунды и клиенты панели."
-  echo "  Инбаунды, созданные скриптом, остаются в панели — удалять их можно п.3."
+  echo -e "  ${G}НЕ трогается:${N} AdGuard Home, серты Let's Encrypt в /etc/letsencrypt/live/, инбаунды и клиенты панели."
+  echo "  Инбаунды, созданные скриптом, остаются в панели — удалить их можно через управление инбаундами."
   echo
   local sure=""
   ask sure "Для подтверждения введи YES" "" '^YES$'
@@ -11637,7 +11641,11 @@ rb_full_rollback() {
   # иначе панель перетрёт правки своим состоянием при рестарте (см. п.1/п.2/п.3).
   systemctl stop x-ui 2>/dev/null || true
   stack_reset_state 0 || warn "  состояние панели возвращено не полностью (см. вывод выше)"
-
+  # Убираем SNI-привязки hosts, созданные стеком, сохраняя сами inbounds/клиентов.
+  if [[ -f "$XUI_DB" ]]; then
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE port=443; DELETE FROM hosts_shadow; DELETE FROM sm_pending;" >/dev/null 2>&1 || true
+    log "  hosts-привязки SNI удалены (inbounds и клиенты сохранены)"
+  fi
   log "[5/7] Открытие портов наружу (значение по умолчанию панели)…"
   # '' для панели == 0.0.0.0: пишем именно «пусто», как это хранила панель до
   # скрипта, а не явный 0.0.0.0 (иначе откат меняет то, чего не менял — п.3).
@@ -11696,9 +11704,24 @@ rb_full_rollback() {
   line
   local wp
   wp=$(xui_get webPort 2>/dev/null || echo '?')
-  echo "  Панель:  http://$(server_ip4):$wp"
+  local _pd _pp _host _scheme _cert
+  _pd="${PANEL_DOMAIN:-$(xui_get webDomain 2>/dev/null || true)}"
+  _pp="$(xui_get webBasePath 2>/dev/null || true)"
+  _pp="/${_pp#/}"
+  [[ "$_pp" != */ ]] && _pp="$_pp/"
+  _host="${_pd:-$(server_ip4)}"; [[ -z "$_host" ]] && _host="127.0.0.1"
+  _scheme="https"; _cert="$(xui_get certFile 2>/dev/null || true)"
+  [[ -z "$_cert" ]] && _scheme="http"
+  if [[ -n "$_pd" && "$_pd" != "panel.example.com" ]]; then
+    echo "  Панель:  ${_scheme}://${_pd}:${wp:-?}${_pp}"
+    [[ "$_scheme" == "https" ]] && echo "           (доступ по домену; IP даст ошибку сертификата Common Name)"
+  else
+    echo "  Панель:  ${_scheme}://${_host}:${wp:-?}${_pp}"
+    echo "           домен панели не определён — проверь webDomain в LucX UI"
+  fi
   echo "  Серты:   сохранены (/etc/letsencrypt/live/)"
   echo "  AdGuard: не трогался"
+  echo "  Инбаунды и клиенты панели: сохранены"
   echo "  Бэкап:   $BACKUP_DIR/auto-*"
   line
   pause
@@ -12379,11 +12402,14 @@ auto_full_setup() {
     | awk -F"|" '{printf "    #%s  %-12s :%-6s %s\n", $1, $2, $3, $4}'
   echo "  UFW:     активен (SSH+443+туннели; :80 закрыт; панельные порты DENY)"
   line
+  echo "  Установка завершена. Нажмите Enter для возврата в главное меню."
   echo "  Логины и пароли продублированы:"
   echo "    панель  → /root/panel-credentials.txt"
   [[ "$ADG_PRESENT" == true ]] && echo "    adguard → /root/adguard-credentials.txt"
   line
-  read -rp "$(echo -e "${B}Нажмите Enter чтобы продолжить…${N}")" _ || true
+  if [[ -t 0 ]]; then
+    read -rp "$(echo -e "${B}Нажмите Enter чтобы продолжить…${N}")" _ || true
+  fi
   return 0
 }
 
