@@ -5866,8 +5866,9 @@ sni_upstream_remove() { sed -i "/^upstream $1 /d" "$SNI_CONF" 2>/dev/null || tru
 
 sni_map_add() {
   local domain="$1" backend="$2"
-  if grep -qE "^\s+$domain\s+" "$SNI_CONF" 2>/dev/null; then
-    sed -i "s|^\s*$domain\s\+.*|    $domain    $backend;|" "$SNI_CONF"; return 0
+  if awk -v dom="$domain" '$1 == dom { found=1 } END { exit(found ? 0 : 1) }' "$SNI_CONF" 2>/dev/null; then
+    awk -v dom="$domain" -v be="$backend" 'BEGIN{OFS=" "} $1 == dom {$0="    " dom "    " be ";"} {print}' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF"
+    return 0
   fi
   awk -v dom="$domain" -v be="$backend" '
     /^map / { inmap=1 }
@@ -6099,11 +6100,12 @@ EOF
     chown www-data:www-data "$root/index.html" 2>/dev/null || true
   fi
 
-  # redirect/locked/status404: выбранный шаблон сохраняется и отдаётся
-  # со статусом 404, а не стандартной страницей nginx.
+  # Шаблон отдаётся с HTTP 404 через внутренний переход: прямой
+  # server-level return 404 зацикливает error_page и показывает nginx 404.
   local extra=""
-  [[ "$opt_status404" == "1" ]] && extra='    error_page 404 =404 /index.html;
-    return 404;'
+  [[ "$opt_status404" == "1" ]] && extra='    error_page 418 =404 @stack_decoy_404;
+    return 418;
+    location @stack_decoy_404 { try_files /index.html =404; }'
   case "$tpl" in
     redirect)
       [[ -z "$opt_redir" ]] && opt_redir="https://www.google.com/"
@@ -6310,7 +6312,7 @@ hosts_cdn_upsert() {   # <inbound_id> <cdn_domain>
   local cols
   cols=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ')
   panel_journal_capture_row hosts "$id"   # снимок строки для отката (п.2/п.3)
-  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
+  hosts_owned_delete "$id" 443
   local fields="inbound_id,address,port" vals="$id,'$cdn',443"
   grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'CDN'"; }
   grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",'$cdn'"; }
@@ -6319,6 +6321,7 @@ hosts_cdn_upsert() {   # <inbound_id> <cdn_domain>
   grep -qw is_disabled <<<"$cols" && { fields+=",is_disabled"; vals+=",0"; }
   grep -qw enable      <<<"$cols" && { fields+=",enable";      vals+=",1"; }
   if sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null; then
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT OR REPLACE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES($id,443,'$(printf '%s' "$cdn" | sed "s/'/''/g")','$(printf '%s' "$cdn" | sed "s/'/''/g")');" 2>/dev/null || true
     log "  hosts: #$id → $cdn:443 (адрес/SNI/Host header = CDN) ✓"
   else
     warn "  hosts: CDN-вставка для #$id не прошла — проверь схему таблицы hosts"
@@ -8044,10 +8047,15 @@ decoy_ensure_all() {
     if grep -qx "$tls_cur" <<<"$used_ports" || port_in_use "$tls_cur"; then tls_cur=$((tls_cur+1)); else _free=1; fi
   done
   local id dom be proto dest dport line_ok=0
+  local hport hmeta hcp hc hk hroot
   local -a done_ids=()
   while IFS='|' read -r dom be; do
-    [[ "$be" =~ ^inb_([0-9]+)_backend$ ]] || continue
-    id="${BASH_REMATCH[1]}"
+    if [[ "$be" =~ ^inb_([0-9]+)_backend$ || "$be" =~ ^hysteria_([0-9]+)_web$ ]]; then
+      id="${BASH_REMATCH[1]}"
+      [[ -z "$id" ]] && id="${BASH_REMATCH[2]}"
+    else
+      continue
+    fi
     [[ " ${done_ids[*]} " == *" $id "* ]] && continue
     done_ids+=("$id")
     proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
@@ -8061,6 +8069,23 @@ decoy_ensure_all() {
     dest=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
       "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),json_extract(stream_settings,'\$.realitySettings.target'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     dest="${dest%%:*}"
+    if [[ "$proto" == "hysteria" ]]; then
+      hmeta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
+      if [[ -z "$hmeta" ]]; then
+        hcp=$(cert_paths "$dom" 2>/dev/null || true)
+        if [[ -n "$hcp" ]]; then
+          hc="${hcp%% *}"; hk="${hcp##* }"; hport=$((47000 + id))
+          while ss -tlnH "sport = :$hport" 2>/dev/null | grep -q .; do hport=$((hport+1)); done
+          mk_decoy "$hport" "$dom" "$hc" "$hk" "/var/www/decoy-hysteria-$id" "default" "status404=1" || continue
+          sni_upstream_add "hysteria_${id}_web" "$hport"
+          sni_map_add "$dom" "hysteria_${id}_web"
+          line_ok=1
+        else
+          warn "  #$id $dom — сертификат не найден, TCP-decoy отложен"
+        fi
+      fi
+      continue
+    fi
     local policy=""
     policy=$(decoy_policy_classify "$id" "$proto" "$st")
     if [[ "$policy" == reality-external ]]; then
@@ -8127,12 +8152,18 @@ decoy_pick_inbound() {
   echo
   echo -e "${B}▸ SNI-инбаунды:${N}"
   while IFS='|' read -r dom be; do
-    [[ "$be" =~ ^inb_([0-9]+)_backend$ ]] || continue
-    id="${BASH_REMATCH[1]}"
+    if [[ "$be" =~ ^inb_([0-9]+)_backend$ ]]; then
+      id="${BASH_REMATCH[1]}"
+    elif [[ "$be" =~ ^hysteria_([0-9]+)_web$ ]]; then
+      id="${BASH_REMATCH[1]}"
+    else
+      continue
+    fi
     proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null || true)
     [[ -z "$proto" ]] && continue
     st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     # В меню смены decoy показываем собственный Reality и Hysteria TCP-decoy.
+    port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     if [[ "$proto" == "hysteria" ]]; then
       L+=("$dom|$id|$proto|$port")
       mark="декой есть"
