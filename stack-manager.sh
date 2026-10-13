@@ -8205,7 +8205,7 @@ decoy_pick_inbound() {
       L+=("$hdom|$hid|$hproto|$hport")
       mark="декоя нет"; stack_decoy_meta "$hdom" >/dev/null 2>&1 && mark="декой есть"
       printf "  %2d) #%-3s %-30s %-9s :%-5s %s\n" "${#L[@]}" "$hid" "$hdom" "$hproto" "$hport" "$mark"
-    done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE enable=1 AND lower(protocol) LIKE '%hysteria%' ORDER BY id;" 2>/dev/null | while IFS='|' read -r hid hproto hport; do
+    done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE port>0 AND lower(protocol) LIKE '%hysteria%' ORDER BY id;" 2>/dev/null | while IFS='|' read -r hid hproto hport; do
       [[ -n "$hid" ]] || continue
       hdom=$(sqlite3 -noheader "$XUI_DB" "SELECT COALESCE((SELECT sni FROM hosts WHERE inbound_id=$hid AND port=443 LIMIT 1),(SELECT address FROM hosts WHERE inbound_id=$hid AND port=443 LIMIT 1),json_extract(stream_settings,'\$.tlsSettings.serverName'),json_extract(settings,'\$.tlsSettings.serverName'),json_extract(stream_settings,'\$.serverName'),json_extract(settings,'\$.serverName'),json_extract(stream_settings,'\$.hysteriaSettings.serverName'),json_extract(settings,'\$.hysteriaSettings.serverName'),json_extract(stream_settings,'\$.realitySettings.serverNames[0]'),'') FROM inbounds WHERE id=$hid;" 2>/dev/null | head -1 || true)
       [[ -z "$hdom" || "$hdom" == "null" ]] && hdom="__missing_sni__"
