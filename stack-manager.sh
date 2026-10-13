@@ -6099,9 +6099,11 @@ EOF
     chown www-data:www-data "$root/index.html" 2>/dev/null || true
   fi
 
-  # redirect/locked/status404: ответ формирует сам nginx, index не нужен
+  # redirect/locked/status404: выбранный шаблон сохраняется и отдаётся
+  # со статусом 404, а не стандартной страницей nginx.
   local extra=""
-  [[ "$opt_status404" == "1" ]] && extra='    return 404;'
+  [[ "$opt_status404" == "1" ]] && extra='    error_page 404 =404 /index.html;
+    return 404;'
   case "$tpl" in
     redirect)
       [[ -z "$opt_redir" ]] && opt_redir="https://www.google.com/"
