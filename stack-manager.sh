@@ -6549,6 +6549,7 @@ initial_setup() {
     fi
   fi
   le_email_load || true
+  [[ "$EMAIL" == "none" || ! "$EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]] && EMAIL=""
   if [[ -z "$EMAIL" ]]; then
     ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
     le_email_save "$EMAIL"
@@ -7145,11 +7146,16 @@ EOF
   # --- Инбаунды на чистой установке: создаём ПОСЛЕ сборки стека.
   #     SNI_CONF готов, домен панели/email известны — вопросы в том же виде,
   #     что и в авто-подъёме (reality: свой/чужой → цель/домен → порт).
-  inb_count=$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
+  inb_count=$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || echo 0)
   if [[ "$inb_count" -eq 0 ]]; then
     local do_create=false
     [[ "$PLAN_CREATE" == true ]] && do_create=true
-    [[ "$do_create" == true ]] && create_inbounds_menu
+    if [[ "$do_create" == true ]]; then
+      echo
+      line; echo -e "${B}   СОЗДАНИЕ ИНБАУНДОВ${N}"; line
+      echo "  Активных пользовательских inbounds нет — запускаю мастер создания."
+      create_inbounds_menu
+    fi
   elif [[ "$PLAN_CREATE" == true ]]; then
     log "Активные инбаунды уже есть ($inb_count) — существующие не трогаю."
     if [[ -t 0 ]]; then
@@ -12175,6 +12181,7 @@ auto_full_setup() {
   ask_adguard_and_decoy
   local pdecoy="$PDECOY"
   le_email_load || true
+  [[ "$EMAIL" == "none" || ! "$EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]] && EMAIL=""
   if [[ -z "$EMAIL" ]]; then
     ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$' || return 1
     le_email_save "$EMAIL" || return 1
