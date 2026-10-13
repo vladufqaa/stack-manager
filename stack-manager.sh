@@ -11698,6 +11698,14 @@ rb_full_rollback() {
   DEBIAN_FRONTEND=noninteractive apt-get purge -y nginx nginx-common nginx-full libnginx-mod-stream >/dev/null 2>&1 || true
   apt-get autoremove -y >/dev/null 2>&1 || true
   rm -rf /etc/nginx /var/log/nginx 2>/dev/null || true
+  # Финальная страховка: полный откат не должен оставлять маркеры stack/SNI,
+  # иначе следующий запуск ошибочно считает первичную настройку выполненной.
+  rm -f "$STACK_CONF" "$STACK_LINK" "$SNI_CONF" \
+    /etc/nginx/streams-enabled/sni-router.conf \
+    /etc/nginx/streams-available/sni-router.conf \
+    /etc/nginx/snippets/decoy-headers.conf 2>/dev/null || true
+  rm -f "$BACKUP_DIR/.pre-install-done" "$FROZEN_FILE" "$CERT_MODE_FILE" \
+    "$CERT_LINES_FILE" "$WILDCARD_STATE" /root/.stack-src 2>/dev/null || true
 
   line
   log "ПОЛНЫЙ ОТКАТ ЗАВЕРШЁН"
