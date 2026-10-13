@@ -11947,6 +11947,12 @@ rb_full_rollback() {
     ufw --force enable >/dev/null 2>&1 || true
     log "  reset + открыто всё слушающееся"
   fi
+  # Полный откат снимает firewall-режим стека независимо от наличия снимка.
+  # Иначе восстановленный UFW может оставить deny incoming после удаления nginx.
+  if command -v ufw >/dev/null 2>&1; then
+    ufw --force disable >/dev/null 2>&1 || true
+    log "  UFW отключён после полного отката"
+  fi
 
   log "[7/7] Удаление nginx…"
   systemctl stop nginx 2>/dev/null || true
