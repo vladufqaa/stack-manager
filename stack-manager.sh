@@ -7853,7 +7853,8 @@ remove_inbound() {
     [[ -n "$be" && "$be" != "panel_backend" ]] && sni_upstream_remove "$be"
     unset "SNI_USED[$dom]" 2>/dev/null || true
     stack_del_decoy "$dom"   # decoy-блок в stack.conf
-    sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE sni='$dom' OR (inbound_id=$id AND port=443);" 2>/dev/null || true
+    local _qd; _qd=$(sql_escape "$dom")
+    sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE sni='$_qd' OR (inbound_id=$id AND port=443 AND (COALESCE(sni,'')='' OR sni='$_qd'));" 2>/dev/null || true
     log "SNI-привязка снята: $dom → #$id"
   fi
 
