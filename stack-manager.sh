@@ -11770,6 +11770,51 @@ PYRST2
   return 0
 }
 
+# Восстановить SNI/target Reality из снимка, не заменяя всю строку inbound:
+# клиенты, UUID, порты и остальные настройки остаются в текущей БД.
+stack_restore_reality_sni_from_snapshot() {
+  local snap_db="$1" live_db="$2"
+  [[ -f "$snap_db" && -f "$live_db" ]] || return 1
+  python3 - "$snap_db" "$live_db" <<'PYREALITY'
+import json, sqlite3, sys
+snap_path, live_path = sys.argv[1:]
+def rows(path):
+    con=sqlite3.connect('file:%s?mode=ro' % path, uri=True, timeout=10)
+    out={r[0]: (r[1], r[2], r[3]) for r in con.execute(
+        "SELECT id, protocol, port, stream_settings FROM inbounds")}
+    con.close(); return out
+try:
+    old=rows(snap_path)
+    con=sqlite3.connect(live_path, timeout=10); con.execute('PRAGMA busy_timeout=5000')
+    changed=0
+    for iid, (op, oport, os) in old.items():
+        if not os: continue
+        try: oj=json.loads(os)
+        except Exception: continue
+        ors=oj.get('realitySettings')
+        if not isinstance(ors, dict): continue
+        cur=con.execute('SELECT protocol, stream_settings FROM inbounds WHERE id=?', (iid,)).fetchone()
+        if not cur: continue
+        try: cj=json.loads(cur[1] or '')
+        except Exception: continue
+        crs=cj.get('realitySettings')
+        if not isinstance(crs, dict): continue
+        copied=False
+        for key in ('target','dest','serverNames'):
+            if key in ors and ors[key] != crs.get(key):
+                crs[key]=ors[key]; copied=True
+        if copied:
+            cj['realitySettings']=crs
+            con.execute('UPDATE inbounds SET stream_settings=? WHERE id=?',
+                        (json.dumps(cj, ensure_ascii=False, separators=(',',':')), iid))
+            changed += 1
+    con.commit(); con.close()
+    print('REALITY_RESTORED:%d' % changed)
+except Exception:
+    sys.exit(1)
+PYREALITY
+}
+
 # Снять «состояние стека»: маркеры, флаги, триггеры защиты БД, журналы.
 #   $1 = prompt — спрашивать по группам с необратимыми данными (1) или тихо (0)
 # Сертификаты Let's Encrypt и AdGuard Home НЕ трогаются — это и раньше было явно.
@@ -11883,6 +11928,9 @@ stack_reset_state() {
   # 2) исходные настройки панели из снимка «до скрипта»
   if [[ -n "$snap_db" ]]; then
     stack_restore_panel_from_snapshot "$snap_db" "$sdb"
+    local _rr=""
+    _rr=$(stack_restore_reality_sni_from_snapshot "$snap_db" "$sdb" 2>/dev/null || true)
+    [[ -n "$_rr" ]] && log "  $_rr (SNI/target Reality из backup)"
   fi
   if [[ -n "$xui_was" ]]; then
     # После восстановления БД panel/xray может держать старую конфигурацию
