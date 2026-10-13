@@ -6732,8 +6732,19 @@ initial_setup() {
     le_email_save "$EMAIL"
   fi
   fi
-  if [[ -z "$PANEL_DOMAIN" ]]; then
-    ask PANEL_DOMAIN "Домен панели" "panel.example.com" '^[a-zA-Z0-9.-]+$'
+  # Если панель уже установлена, сначала берём её фактический домен из БД.
+  # webDomain приоритетнее subDomain; вопрос показываем только если оба пусты.
+  if [[ -z "$PANEL_DOMAIN" || "$PANEL_DOMAIN" == "panel.example.com" ]]; then
+    local _existing_panel_domain=""
+    _existing_panel_domain=$(xui_get webDomain 2>/dev/null || true)
+    [[ -z "$_existing_panel_domain" || "$_existing_panel_domain" == "null" ]] && \
+      _existing_panel_domain=$(xui_get subDomain 2>/dev/null || true)
+    if [[ "$_existing_panel_domain" =~ ^[a-zA-Z0-9.-]+$ && "$_existing_panel_domain" != "panel.example.com" ]]; then
+      PANEL_DOMAIN="$_existing_panel_domain"
+      log "Домен панели взят из уже установленной панели: $PANEL_DOMAIN"
+    else
+      ask PANEL_DOMAIN "Домен панели" "panel.example.com" '^[a-zA-Z0-9.-]+$'
+    fi
   else
     log "Домен панели: $PANEL_DOMAIN (задан ранее)"
   fi
