@@ -8383,6 +8383,17 @@ change_decoy() {
   echo "  Доступные объекты:"
   echo "   1) Панель — $panel_dom"
   local -a _decoy_rows=() _decoy_row
+  # Hysteria выводится напрямую из БД независимо от наличия SNI-map.
+  # Это важно после восстановления старого бэкапа: nginx-конфигов может не быть.
+  local _hid _hproto _hport _hjson _hdom
+  while IFS='|' read -r _hid _hproto _hport _hjson; do
+    [[ -n "$_hid" ]] || continue
+    _hdom=$(grep -oE '"serverName"[[:space:]]*:[[:space:]]*"[^" ]+"' <<<"$_hjson" | head -1 | sed -E 's/.*"serverName"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+    [[ -z "$_hdom" ]] && _hdom="__missing_sni__"
+    _decoy_rows+=("$_hdom|$_hid|$_hport")
+    _decoy_row="${#_decoy_rows[@]}"
+    printf "   %s) Hysteria #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_hid" "$_hdom" "$_hport"
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port,COALESCE(stream_settings,'') FROM inbounds WHERE port>0 AND lower(protocol) LIKE '%hysteria%' ORDER BY id;" 2>/dev/null || true)
   local _d_dom _d_be _d_id _d_proto _d_st _d_port
   while IFS='|' read -r _d_dom _d_be; do
     [[ "$_d_be" =~ ^inb_([0-9]+)_backend$ ]] || continue
