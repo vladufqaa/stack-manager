@@ -1754,7 +1754,7 @@ while i < len(lines):
         in4443 = True
     # Меняем только отдельный корневой location / — никогда не трогаем
     # webBasePath панели и subPath подписки.
-    if in4443 and l.strip() == "location / {" and panel_path != "/":
+    if in4443 and l.strip() == "location / {":
         j = i + 1
         depth = 1
         while j < len(lines):
