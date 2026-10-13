@@ -6550,7 +6550,7 @@ configure_sni_for_inbound() {
 
   local is_reality=false stream=""
   stream=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-  [[ "$proto" == "vless" ]] && grep -q '"security": *"reality"' <<<"$stream" && is_reality=true
+  [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -q '"security": *"reality"' <<<"$stream" && is_reality=true
 
   if [[ "$is_reality" == true ]]; then
     cert_issue "$domain" || return 1
