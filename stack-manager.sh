@@ -7205,6 +7205,7 @@ EOF
   systemctl start x-ui 2>/dev/null || true
   systemctl start nginx 2>/dev/null || true
   [[ "$adg_was_running" == true && -n "$ADG_SERVICE" ]] && systemctl start "$ADG_SERVICE" 2>/dev/null || true
+  udp_inbound_firewall_check
 
   # tg web proxy: доводим tproxy-инбаунд до рабочего (hostname+серт+сайт+маршрут)
   setup_tproxy_web
@@ -10132,6 +10133,47 @@ ask_adguard_and_decoy() {
   fi
 }
 
+# Проверка UDP-инбаундов против UFW и локального слушателя.
+# Не открывает порты молча: только показывает закрытые и спрашивает разрешение.
+udp_inbound_firewall_check() {
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 0
+  local id proto port remark rule ask_open listen_state
+  local -a closed=()
+  while IFS='|' read -r id proto port remark; do
+    [[ -n "$id" && -n "$port" && "$port" != 0 ]] || continue
+    is_udp_proto "$proto" || continue
+    rule=$(ufw status 2>/dev/null | awk -v p="$port" '$0 ~ ("[[:space:]]" p "/udp([[:space:]]|$)") || $0 ~ ("[[:space:]]" p "([[:space:]]|$)") {print; exit}')
+    listen_state="нет"
+    ss -Hlun "sport = :$port" 2>/dev/null | grep -q . && listen_state="да"
+    if [[ -z "$rule" ]]; then
+      closed+=("#$id|$proto|$port|$remark|$listen_state")
+    else
+      ok "UDP #$id $proto/$port: правило UFW есть, слушает: $listen_state"
+    fi
+  done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(remark,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null || true)
+  [[ ${#closed[@]} -gt 0 ]] || return 0
+  echo
+  warn "UDP-инбаунды без разрешения UFW:"
+  local row
+  for row in "${closed[@]}"; do
+    IFS='|' read -r id proto port remark listen_state <<<"$row"
+    echo "  #$id ${remark:-$proto} — UDP/$port, слушает: $listen_state"
+  done
+  if [[ -t 0 ]]; then
+    askyn ask_open "Открыть эти UDP-порты в UFW?" "y"
+    [[ "$ask_open" == true ]] || return 0
+  else
+    warn "Неинтерактивный режим: порты не открыты автоматически"
+    return 0
+  fi
+  for row in "${closed[@]}"; do
+    IFS='|' read -r id proto port remark listen_state <<<"$row"
+    fw_allow "$port" udp "udp-инбаунд #$id"
+    log "UDP/$port открыт в UFW для #$id"
+  done
+  ufw --force enable >/dev/null 2>&1 || true
+}
+
 # Единый файрвол: сброс → SSH+443 (TCP) → нужные UDP → DENY панельных портов.
 # Вызывается и из авто-подъёма, и из п.1 (при переустановке убивает старые
 # правила прошлой установки — «почему открыты TCP-порты» лечится здесь).
@@ -12031,9 +12073,10 @@ diagnostics_maintenance_menu() {
     echo "  3) Сменить пароли LucX UI / AdGuard Home"
     echo "  4) Обновить скрипт"
     echo "  5) Заморозка самолечения"
+    echo "  6) Проверить UDP-инбаунды и открыть порты UFW"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-5]$'
-    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) freeze_menu ;; 0) return 0 ;; esac
+    local c=""; ask c "Выбор" "1" '^[0-6]$'
+    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) freeze_menu ;; 6) udp_inbound_firewall_check; pause ;; 0) return 0 ;; esac
   done
 }
 panel_adguard_menu() {
