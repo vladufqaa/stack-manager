@@ -11875,6 +11875,36 @@ except Exception:
 PYREALITY
 }
 
+stack_restore_hosts_from_snapshot() {
+  local snap_db="$1" live_db="$2"
+  [[ -f "$snap_db" && -f "$live_db" ]] || return 1
+  python3 - "$snap_db" "$live_db" <<'PYHOSTS'
+import sqlite3, sys
+snap_path, live_path = sys.argv[1:]
+try:
+    so=sqlite3.connect('file:%s?mode=ro' % snap_path, uri=True, timeout=10)
+    lo=sqlite3.connect(live_path, timeout=10); lo.execute('PRAGMA busy_timeout=5000')
+    st=so.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hosts'").fetchone()
+    lt=lo.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hosts'").fetchone()
+    if not st or not lt: raise SystemExit(0)
+    sc=[r[1] for r in so.execute('PRAGMA table_info(hosts)')]
+    lc=[r[1] for r in lo.execute('PRAGMA table_info(hosts)')]
+    cols=[c for c in sc if c in lc and c != 'id']
+    if not cols: raise SystemExit(0)
+    q=','.join('"%s"'%c.replace('"','""') for c in cols)
+    n=0
+    for row in so.execute('SELECT %s FROM hosts' % q):
+        marks=','.join('?' for _ in cols)
+        try:
+            cur=lo.execute('INSERT OR IGNORE INTO hosts (%s) VALUES (%s)'%(q,marks), row)
+            n += cur.rowcount if cur.rowcount > 0 else 0
+        except Exception: pass
+    lo.commit(); so.close(); lo.close(); print('HOSTS_RESTORED:%d'%n)
+except SystemExit: pass
+except Exception: sys.exit(1)
+PYHOSTS
+}
+
 # Снять «состояние стека»: маркеры, флаги, триггеры защиты БД, журналы.
 #   $1 = prompt — спрашивать по группам с необратимыми данными (1) или тихо (0)
 # Сертификаты Let's Encrypt и AdGuard Home НЕ трогаются — это и раньше было явно.
@@ -11991,6 +12021,9 @@ stack_reset_state() {
     local _rr=""
     _rr=$(stack_restore_reality_sni_from_snapshot "$snap_db" "$sdb" 2>/dev/null || true)
     [[ -n "$_rr" ]] && log "  $_rr (SNI/target Reality из backup)"
+    local _rh=""
+    _rh=$(stack_restore_hosts_from_snapshot "$snap_db" "$sdb" 2>/dev/null || true)
+    [[ -n "$_rh" ]] && log "  $_rh (hosts из backup)"
   fi
   if [[ -n "$xui_was" ]]; then
     # После восстановления БД panel/xray может держать старую конфигурацию
