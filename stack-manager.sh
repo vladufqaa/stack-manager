@@ -6550,6 +6550,11 @@ configure_sni_for_inbound() {
 # ПЕРВИЧНАЯ НАСТРОЙКА
 # =====================================================================
 initial_setup() {
+  # Сохраняем полный вывод п.1, чтобы ошибка не исчезала при возврате в меню.
+  local _setup_log="/tmp/stack-initial-setup.log"
+  : > "$_setup_log" 2>/dev/null || true
+  exec 3>&1 4>&2
+  # Логирование выполняется вызывающим меню через tee; здесь сохраняем маркер.
   line; echo -e "${B}   ПЕРВИЧНАЯ НАСТРОЙКА SNI-РОУТЕРА${N}"; line
   # Откат/демонтаж мог выполниться в этом же процессе меню и удалить nginx
   # уже после стартовой проверки зависимостей. Перед п.1 проверяем повторно,
@@ -11958,11 +11963,19 @@ setup_routing_menu() {
     local c=""; ask c "Выбор" "1" '^[0-2]$'
     case "$c" in
       1)
-        initial_setup
+        : > /tmp/stack-initial-setup.log 2>/dev/null || true
+        initial_setup > >(tee -a /tmp/stack-initial-setup.log) 2>&1
         local _setup_rc=$?
         if [[ $_setup_rc -eq 0 ]]; then
           echo
           echo -e "${G}Первичная настройка завершена.${N}"
+          pause
+        else
+          echo
+          err "Первичная настройка завершилась с ошибкой (код $_setup_rc)."
+          echo "Подробный лог: /tmp/stack-initial-setup.log"
+          echo "Последние строки лога:"
+          tail -30 /tmp/stack-initial-setup.log 2>/dev/null || true
           pause
         fi
         return "$_setup_rc"
