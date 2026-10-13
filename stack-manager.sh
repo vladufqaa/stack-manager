@@ -34,7 +34,12 @@ dir_sig() {
 export DEBIAN_FRONTEND=noninteractive
 # Стабильный EN-вывод subprocess (ufw/systemctl/certbot): RU-локаль даёт
 # «Статус: активен» и ломает парсинг. Собственные RU-сообщения скрипта не страдают.
-export LC_ALL=C LANG=C
+# UTF-8 обязателен для корректного Backspace в Bash Readline.
+export LC_ALL=C.UTF-8 LANG=C.UTF-8
+read_safe() {
+  local __prompt="$1" __var="$2"
+  builtin read -e -r -p "$__prompt" "$__var" || true
+}
 
 BACKUP_DIR="/root/stack-backups"
 FW_STATE_DIR="/root/stack-backups/firewall-state"
@@ -211,6 +216,8 @@ DECOY_TEMPLATES=(
 # mtproto из скрипта не создаём — в LucX его роль играет tproxy (TG WEB-PROXY).
 RECOMMENDED_INBOUNDS=(
   "VLESS TCP REALITY|vless|tcp|reality|xtls-rprx-vision|tcp"
+  "VLESS XHTTP TLS (CDN/decoy)|vless|xhttp|tls||tcp"
+  "TROJAN TLS (decoy)|trojan|tcp|tls|-|tcp"
   "VLESS XHTTP REALITY|vless|xhttp|reality||tcp"
   "NAIVE (TLS, за 443)|naive|naive|tls|-|tcp"
   "TRUSTTUNNEL (TLS, за 443)|trusttunnel|trusttunnel|tls|-|tcp"
@@ -239,10 +246,10 @@ ask() {
     if [[ -n "$__d" ]]; then
       # Не вставляем ANSI-коды в read -rp: readline считает их печатными
       # символами и Backspace после кириллицы стирает часть prompt.
-      read -rp "? ${__p} [${__d}]: " __in || __in=""
+      read_safe "? ${__p} [${__d}]: " __in
       __in="${__in:-$__d}"
     else
-      read -rp "? ${__p}: " __in || __in=""
+      read_safe "? ${__p}: " __in
     fi
     case "${__in,,}" in
       q|quit|exit|выход)
@@ -257,7 +264,7 @@ ask() {
 askyn() {
   local __v="$1" __p="$2" __d="$3" __in
   while :; do
-    read -rp "$(echo -e "${B}?${N} ${__p} [${__d}]: ")" __in || __in=""
+    read_safe "? ${__p} [${__d}]: " __in
     __in="${__in:-$__d}"
     case "${__in,,}" in
       q|quit|exit|выход)
@@ -270,7 +277,7 @@ askyn() {
   done
 }
 
-pause() { read -rp "$(echo -e "${B}Нажмите Enter${N}")" _ || true; }
+pause() { read_safe "Нажмите Enter" _; }
 
 # =====================================================================
 # ПРОВЕРКА ОС
@@ -2629,7 +2636,7 @@ create_inbounds_menu() {
       REALITY_EXT_TARGET="$tgt"
       printf '%s' "$tgt" > /tmp/.reality-found-target 2>/dev/null || true
       log "  $name: цель → $tgt (dest+serverNames, за 443 по SNI цели)"
-    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$proto" == "vless" && "$security" == "reality" ) ]]; then
+    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ) || ( "$proto" == "vless" && "$security" == "reality" ) ]]; then
       echo
       if [[ -z "$panel_domain" ]]; then
         panel_domain="${PANEL_DOMAIN:-}"
@@ -2639,6 +2646,8 @@ create_inbounds_menu() {
       fi
       local def2="h.example.com"
       case "$proto" in
+        trojan) def2="t.example.com";;
+        vless) [[ "$transport" == "xhttp" ]] && def2="x.example.com";;
         naive) def2="n.example.com";;
         anytls) def2="at.example.com";;
         trusttunnel|trust-tunnel) def2="tt.example.com";;
@@ -2662,7 +2671,9 @@ create_inbounds_menu() {
         break
       done
       sni_domain="$d_new"
-      if [[ "$proto" == "vless" && "$security" == "reality" ]]; then
+      if [[ "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ]]; then
+        decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
+      elif [[ "$proto" == "vless" && "$security" == "reality" ]]; then
         # своя заглушка у каждого reality-инбаунда (как в авто-установке);
         # серт на decoy выпустит configure_sni_for_inbound после создания
         decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
@@ -6566,9 +6577,11 @@ configure_sni_for_inbound() {
     log "  + decoy (Reality) на порту $tls_port ($pre_tpl)"
   fi
 
-  # vless/trojan + TLS (не reality): заглушка для пробоев — не-протокольный
-  # трафик (браузер по https://<домен>) уходит fallback'ом в nginx :80,
-  # где лежит статичный сайт (ACME webroot), вместо молчаливого reset.
+  # vless/trojan + TLS (не reality): спросить шаблон страницы до настройки
+  # fallback. Для Trojan шаблон применяется к HTTP-backend, а не к протоколу.
+  if [[ "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$stream" && [[ -z "$pre_tpl" ]] && [[ -t 0 ]]; then
+    decoy_template_choose pre_tpl "Decoy-заглушка для #$id ($domain)" "corporate"
+  fi
   if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$stream"; then
     local has_fb=""
     has_fb=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
@@ -6579,6 +6592,7 @@ configure_sni_for_inbound() {
       if [[ "$want_fb" == true ]]; then
         systemctl stop x-ui >/dev/null 2>&1 || true
         if sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":80}]') WHERE id=$id;" 2>/dev/null; then
+          [[ -n "${pre_tpl:-}" ]] && log "  + шаблон decoy: $pre_tpl"
           log "  + заглушка vless/tls: fallback → 127.0.0.1:80 (пробой браузером увидит сайт)"
         fi
         systemctl start x-ui >/dev/null 2>&1 || true
