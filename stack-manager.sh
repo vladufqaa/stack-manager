@@ -9921,7 +9921,7 @@ firewall_apply_menu() {
         [[ -n "$close_list" ]] && echo "  Закроются:${close_list}"
         echo
         local ok=""
-        read -rp "$(echo -e "${B}?${N} Применить новую конфигурацию UFW? [y/N]: ")" ok || ok=""
+        read_safe "? Применить новую конфигурацию UFW? [y/N]: " ok
         case "${ok,,}" in
           y|yes|д|да) ;;
           *) log "Отменено"; return 0 ;;
@@ -9935,7 +9935,9 @@ firewall_apply_menu() {
           [[ "$state" == "1" ]] && fw_allow "$port" "$proto" "kept"
         done
         fw_deny_panel_ports
+        # После reset/изменения правил явно перезагружаем конфигурацию.
         ufw --force enable >/dev/null 2>&1 || true
+        ufw reload >/dev/null 2>&1 || true
         sleep 1
         log "UFW применён"
         ufw status 2>/dev/null | grep -E "ALLOW|DENY" | sed 's/^/    /'
