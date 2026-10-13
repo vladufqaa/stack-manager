@@ -2710,7 +2710,7 @@ create_inbounds_menu() {
           ;;
         hysteria)
           log "  → id=$new_id (UDP $port, SNI $sni_domain)"
-          SNI_USED["$sni_domain"]="hysteria_$port"
+          SNI_USED["$sni_domain"]="hysteria_${new_id}_web"
           ufwd_allow_udp "$port"
           # UDP Hysteria не может обслужить браузерный TCP/443. Создаём
           # отдельный локальный HTTPS-decoy с тем же доменом и маршрутом SNI.
