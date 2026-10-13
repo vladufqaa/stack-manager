@@ -2711,6 +2711,21 @@ create_inbounds_menu() {
           log "  → id=$new_id (UDP $port, SNI $sni_domain)"
           SNI_USED["$sni_domain"]="hysteria_$port"
           ufwd_allow_udp "$port"
+          # UDP Hysteria не может обслужить браузерный TCP/443. Создаём
+          # отдельный локальный HTTPS-decoy с тем же доменом и маршрутом SNI.
+          local hdecoy_port=$((47000 + new_id)) hcp hcert hkey
+          while ss -tlnH "sport = :$hdecoy_port" 2>/dev/null | grep -q .; do hdecoy_port=$((hdecoy_port+1)); done
+          hcp=$(cert_paths "$sni_domain" 2>/dev/null || true)
+          hcert="${hcp%% *}"; hkey="${hcp##* }"
+          if [[ -n "$hcert" && -f "$hcert" && -f "$hkey" ]]; then
+            mk_decoy "$hdecoy_port" "$sni_domain" "$hcert" "$hkey" "/var/www/decoy-hysteria-$new_id" "default" "status404=1"
+            sni_upstream_add "hysteria_${new_id}_web" "$hdecoy_port"
+            sni_map_add "$sni_domain" "hysteria_${new_id}_web"
+            nginx_reload || true
+            log "  → TCP/443 для $sni_domain ведёт в 404-decoy (UDP Hysteria не изменён)"
+          else
+            warn "  Сертификат $sni_domain не найден — TCP-decoy не создан"
+          fi
           ;;
         naive|anytls|trusttunnel|trust-tunnel)
           log "  → id=$new_id (панель запустит сервис на 127.0.0.1:$port; снаружи https://$sni_domain:443)"
@@ -6044,13 +6059,14 @@ mk_decoy() {
   # $1..$6 как раньше; $7 (необязательно) — opts: "ua404=1 redir=https://..."
   local port="$1" dom="$2" cert="$3" key="$4" root="$5"
   local tpl="${6:-default}" opts="${7:-}"
-  local opt_ua404=1 opt_redir=""
+  local opt_ua404=1 opt_redir="" opt_status404=0
   local _o _k _v
   for _o in $opts; do
     _k="${_o%%=*}"; _v="${_o#*=}"
     case "$_k" in
       ua404) opt_ua404="$_v" ;;
       redir) opt_redir="$_v" ;;
+      status404) opt_status404="$_v" ;;
     esac
   done
   # custom:<path> — nginx будет служить прямо из указанной папки
@@ -6080,8 +6096,9 @@ EOF
     chown www-data:www-data "$root/index.html" 2>/dev/null || true
   fi
 
-  # redirect/locked: ответ формирует сам nginx, index не нужен
+  # redirect/locked/status404: ответ формирует сам nginx, index не нужен
   local extra=""
+  [[ "$opt_status404" == "1" ]] && extra='    return 404;'
   case "$tpl" in
     redirect)
       [[ -z "$opt_redir" ]] && opt_redir="https://www.google.com/"
@@ -6125,7 +6142,7 @@ EOF
   stack_del_decoy "$dom"   # замена блока того же домена (upsert)
   {
     # ВАЖНО: domain= держим ПОСЛЕДНИМ ключом — парсеры маркера на это рассчитаны
-    echo "# >>> decoy port=$port root=$root cert=$cert key=$key tpl=$tpl ua404=$opt_ua404 domain=$dom"
+    echo "# >>> decoy port=$port root=$root cert=$cert key=$key tpl=$tpl ua404=$opt_ua404 status404=$opt_status404 domain=$dom"
     echo "$body"
     echo "# <<< decoy port=$port domain=$dom"
   } >> "$STACK_CONF"
@@ -9767,7 +9784,7 @@ firewall_apply_menu() {
 # Шаблон берём из маркера (tpl=), если нет — угадываем по md5 index.html.
 decoy_rebuild_all() {
   [[ -f "$STACK_CONF" ]] || { err "stack.conf не найден"; pause; return 1; }
-  local mline mport mroot mcert mkey mdom mtpl muaf idx hash tf troot found
+  local mline mport mroot mcert mkey mdom mtpl muaf mus4 idx hash tf troot found
   local -A TPL_OF=()
   local -a ROWS=()
   while IFS= read -r mline; do
@@ -9779,6 +9796,8 @@ decoy_rebuild_all() {
     mdom=$(grep  -oE 'domain=[^ ]+$' <<<"$mline" | head -1 | cut -d= -f2-)
     mtpl=$(grep -oE 'tpl=[^ ]+'      <<<"$mline" | head -1 | cut -d= -f2-)
     muaf=$(grep -oE 'ua404=[0-9]'    <<<"$mline" | head -1 | cut -d= -f2-)
+    mus4=$(grep -oE 'status404=[0-9]' <<<"$mline" | head -1 | cut -d= -f2-)
+    [[ -z "$mus4" ]] && mus4=0
     [[ -z "$mdom" || -z "$mport" || -z "$mroot" ]] && continue
     if [[ -z "$mtpl" && -f "$mroot/index.html" ]]; then
       hash=$(md5sum "$mroot/index.html" 2>/dev/null | awk '{print $1}')
@@ -9797,7 +9816,7 @@ decoy_rebuild_all() {
   local r
   for r in "${ROWS[@]}"; do
     IFS='|' read -r mport mdom mcert mkey mroot mtpl muaf <<<"$r"
-    mk_decoy "$mport" "$mdom" "$mcert" "$mkey" "$mroot" "$mtpl" "ua404=$muaf"
+    mk_decoy "$mport" "$mdom" "$mcert" "$mkey" "$mroot" "$mtpl" "ua404=$muaf status404=$mus4"
     log "  $mdom → «$mtpl» (ua404=$muaf, robots+honeypot+логи)"
   done
   audit "decoy: пересборка всех блоков"
