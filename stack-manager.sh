@@ -12669,9 +12669,14 @@ auto_full_setup() {
       done
     fi
     used_ports+=("$port")
-    # ── Заглушка для reality со своим SNI — ПО КАЖДОМУ инбаунду, после порта
+    # ── Шаблон страницы для всех TLS-инбаундов с собственным SNI.
     local rdtpl=""
-    if [[ "$proto" == "vless" && "$security" == "reality" && "${REALITY_MODE[$proto-$transport]:-}" == "2" ]]; then
+    if [[ "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ]]; then
+      rdtpl="corporate"
+      if [[ -t 0 ]]; then
+        decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
+      fi
+    elif [[ "$proto" == "vless" && "$security" == "reality" && "${REALITY_MODE[$proto-$transport]:-}" == "2" ]]; then
       rdtpl="corporate"
       if [[ -t 0 ]]; then
         decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
