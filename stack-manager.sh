@@ -715,6 +715,8 @@ decoy_policy_classify() {
     return 0
   fi
   case "$proto" in
+    openflux|open-flux)
+      echo no-decoy ;;
     naive|anytls|trusttunnel|trust-tunnel|hysteria|hysteria2|qwdtt|csqtt|csqdtt|wireguard|amnezia|amneziawg|awg|mtproto|tun)
       echo unsupported ;;
     *) echo no-decoy ;;
