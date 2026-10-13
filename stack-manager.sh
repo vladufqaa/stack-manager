@@ -6437,6 +6437,8 @@ configure_sni_for_inbound() {
   if xhttp_cdn_setup "$id" "$proto" "$port"; then
     return 0
   fi
+  # При ручной настройке не-CDN XHTTP+TLS продолжаем обычную ветку,
+  # чтобы спросить SNI и шаблон decoy, а не завершать настройку молча.
 
   local existing_domain=""
   existing_domain=$(grep -E "^\s+\S+\s+inb_${id}_backend" "$SNI_CONF" 2>/dev/null | awk '{print $1}' || true)
@@ -7585,9 +7587,10 @@ fix_inbound() {
   [[ -z "$cp_line" ]] && { err "cert для $domain не найден"; return 1; }
   cert="${cp_line%% *}"; key="${cp_line##* }"
 
-  # decoy ТОЛЬКО для Reality (dest для рукопожатия); остальным протоколам decoy не нужен
+  # Reality и XHTTP+TLS получают браузерную decoy-страницу. Для XHTTP+TLS
+  # вопрос CDN уже был задан выше; если CDN не выбран, нужен обычный decoy.
   local tls_port="" rdtpl="default"
-  if grep -qi reality <<<"$stream"; then
+  if grep -qi reality <<<"$stream" || inbound_is_xhttp_tls "$stream"; then
     decoy_template_choose rdtpl "Decoy-заглушка для #$id (страница на SNI-домене)" "corporate"
     tls_port=$(( 4444 + id ))
     while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
@@ -12788,8 +12791,8 @@ auto_full_setup() {
         echo "n"                                # домен не задан → не скрывать
       else
         echo "y"; echo "$dom"
-        if grep -qi '"security": *"reality"' <<<"$stream_s"; then
-          echo "${REALITY_DECOY_TPL_BYID[$id]:-corporate}"   # своя заглушка инбаунда
+        if grep -qi '"security": *"reality"' <<<"$stream_s" || grep -qi '"network": *"xhttp"' <<<"$stream_s"; then
+          echo "${REALITY_DECOY_TPL_BYID[$id]:-corporate}"   # своя заглушка/страница
         fi
       fi
     done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null)
