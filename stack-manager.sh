@@ -217,7 +217,6 @@ DECOY_TEMPLATES=(
 RECOMMENDED_INBOUNDS=(
   "VLESS TCP REALITY|vless|tcp|reality|xtls-rprx-vision|tcp"
   "VLESS XHTTP TLS (CDN/decoy)|vless|xhttp|tls||tcp"
-  "TROJAN TLS (decoy)|trojan|tcp|tls|-|tcp"
   "VLESS XHTTP REALITY|vless|xhttp|reality||tcp"
   "NAIVE (TLS, за 443)|naive|naive|tls|-|tcp"
   "TRUSTTUNNEL (TLS, за 443)|trusttunnel|trusttunnel|tls|-|tcp"
@@ -2671,7 +2670,7 @@ create_inbounds_menu() {
         break
       done
       sni_domain="$d_new"
-      if [[ "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ]]; then
+      if [[ "$security" == "tls" && ( "$proto" == "naive" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ]]; then
         decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
       elif [[ "$proto" == "vless" && "$security" == "reality" ]]; then
         # своя заглушка у каждого reality-инбаунда (как в авто-установке);
@@ -6579,9 +6578,6 @@ configure_sni_for_inbound() {
 
   # vless/trojan + TLS (не reality): спросить шаблон страницы до настройки
   # fallback. Для Trojan шаблон применяется к HTTP-backend, а не к протоколу.
-  if [[ "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$stream" && [[ -z "$pre_tpl" ]] && [[ -t 0 ]]; then
-    decoy_template_choose pre_tpl "Decoy-заглушка для #$id ($domain)" "corporate"
-  fi
   if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$stream"; then
     local has_fb=""
     has_fb=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
