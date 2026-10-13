@@ -12155,6 +12155,11 @@ auto_full_setup() {
   local u_port="$U_PANEL_PORT" u_subport="$U_SUB_PORT" u_path="$U_PANEL_PATH" u_subpath="$U_SUB_PATH"
   ask_adguard_and_decoy
   local pdecoy="$PDECOY"
+  le_email_load || true
+  if [[ -z "$EMAIL" ]]; then
+    ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$' || return 1
+    le_email_save "$EMAIL" || return 1
+  fi
 
   # --- 4) ИНБАУНДЫ: какие ставить? (Enter — весь набор)
   echo -e "${B}Выберите инбаунды для установки:${N}"
@@ -12337,7 +12342,12 @@ auto_full_setup() {
   # --- 6) initial_setup с готовыми ответами (порядок вопросов стабилен)
   local ansf="/root/ans-auto-$(date +%H%M%S).txt"
   {
-    echo "admin@$base"                          # EMAIL
+    le_email_load || true
+    if [[ -z "$EMAIL" ]]; then
+      err "Email Let's Encrypt не задан — автоподъём остановлен. Укажи email в анкете/переменной EMAIL."
+      return 1
+    fi
+    echo "$EMAIL"                              # EMAIL
                                                 # PANEL_DOMAIN уже задан
     # AdGuard/заглушка/порты: в не-TTY initial_setup вопросов НЕ задаёт —
     # всё берётся из глобальных (заданы вопросами авто-подъёма выше), строк не пишем
