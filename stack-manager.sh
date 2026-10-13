@@ -486,6 +486,8 @@ ensure_deps() {  local missing=() t
     # недоступен из-за DNS/репозитория или нестандартного состояния dpkg.
     if [[ ! -f /etc/nginx/nginx.conf ]]; then
       cat > /etc/nginx/nginx.conf <<'NGINXCFG'
+# Загружаем stream-модуль до events (нужен для SNI на 443).
+load_module /usr/lib/nginx/modules/ngx_stream_module.so;
 user www-data;
 worker_processes auto;
 pid /run/nginx.pid;
