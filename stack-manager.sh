@@ -2615,7 +2615,7 @@ create_inbounds_menu() {
 
     # --- Reality: свой/чужой — тот же вопрос, что и в авто-установке ---
     local rmode=""
-    if [[ "$proto" == "vless" && "$security" == "reality" ]]; then
+    if [[ ( "$proto" == "vless" || "$proto" == "trojan" ) && "$security" == "reality" ]]; then
       echo
       echo "  $name:"
       echo "   1) Чужой реалити «найти цели» — за 443 по SNI цели, серт НЕ нужен"
@@ -2635,7 +2635,7 @@ create_inbounds_menu() {
       REALITY_EXT_TARGET="$tgt"
       printf '%s' "$tgt" > /tmp/.reality-found-target 2>/dev/null || true
       log "  $name: цель → $tgt (dest+serverNames, за 443 по SNI цели)"
-    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ) || ( "$proto" == "vless" && "$security" == "reality" ) ]]; then
+    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ) || ( ( "$proto" == "vless" || "$proto" == "trojan" ) && "$security" == "reality" ) ]]; then
       echo
       if [[ -z "$panel_domain" ]]; then
         panel_domain="${PANEL_DOMAIN:-}"
@@ -2672,9 +2672,9 @@ create_inbounds_menu() {
       sni_domain="$d_new"
       if [[ "$security" == "tls" && ( "$proto" == "naive" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ]]; then
         decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
-      elif [[ "$proto" == "vless" && "$security" == "reality" ]]; then
-        # своя заглушка у каждого reality-инбаунда (как в авто-установке);
-        # серт на decoy выпустит configure_sni_for_inbound после создания
+      elif [[ "$security" == "reality" && "$rmode" != "1" ]]; then
+        # Свой SNI у любого Reality-инбаунда (включая Trojan):
+        # браузерная TCP-заглушка выбирается отдельно от протокола.
         decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
       elif ! cert_issue "$sni_domain"; then
         local keep=""
@@ -12589,7 +12589,7 @@ auto_full_setup() {
     local pfx="${PREFIX[$proto-$transport]:-}"
     local port sn="" dom="${SELDOM[$proto-$transport]:-}"
     # ── Reality: режим + цель/домен — прямо здесь, перед портом
-    if [[ "$proto" == "vless" && "$security" == "reality" ]]; then
+    if [[ ( "$proto" == "vless" || "$proto" == "trojan" ) && "$security" == "reality" ]]; then
       local e_key="$proto-$transport" rmode=""
       if [[ -t 0 ]]; then
         echo
