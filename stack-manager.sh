@@ -1132,7 +1132,8 @@ for ln in reversed(lines):
         continue
     kind, rid, existed, js = parts[0], parts[1], parts[2], parts[3]
     db = parts[4] if len(parts) > 4 else ""
-    if kind not in ("inbounds", "hosts") or not db or not os.path.exists(db):
+    # Инбаунды никогда не откатываем и не удаляем: они должны остаться.
+    if kind not in ("hosts",) or not db or not os.path.exists(db):
         continue
     try:
         data = json.loads(js) if js else {}
