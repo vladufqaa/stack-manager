@@ -6236,6 +6236,21 @@ hosts_ownership_ensure() {
   [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 1
   sqlite3 -cmd ".timeout 3000" "$XUI_DB" "CREATE TABLE IF NOT EXISTS sm_hosts_owned (inbound_id INTEGER NOT NULL, port INTEGER NOT NULL, address TEXT NOT NULL, sni TEXT NOT NULL DEFAULT '', PRIMARY KEY(inbound_id,port,address,sni));" 2>/dev/null
 }
+hosts_ownership_import_stack_rows() {
+  [[ -f "$SNI_CONF" && -f "$XUI_DB" ]] || return 0
+  hosts_ownership_ensure || return 0
+  local _dom _be _id _addr _sni
+  while IFS='|' read -r _dom _be; do
+    [[ "$_be" =~ ^inb_([0-9]+)_backend$ ]] || continue
+    _id="${BASH_REMATCH[1]}"
+    while IFS='|' read -r _addr _sni; do
+      [[ -n "$_addr" ]] || continue
+      sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT OR IGNORE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES($_id,443,'$(printf '%s' "$_addr" | sed "s/'/''/g")','$(printf '%s' "$_sni" | sed "s/'/''/g")');" 2>/dev/null || true
+    done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT COALESCE(address,''),COALESCE(sni,'') FROM hosts WHERE inbound_id=$_id AND port=443 AND (address='$_dom' OR sni='$_dom');" 2>/dev/null || true)
+  done < <(awk '
+    /^map / { inm=1; next } inm && /^}/ { inm=0 } inm && /^[[:space:]]/ && NF>=2 { d=$1; sub(/;$/, "", d); b=$2; sub(/;$/, "", b); print d "|" b }
+  ' "$SNI_CONF" 2>/dev/null)
+}
 hosts_owned_delete() {
   local id="$1" port="${2:-443}"
   hosts_ownership_ensure || return 0
@@ -12069,6 +12084,7 @@ rb_full_rollback() {
   # Убираем SNI-привязки hosts, созданные стеком, сохраняя сами inbounds/клиентов.
   if [[ -f "$XUI_DB" ]]; then
     hosts_ownership_ensure
+    hosts_ownership_import_stack_rows
     sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE port=443 AND EXISTS (SELECT 1 FROM sm_hosts_owned o WHERE o.inbound_id=hosts.inbound_id AND o.port=hosts.port AND o.address=COALESCE(hosts.address,'') AND o.sni=COALESCE(hosts.sni,'')); DELETE FROM sm_hosts_owned; DELETE FROM hosts_shadow; DELETE FROM sm_pending;" >/dev/null 2>&1 || true
     log "  hosts-привязки, созданные скриптом, удалены (чужие hosts и inbounds сохранены)"
   fi
