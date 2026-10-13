@@ -11710,7 +11710,9 @@ rb_full_rollback() {
   _pp="/${_pp#/}"
   [[ "$_pp" != */ ]] && _pp="$_pp/"
   _host="${_pd:-$(server_ip4)}"; [[ -z "$_host" ]] && _host="127.0.0.1"
-  _scheme="https"; _cert="$(xui_get certFile 2>/dev/null || true)"
+  _scheme="https"; _cert=""
+  [[ -n "$_pd" ]] && _cert="/etc/letsencrypt/live/$_pd/fullchain.pem"
+  [[ -n "$_cert" && ! -f "$_cert" ]] && _cert=""
   [[ -z "$_cert" ]] && _scheme="http"
   if [[ -n "$_pd" && "$_pd" != "panel.example.com" ]]; then
     echo "  Панель:  ${_scheme}://${_pd}:${wp:-?}${_pp}"
