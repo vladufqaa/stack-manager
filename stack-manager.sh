@@ -237,10 +237,12 @@ ask() {
   local __v="$1" __p="$2" __d="$3" __r="${4:-}" __in
   while :; do
     if [[ -n "$__d" ]]; then
-      read -rp "$(echo -e "${B}?${N} ${__p} [${__d}]: ")" __in || __in=""
+      # Не вставляем ANSI-коды в read -rp: readline считает их печатными
+      # символами и Backspace после кириллицы стирает часть prompt.
+      read -rp "? ${__p} [${__d}]: " __in || __in=""
       __in="${__in:-$__d}"
     else
-      read -rp "$(echo -e "${B}?${N} ${__p}: ")" __in || __in=""
+      read -rp "? ${__p}: " __in || __in=""
     fi
     case "${__in,,}" in
       q|quit|exit|выход)
