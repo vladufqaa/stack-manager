@@ -6191,6 +6191,17 @@ reality_set_dest() {
 # ПОЛЕ SNI («безопасность» в hosts) БОЛЬШЕ НЕ ЗАПОЛНЯЕМ — панель на него ругается.
 # Исключение: чужой reality (dest = внешняя цель ≠ 127.0.0.1) — там SNI=цель
 # обязателен, иначе подписочная ссылка теряет нужный serverName.
+# Учёт владения hosts: скрипт удаляет только свои строки, чужие строки
+# панели или пользователя не затрагиваются.
+hosts_ownership_ensure() {
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 1
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "CREATE TABLE IF NOT EXISTS sm_hosts_owned (inbound_id INTEGER NOT NULL, port INTEGER NOT NULL, address TEXT NOT NULL, sni TEXT NOT NULL DEFAULT '', PRIMARY KEY(inbound_id,port,address,sni));" 2>/dev/null
+}
+hosts_owned_delete() {
+  local id="$1" port="${2:-443}"
+  hosts_ownership_ensure || return 0
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=$port AND EXISTS (SELECT 1 FROM sm_hosts_owned o WHERE o.inbound_id=hosts.inbound_id AND o.port=hosts.port AND o.address=COALESCE(hosts.address,'') AND o.sni=COALESCE(hosts.sni,'')); DELETE FROM sm_hosts_owned WHERE inbound_id=$id AND port=$port;" 2>/dev/null || true
+}
 hosts_upsert() {   # <inbound_id> <address> [sni]
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
   local id="$1" dom="$2" sni="${3:-}"
@@ -6209,10 +6220,11 @@ hosts_upsert() {   # <inbound_id> <address> [sni]
   [[ -z "$has_hosts" ]] && return 0
   local cols
   cols=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ')
+  hosts_ownership_ensure
   local remark
   remark=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT remark FROM inbounds WHERE id=$id;" 2>/dev/null || true)
   panel_journal_capture_row hosts "$id"   # снимок строки для отката (п.2/п.3)
-  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
+  hosts_owned_delete "$id" 443
   local fields="inbound_id,address,port" vals="$id,'$dom',443"
   grep -qw remark       <<<"$cols" && { fields+=",remark";       vals+=",'$(printf '%s' "$remark" | sed "s/'/''/g")'"; }
   grep -qw sni          <<<"$cols" && { fields+=",sni";          vals+=",'$sni'"; }
@@ -6220,6 +6232,7 @@ hosts_upsert() {   # <inbound_id> <address> [sni]
   grep -qw is_disabled  <<<"$cols" && { fields+=",is_disabled";  vals+=",0"; }
   grep -qw enable       <<<"$cols" && { fields+=",enable";       vals+=",1"; }
   if sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null; then
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT OR REPLACE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES($id,443,'$(printf '%s' "$dom" | sed "s/'/''/g")','$(printf '%s' "$sni" | sed "s/'/''/g")');" 2>/dev/null || true
     log "  hosts: #$id → $dom:443 ✓"
   else
     warn "  hosts: вставка для #$id не прошла — проверь схему таблицы hosts"
@@ -7154,7 +7167,7 @@ EOF
       [[ "${INB_PROTO[$id]}" == "tproxy" ]] && continue   # tg web proxy: hosts ведёт setup_tproxy_web
       # спрятан за 443 (свой домен ИЛИ чужой реалити по SNI цели) — hosts не трогаем
       grep -qE "^upstream inb_${id}_backend" "$SNI_CONF" 2>/dev/null && continue
-      sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
+      hosts_owned_delete "$id" 443
     done
     for id in "${INB_IDS[@]}"; do
       [[ "${HIDE[$id]}" == true ]] || continue
