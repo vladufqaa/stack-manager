@@ -5972,6 +5972,9 @@ sni_map_add() {
 sni_map_remove() { sed -i "/^\s*$1\s\+/d" "$SNI_CONF" 2>/dev/null || true; }
 
 nginx_reload() {
+  # Перед каждой проверкой nginx повторно нормализуем map: это также чинит
+  # старые повреждённые записи, созданные до обновления скрипта.
+  sni_conf_repair_map >/dev/null 2>&1 || true
   if ! nginx -t 2>/dev/null; then
     err "Nginx test failed"; nginx -t 2>&1 | tail -5 | sed 's/^/  /'
     return 1
