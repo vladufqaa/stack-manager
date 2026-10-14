@@ -6934,6 +6934,21 @@ initial_setup() {
     esac
     local d_new=""
     if [[ "$is_reality" == true ]]; then
+      echo "  Reality #$id:"
+      echo "   1) Найти внешнюю цель (без своего сертификата/decoy)"
+      echo "   2) Указать свой SNI-домен (сертификат + decoy)"
+      local rmode_new=""
+      ask rmode_new "Режим Reality [1/2]" "2" '^[12]$'
+      if [[ "$rmode_new" == "1" ]]; then
+        local tgt_new=""
+        reality_target_menu tgt_new "#$id"
+        REALITY_MODE["$proto-$transport"]="1"
+        REALITY_EXT_TARGET["$id"]="$tgt_new"
+        DOMAIN[$id]="$tgt_new"
+        HIDE[$id]=true
+        DECOY_TPL[$id]=""
+        continue
+      fi
       ask_sni_domain d_new "$id" "$def" "SNI-домен для Reality #$id (домен будет использоваться клиентом)"
     else
       ask_sni_domain d_new "$id" "$def"
@@ -12878,7 +12893,7 @@ auto_full_setup() {
       if [[ -t 0 ]]; then
         decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
       fi
-    elif [[ "$proto" == "vless" && "$security" == "reality" && "${REALITY_MODE[$proto-$transport]:-}" == "2" ]]; then
+    elif [[ "$security" == "reality" && "${REALITY_MODE[$proto-$transport]:-}" == "2" ]]; then
       rdtpl="corporate"
       if [[ -t 0 ]]; then
         decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
