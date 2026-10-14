@@ -6409,8 +6409,8 @@ reality_ext_hide() {
 inbound_is_xhttp_tls() {   # <stream_json> → 0, если network=xhttp и security=tls
   local s="$1"
   [[ -z "$s" ]] && return 1
-  { grep -qi '"network": *"xhttp"' <<<"$s" || grep -qi '"network":"xhttp"' <<<"$s"; } || return 1
-  grep -Eq '"security": ?"tls"' <<<"$s" || return 1
+  grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$s" || return 1
+  grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$s" || return 1
   return 0
 }
 
@@ -6427,6 +6427,8 @@ hosts_cdn_upsert() {   # <inbound_id> <cdn_domain>
   cols=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ')
   panel_journal_capture_row hosts "$id"   # снимок строки для отката (п.2/п.3)
   hosts_owned_delete "$id" 443
+  # В разных версиях панели hosts имеет обязательные NOT NULL-поля. Сначала
+  # заполняем минимальную совместимую строку, затем добавляем опциональные.
   local fields="inbound_id,address,port" vals="$id,'$cdn',443"
   grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'CDN'"; }
   grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",'$cdn'"; }
