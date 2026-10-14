@@ -5938,8 +5938,8 @@ sni_conf_repair_map() {
   # возникают после старых/прерванных запусков CDN и делают nginx -t фатальным.
   [[ -f "$SNI_CONF" && ! -L "$SNI_CONF" ]] || return 0
   awk '
-    /^map[[:space:]]/ { inmap=1; print; next }
-    inmap && /^}/ { inmap=0; print; next }
+    /^[[:space:]]*map[[:space:]]/ { inmap=1; print; next }
+    inmap && /^[[:space:]]*}/ { inmap=0; print; next }
     inmap {
       line=$0; sub(/^[[:space:]]+/,"",line); sub(/[[:space:]]+$/, "", line)
       if (line == "" || line ~ /^#/) next
@@ -5963,8 +5963,8 @@ sni_map_add() {
     return 0
   fi
   awk -v dom="$domain" -v be="$backend" '
-    /^map[[:space:]]/ { inmap=1 }
-    inmap && /^}/ && !done { print "    " dom "    " be ";"; done=1 }
+    /^[[:space:]]*map[[:space:]]/ { inmap=1 }
+    inmap && /^[[:space:]]*}/ && !done { print "    " dom "    " be ";"; done=1 }
     { print }
   ' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF"
   sni_conf_repair_map
