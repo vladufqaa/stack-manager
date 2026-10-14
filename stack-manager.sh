@@ -11963,22 +11963,6 @@ except Exception:
 PYREALITY
 }
 
-stack_restore_nginx_routes_from_snapshot() {
-  local snap_db="$1" snap_dir="" src=""
-  snap_dir="$(dirname "$snap_db")"
-  for src in "$snap_dir/nginx/streams-available/sni-router.conf" "$snap_dir/nginx/streams-enabled/sni-router.conf"; do
-    [[ -f "$src" ]] || continue
-    mkdir -p "$(dirname "$SNI_CONF")" /etc/nginx/streams-enabled /etc/nginx/streams-available 2>/dev/null || true
-    cp -f "$src" "$SNI_CONF" 2>/dev/null || return 1
-    rm -f /etc/nginx/streams-enabled/sni-router.conf /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
-    ln -s "$SNI_CONF" /etc/nginx/streams-enabled/sni-router.conf 2>/dev/null || true
-    ln -s "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
-    echo "SNI_ROUTES_RESTORED:1"
-    return 0
-  done
-  return 1
-}
-
 stack_restore_hosts_from_snapshot() {
   local snap_db="$1" live_db="$2"
   [[ -f "$snap_db" && -f "$live_db" ]] || return 1
@@ -12150,9 +12134,6 @@ stack_reset_state() {
     local _rh=""
     _rh=$(stack_restore_hosts_from_snapshot "$snap_db" "$sdb" 2>/dev/null || true)
     [[ -n "$_rh" ]] && log "  $_rh (hosts из backup)"
-    local _sr=""
-    _sr=$(stack_restore_nginx_routes_from_snapshot "$snap_db" 2>/dev/null || true)
-    [[ -n "$_sr" ]] && log "  $_sr (SNI-map из backup)"
   fi
   if [[ -n "$xui_was" ]]; then
     # После восстановления БД panel/xray может держать старую конфигурацию
