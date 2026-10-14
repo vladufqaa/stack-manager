@@ -12184,14 +12184,14 @@ rb_full_rollback() {
   echo "    1) Бэкап x-ui.db и nginx-конфигов стека"
   echo "    2) Удаление служб и интеграций (stack-heal, decoy-login jail, certbot hook)"
   echo "    3) Удаление конфигов и каталогов стека"
-  echo "    4) Возврат состояния панели: настройки из снимка «до скрипта»,"
-  echo "       listen инбаундов — как было, снятие маркеров стека (п.1/п.2/п.3)"
-  echo "    5) Открытие панели/подписок/инбаундов наружу (значение по умолчанию)"
+  echo "    4) Полное восстановление x-ui.db из pre-install снимка"
+  echo "       Reality, CDN/XHTTP, hosts, SNI-поля, инбаунды и клиенты — как до скрипта"
+  echo "    5) Удаление служебных маркеров стека и интеграций"
   echo "    6) UFW: восстановление из снимка (если есть), иначе reset + открытие слушающегося"
   echo "    7) Удаление nginx (пакет + конфиги)"
   echo
-  echo -e "  ${G}НЕ трогается:${N} AdGuard Home, серты Let's Encrypt в /etc/letsencrypt/live/, инбаунды и клиенты панели."
-  echo "  Инбаунды, созданные скриптом, остаются в панели — удалить их можно через управление инбаундами."
+  echo -e "  ${G}НЕ трогается:${N} AdGuard Home и серты Let's Encrypt в /etc/letsencrypt/live/."
+  echo "  ${Y}ВНИМАНИЕ:${N} текущие инбаунды, клиенты и изменения панели после pre-install снимка будут заменены состоянием из снимка."
   echo
   local sure=""
   ask sure "Для подтверждения введи YES" "" '^YES$'
@@ -12214,33 +12214,43 @@ rb_full_rollback() {
   rm -rf /var/www/panel-decoy /var/www/decoy-templates /var/www/decoy-login 2>/dev/null || true
   rm -rf /var/www/decoy-[0-9]* /var/www/decoy-login 2>/dev/null || true
 
-  log "[4/7] Состояние панели: настройки, listen инбаундов, маркеры стека…"
-  # ПАНЕЛЬ ОСТАНОВЛЕНА: stack_reset_state пишет в БД только при мёртвой панели,
-  # иначе панель перетрёт правки своим состоянием при рестарте (см. п.1/п.2/п.3).
+  log "[4/7] Полное восстановление x-ui.db из pre-install snapshot…"
+  # В режиме «полный откат» возвращаем БД целиком. Это гарантирует возврат
+  # Reality, CDN/XHTTP, hosts, SNI-полей, клиентов и настроек ровно к моменту
+  # до вмешательства скрипта. Перед заменой актуальная БД уже сохранена через
+  # auto_backup_stack на шаге [1/7].
   systemctl stop x-ui 2>/dev/null || true
-  stack_reset_state 0 || warn "  состояние панели возвращено не полностью (см. вывод выше)"
-  # После полного демонтажа reverse-proxy больше не существует: очищаем
-  # URI обратного прокси подписок, иначе панель продолжит выдавать ссылки
-  # через удалённый nginx-маршрут и подписки перестанут работать.
-  xui_set_setting subURI ''
-  log "  URI обратного прокси подписок очищен"
-  # Убираем SNI-привязки hosts, созданные стеком, сохраняя сами inbounds/клиентов.
-  if [[ -f "$XUI_DB" ]]; then
-    hosts_ownership_ensure
-    hosts_ownership_import_stack_rows
-    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE port=443 AND EXISTS (SELECT 1 FROM sm_hosts_owned o WHERE o.inbound_id=hosts.inbound_id AND o.port=hosts.port AND o.address=COALESCE(hosts.address,'') AND o.sni=COALESCE(hosts.sni,'')); DELETE FROM sm_hosts_owned; DELETE FROM hosts_shadow; DELETE FROM sm_pending;" >/dev/null 2>&1 || true
-    log "  hosts-привязки, созданные скриптом, удалены (чужие hosts и inbounds сохранены)"
+  local _full_snap="" _db_restored=false
+  _full_snap=$(stack_preinstall_db 2>/dev/null || true)
+  if [[ -n "$_full_snap" && -f "$_full_snap" && -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+    sqlite3 "$XUI_DB" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+    cp -a "$XUI_DB" "${XUI_DB}.pre-full-rollback-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    rm -f "${XUI_DB}-wal" "${XUI_DB}-shm" 2>/dev/null || true
+    if cp -a "$_full_snap" "$XUI_DB" 2>/dev/null; then
+      _db_restored=true
+      log "  x-ui.db полностью восстановлен: $_full_snap"
+    else
+      warn "  не удалось заменить x-ui.db — применяю безопасный выборочный откат"
+    fi
+  else
+    warn "  pre-install x-ui.db не найден — применяю безопасный выборочный откат"
   fi
-  log "[5/7] Открытие портов наружу (значение по умолчанию панели)…"
-  # '' для панели == 0.0.0.0: пишем именно «пусто», как это хранила панель до
-  # скрипта, а не явный 0.0.0.0 (иначе откат меняет то, чего не менял — п.3).
-  xui_set_setting webListen ''
-  xui_set_setting subListen ''
-  local _lid
-  while IFS= read -r _lid; do
-    [[ -n "$_lid" ]] && db_set_listen "$_lid" '' direct
-  done < <(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-           "SELECT id FROM inbounds WHERE COALESCE(listen,'') IN ('127.0.0.1','::1');" 2>/dev/null || true)
+  if [[ "$_db_restored" != true ]]; then
+    stack_reset_state 0 || warn "  выборочный откат выполнен частично"
+  else
+    # Снимаем служебные маркеры/интеграции, но не меняем восстановленную БД.
+    rb_wipe_stack_state 0 || warn "  служебное состояние стека снято частично"
+  fi
+  log "[5/7] Открытие портов наружу (значение из восстановленной панели)…"
+  if [[ "$_db_restored" != true ]]; then
+    xui_set_setting webListen ''
+    xui_set_setting subListen ''
+    local _lid
+    while IFS= read -r _lid; do
+      [[ -n "$_lid" ]] && db_set_listen "$_lid" '' direct
+    done < <(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+             "SELECT id FROM inbounds WHERE COALESCE(listen,'') IN ('127.0.0.1','::1');" 2>/dev/null || true)
+  fi
   systemctl start x-ui 2>/dev/null || true
 
   log "[6/7] UFW…"
