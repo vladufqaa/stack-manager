@@ -6511,6 +6511,17 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
       || warn "  сертификат в tlsSettings не прописан (нет массива certificates) — пропущено"
   fi
   db_set_listen "$id" '127.0.0.1' direct 2>/dev/null || true
+  # CDN-инбаунд скрывается за 443 через ORIGIN SNI-map. Для обычного
+  # браузерного TLS-пробоя добавляем fallback на HTTP-сайт :80; XHTTP
+  # продолжает идти в тот же inbound и не получает отдельный SNI-маршрут.
+  local _cdn_fb
+  _cdn_fb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  if [[ -z "$_cdn_fb" || "$_cdn_fb" == "[]" || "$_cdn_fb" == "null" ]]; then
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+      "UPDATE inbounds SET settings=json_set(COALESCE(settings,'{}'),'\$.fallbacks',json('[{\"dest\":80}]')) WHERE id=$id;" 2>/dev/null \
+      && log "  + CDN-decoy: браузерный пробой → 127.0.0.1:80 (за 443)" \
+      || warn "  CDN-decoy не записан — SNI-маршрут оставлен"
+  fi
   # SNI-роутер: ORIGIN-домен → инбаунд (клиент-CDN и прямой клиент приходят с SNI ORIGIN)
   sni_upstream_add "inb_${id}_backend" "$port"
   sni_map_add "$origin_dom" "inb_${id}_backend"
