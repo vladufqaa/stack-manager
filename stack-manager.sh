@@ -5933,18 +5933,41 @@ sni_upstream_add() {
 }
 sni_upstream_remove() { sed -i "/^upstream $1 /d" "$SNI_CONF" 2>/dev/null || true; }
 
+sni_conf_repair_map() {
+  # Удаляет из map повреждённые строки с лишними параметрами. Такие строки
+  # возникают после старых/прерванных запусков CDN и делают nginx -t фатальным.
+  [[ -f "$SNI_CONF" && ! -L "$SNI_CONF" ]] || return 0
+  awk '
+    /^map[[:space:]]/ { inmap=1; print; next }
+    inmap && /^}/ { inmap=0; print; next }
+    inmap {
+      line=$0; sub(/^[[:space:]]+/,"",line); sub(/[[:space:]]+$/, "", line)
+      if (line == "" || line ~ /^#/) next
+      n=split(line,a,/[[:space:]]+/)
+      if (n == 2) {
+        sub(/;$/, "", a[2])
+        print "    " a[1] "    " a[2] ";"
+      }
+      next
+    }
+    { print }
+  ' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF"
+}
 sni_map_add() {
   local domain="$1" backend="$2"
+  [[ "$domain" =~ ^[A-Za-z0-9._-]+$ && "$backend" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   sni_conf_ensure
+  sni_conf_repair_map
   if awk -v dom="$domain" '$1 == dom { found=1 } END { exit(found ? 0 : 1) }' "$SNI_CONF" 2>/dev/null; then
     awk -v dom="$domain" -v be="$backend" 'BEGIN{OFS=" "} $1 == dom {$0="    " dom "    " be ";"} {print}' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF"
     return 0
   fi
   awk -v dom="$domain" -v be="$backend" '
-    /^map / { inmap=1 }
+    /^map[[:space:]]/ { inmap=1 }
     inmap && /^}/ && !done { print "    " dom "    " be ";"; done=1 }
     { print }
   ' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF"
+  sni_conf_repair_map
 }
 sni_map_remove() { sed -i "/^\s*$1\s\+/d" "$SNI_CONF" 2>/dev/null || true; }
 
