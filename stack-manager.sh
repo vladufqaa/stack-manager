@@ -6965,7 +6965,9 @@ initial_setup() {
       if [[ "$rmode_new" == "1" ]]; then
         local tgt_new=""
         reality_target_menu tgt_new "#$id"
-        REALITY_MODE["$proto-$transport"]="1"
+        # В этом цикле transport не заполняется: ключуем режим по ID,
+        # иначе Bash воспринимает vless- как арифметическое выражение.
+        REALITY_MODE["$id"]="1"
         REALITY_EXT_TARGET_BYID["$id"]="$tgt_new"
         # Для генерации map нужен сам внешний SNI-домен. Decoy не создаётся,
         # но маршрут по этому имени должен попасть в SNI-карту.
