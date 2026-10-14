@@ -6967,7 +6967,9 @@ initial_setup() {
         reality_target_menu tgt_new "#$id"
         REALITY_MODE["$proto-$transport"]="1"
         REALITY_EXT_TARGET_BYID["$id"]="$tgt_new"
-        DOMAIN[$id]=""
+        # Для генерации map нужен сам внешний SNI-домен. Decoy не создаётся,
+        # но маршрут по этому имени должен попасть в SNI-карту.
+        DOMAIN[$id]="$tgt_new"
         HIDE[$id]=true
         DECOY_TPL[$id]=""
         continue
