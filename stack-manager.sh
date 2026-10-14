@@ -8341,7 +8341,7 @@ decoy_pick_inbound() {
     log "Hysteria #$id: TCP-decoy обновлён, UDP-инбаунд не изменён"
     pause; return 0
   fi
-  if [[ "$proto" == "vless" ]] && grep -qi '"security": *"reality"' <<<"$st"; then
+  if grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$st" || inbound_is_xhttp_tls "$st"; then
     local tpl="" meta dport="" c="" k="" root=""
     decoy_template_choose tpl "Decoy для #$id ($dom)" "corporate"
     meta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
@@ -8480,9 +8480,11 @@ change_decoy() {
     [[ "$_d_be" =~ ^inb_([0-9]+)_backend$ ]] || continue
     _d_id="${BASH_REMATCH[1]}"
     _d_proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$_d_id AND enable=1;" 2>/dev/null || true)
-    [[ "$_d_proto" == "vless" ]] || continue
     _d_st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
-    grep -qi '"security": *"reality"' <<<"$_d_st" || continue
+    # Показываем все созданные скриптом TCP-decoy: Reality любого протокола
+    # и XHTTP+TLS, а не только старую категорию VLESS Reality.
+    grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$_d_st" || \
+      inbound_is_xhttp_tls "$_d_st" || continue
     _d_port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
     _decoy_rows+=("$_d_dom|$_d_id|$_d_port")
     _decoy_row="${#_decoy_rows[@]}"
