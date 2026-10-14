@@ -5895,7 +5895,15 @@ sni_conf_ensure() {
   local d
   d=$(dirname "$SNI_CONF")
   mkdir -p "$d" /etc/nginx/streams-enabled /etc/nginx/streams-available 2>/dev/null || true
-  [[ -e /etc/nginx/streams-enabled/sni-router.conf ]] || ln -s "$SNI_CONF" /etc/nginx/streams-enabled/sni-router.conf 2>/dev/null || true
+  # SNI_CONF уже находится в streams-enabled. Нельзя создавать ссылку
+  # /streams-enabled/sni-router.conf -> самому себе: это даёт ELOOP.
+  if [[ -L "$SNI_CONF" ]]; then
+    local _sni_target=""
+    _sni_target=$(readlink -f "$SNI_CONF" 2>/dev/null || true)
+    rm -f "$SNI_CONF" 2>/dev/null || true
+    # Если старый self-link был единственным объектом, создаём обычный файл.
+    [[ -n "$_sni_target" && -f "$_sni_target" && "$_sni_target" != "$SNI_CONF" ]] && cp -f "$_sni_target" "$SNI_CONF" 2>/dev/null || true
+  fi
   if [[ ! -s "$SNI_CONF" ]]; then
     cat > "$SNI_CONF" <<'EOF'
 map $ssl_preread_server_name $backend {
