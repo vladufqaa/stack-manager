@@ -11945,6 +11945,14 @@ try:
                 crs[key]=ors[key]; copied=True
         if copied:
             cj['realitySettings']=crs
+        # CDN-профиль XHTTP+TLS меняет origin SNI, host и path. Возвращаем
+        # только transport-объекты из snapshot, не заменяя inbound целиком.
+        if (oj.get('network') == 'xhttp' and oj.get('security') == 'tls'):
+            for key in ('tlsSettings','xhttpSettings'):
+                if key in oj:
+                    if cj.get(key) != oj[key]: copied=True
+                    cj[key]=oj[key]
+        if copied:
             con.execute('UPDATE inbounds SET stream_settings=? WHERE id=?',
                         (json.dumps(cj, ensure_ascii=False, separators=(',',':')), iid))
             changed += 1
@@ -11953,6 +11961,22 @@ try:
 except Exception:
     sys.exit(1)
 PYREALITY
+}
+
+stack_restore_nginx_routes_from_snapshot() {
+  local snap_db="$1" snap_dir="" src=""
+  snap_dir="$(dirname "$snap_db")"
+  for src in "$snap_dir/nginx/streams-available/sni-router.conf" "$snap_dir/nginx/streams-enabled/sni-router.conf"; do
+    [[ -f "$src" ]] || continue
+    mkdir -p "$(dirname "$SNI_CONF")" /etc/nginx/streams-enabled /etc/nginx/streams-available 2>/dev/null || true
+    cp -f "$src" "$SNI_CONF" 2>/dev/null || return 1
+    rm -f /etc/nginx/streams-enabled/sni-router.conf /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
+    ln -s "$SNI_CONF" /etc/nginx/streams-enabled/sni-router.conf 2>/dev/null || true
+    ln -s "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
+    echo "SNI_ROUTES_RESTORED:1"
+    return 0
+  done
+  return 1
 }
 
 stack_restore_hosts_from_snapshot() {
@@ -11977,8 +12001,15 @@ try:
     # INSERT OR IGNORE недостаточен. Удаляем только строки, отмеченные нашим
     # реестром владения, затем вставляем snapshot-значение (например google.com).
     owned = lo.execute("SELECT inbound_id,port,address,sni FROM sm_hosts_owned").fetchall() if lo.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sm_hosts_owned'").fetchone() else []
+    # В старых версиях реестр мог быть пустым. Восстановление hosts должно
+    # всё равно заменить текущую строку для inbound, если в snapshot есть
+    # исходная строка; ручные hosts остальных inbound не затрагиваем.
+    snap_keys = {(int(r[0]), int(r[2])) for r in so.execute('SELECT inbound_id, address, port FROM hosts')}
+    owned_keys = {(int(a), int(b)) for a,b,_,_ in owned}
     for iid, port, addr, sni in owned:
         lo.execute("DELETE FROM hosts WHERE inbound_id=? AND port=? AND COALESCE(address,'')=? AND COALESCE(sni,'')=?", (iid,port,addr,sni))
+    for iid, port in (snap_keys - owned_keys):
+        lo.execute("DELETE FROM hosts WHERE inbound_id=? AND port=?", (iid,port))
     for row in so.execute('SELECT %s FROM hosts' % q):
         marks=','.join('?' for _ in cols)
         try:
@@ -12119,6 +12150,9 @@ stack_reset_state() {
     local _rh=""
     _rh=$(stack_restore_hosts_from_snapshot "$snap_db" "$sdb" 2>/dev/null || true)
     [[ -n "$_rh" ]] && log "  $_rh (hosts из backup)"
+    local _sr=""
+    _sr=$(stack_restore_nginx_routes_from_snapshot "$snap_db" 2>/dev/null || true)
+    [[ -n "$_sr" ]] && log "  $_sr (SNI-map из backup)"
   fi
   if [[ -n "$xui_was" ]]; then
     # После восстановления БД panel/xray может держать старую конфигурацию
