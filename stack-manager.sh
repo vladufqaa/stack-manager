@@ -5891,8 +5891,30 @@ wildcard_toggle() {
 # =====================================================================
 # NGINX ХЕЛПЕРЫ
 # =====================================================================
+sni_conf_ensure() {
+  local d
+  d=$(dirname "$SNI_CONF")
+  mkdir -p "$d" /etc/nginx/streams-enabled /etc/nginx/streams-available 2>/dev/null || true
+  [[ -e /etc/nginx/streams-enabled/sni-router.conf ]] || ln -s "$SNI_CONF" /etc/nginx/streams-enabled/sni-router.conf 2>/dev/null || true
+  if [[ ! -s "$SNI_CONF" ]]; then
+    cat > "$SNI_CONF" <<'EOF'
+map $ssl_preread_server_name $backend {
+    default panel_backend;
+}
+upstream panel_backend { server 127.0.0.1:4443; }
+server {
+    listen 443;
+    proxy_pass $backend;
+    ssl_preread on;
+    proxy_connect_timeout 5s;
+    proxy_timeout 10m;
+}
+EOF
+  fi
+}
 sni_upstream_add() {
   local name="$1" port="$2"
+  sni_conf_ensure
   grep -q "upstream $name " "$SNI_CONF" 2>/dev/null && return 0
   if grep -q "^upstream panel_backend" "$SNI_CONF" 2>/dev/null; then
     sed -i "/^upstream panel_backend/i upstream $name { server 127.0.0.1:$port; }" "$SNI_CONF"
@@ -5905,6 +5927,7 @@ sni_upstream_remove() { sed -i "/^upstream $1 /d" "$SNI_CONF" 2>/dev/null || tru
 
 sni_map_add() {
   local domain="$1" backend="$2"
+  sni_conf_ensure
   if awk -v dom="$domain" '$1 == dom { found=1 } END { exit(found ? 0 : 1) }' "$SNI_CONF" 2>/dev/null; then
     awk -v dom="$domain" -v be="$backend" 'BEGIN{OFS=" "} $1 == dom {$0="    " dom "    " be ";"} {print}' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF"
     return 0
