@@ -6886,6 +6886,16 @@ initial_setup() {
       HIDE[$id]=false; continue
     fi
 
+    # Для XHTTP+TLS вопрос CDN задаём прямо в пункте 1, даже если инбаунд
+    # уже имеет старый SNI-map. При ответе «да» xhttp_cdn_setup полностью
+    # переводит профиль в CDN и дальнейшая обычная SNI-ветка не нужна.
+    if inbound_is_xhttp_tls "${INB_STREAM[$id]}"; then
+      if xhttp_cdn_setup "$id" "$proto" "$port"; then
+        HIDE[$id]=true
+        continue
+      fi
+    fi
+
     # уже привязан к SNI (создан в п.2/п.16 или ранее) — НЕ спрашиваем второй раз
     local existing_dom=""
     existing_dom=$(grep -E "^\s+\S+\s+inb_${id}_backend" "$SNI_CONF" 2>/dev/null | awk '{print $1}' | head -1 || true)
@@ -6901,7 +6911,7 @@ initial_setup() {
         TLS_PORT[$id]=$tls_cur; tls_cur=$((tls_cur+1))
       fi
       local is_reality=false
-      [[ "$proto" == "vless" ]] && grep -qi reality <<<"${INB_STREAM[$id]}" && is_reality=true
+      grep -qi reality <<<"${INB_STREAM[$id]}" && is_reality=true
       [[ "$is_reality" == true ]] && DECOY_TPL[$id]="default" || DECOY_TPL[$id]=""
       continue
     fi
@@ -6914,7 +6924,7 @@ initial_setup() {
 
     local def="svc-$id.example.com"
     local is_reality=false
-    [[ "$proto" == "vless" ]] && grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"${INB_STREAM[$id]}" && is_reality=true
+    grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"${INB_STREAM[$id]}" && is_reality=true
     case "$proto" in
       anytls) def="at.example.com";;
       trusttunnel|trust-tunnel) def="tt.example.com";;
@@ -8661,7 +8671,17 @@ take_pre_install_snapshot() {
 
   # 1. x-ui.db + /etc/x-ui
   if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
-    cp -a "$XUI_DB" "$dir/x-ui.db" 2>/dev/null || true
+    # Консистентный SQLite-снимок: cp активной БД без WAL мог сохранить
+    # незакоммиченные настройки Reality/hosts не полностью.
+    local _snap_ok=false
+    if command -v sqlite3 >/dev/null 2>&1; then
+      sqlite3 "$XUI_DB" ".backup '$dir/x-ui.db'" >/dev/null 2>&1 && _snap_ok=true
+    fi
+    if [[ "$_snap_ok" != true ]]; then
+      cp -a "$XUI_DB" "$dir/x-ui.db" 2>/dev/null || true
+      [[ -f "${XUI_DB}-wal" ]] && cp -a "${XUI_DB}-wal" "$dir/x-ui.db-wal" 2>/dev/null || true
+      [[ -f "${XUI_DB}-shm" ]] && cp -a "${XUI_DB}-shm" "$dir/x-ui.db-shm" 2>/dev/null || true
+    fi
     [[ -d /etc/x-ui ]] && cp -a /etc/x-ui "$dir/etc-x-ui" 2>/dev/null || true
   fi
 
@@ -8821,6 +8841,10 @@ restore_pre_install_snapshot() {
   [[ -n "$ADG_SERVICE" ]] && systemctl stop "$ADG_SERVICE" 2>/dev/null || true
 
   if [[ -f "$chosen/x-ui.db" && -n "$XUI_DB" ]]; then
+    # WAL/SHM от текущей БД нельзя оставлять: SQLite применит их поверх
+    # восстановленного снимка и вернёт старые SNI/hosts.
+    sqlite3 "$XUI_DB" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+    rm -f "${XUI_DB}-wal" "${XUI_DB}-shm" 2>/dev/null || true
     cp -a "$chosen/x-ui.db" "$XUI_DB" 2>/dev/null && log "  x-ui.db восстановлен"
   fi
   if [[ -d "$chosen/etc-x-ui" ]]; then
