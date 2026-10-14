@@ -6426,6 +6426,11 @@ hosts_cdn_upsert() {   # <inbound_id> <cdn_domain>
   local cols
   cols=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ')
   panel_journal_capture_row hosts "$id"   # снимок строки для отката (п.2/п.3)
+  # Для одного inbound должна существовать ровно одна строка hosts: CDN
+  # заменяет прежнюю обычную/SNI-запись, иначе панель выдаёт две ссылки.
+  # Удаляем только строки этого inbound на 443, чужие inbounds не трогаем.
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
   hosts_owned_delete "$id" 443
   # В разных версиях панели hosts имеет обязательные NOT NULL-поля. Сначала
   # заполняем минимальную совместимую строку, затем добавляем опциональные.
@@ -7456,6 +7461,13 @@ EOF
       _miss+=("${_hid}|${_proto}|${_port}|${_remark}")
       continue
     fi
+    # CDN/XHTTP считается скрытым по ORIGIN-маршруту даже если hosts
+    # содержит CDN-домен, а не отдельный обычный SNI.
+    local _ist=""
+    _ist=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$_hid;" 2>/dev/null || true)
+    if inbound_is_xhttp_tls "$_ist" && grep -qE "^[[:space:]]+[^[:space:]]+[[:space:]]+inb_${_hid}_backend;" "$SNI_CONF" 2>/dev/null; then
+      continue
+    fi
     grep -qE "inb_${_hid}_backend;" "$SNI_CONF" 2>/dev/null && continue
     _miss+=("${_hid}|${_proto}|${_port}|${_remark}")
   done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, remark FROM inbounds WHERE enable=1;" 2>/dev/null || true)
@@ -7465,7 +7477,7 @@ EOF
     local _r
     for _r in "${_miss[@]}"; do
       IFS='|' read -r _hid _proto _port _remark <<<"$_r"
-      echo "    • #$_hid ${_remark:-без-имени} $_proto:$$_port"
+      echo "    • #$_hid ${_remark:-без-имени} $_proto:$_port"
     done
     if [[ -t 0 ]]; then
       local _fix=false
