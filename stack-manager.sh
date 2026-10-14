@@ -6893,7 +6893,7 @@ initial_setup() {
     INB_PROTO[$id]="$proto"; INB_PORT[$id]="$port"; INB_STREAM[$id]="$stream"
   done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
 
-  declare -A DOMAIN HIDE TLS_PORT DECOY_TPL
+  declare -A DOMAIN HIDE TLS_PORT DECOY_TPL REALITY_EXT_TARGET_BYID
   local tls_cur=4444
   for id in "${INB_IDS[@]}"; do
     proto="${INB_PROTO[$id]}"; port="${INB_PORT[$id]}"
@@ -6966,8 +6966,8 @@ initial_setup() {
         local tgt_new=""
         reality_target_menu tgt_new "#$id"
         REALITY_MODE["$proto-$transport"]="1"
-        REALITY_EXT_TARGET["$id"]="$tgt_new"
-        DOMAIN[$id]="$tgt_new"
+        REALITY_EXT_TARGET_BYID["$id"]="$tgt_new"
+        DOMAIN[$id]=""
         HIDE[$id]=true
         DECOY_TPL[$id]=""
         continue
@@ -7229,6 +7229,10 @@ EOF
 
   for id in "${INB_IDS[@]}"; do
     [[ "${HIDE[$id]}" == true ]] || continue
+    if [[ -n "${REALITY_EXT_TARGET_BYID[$id]:-}" ]]; then
+      reality_ext_hide "$id" "${REALITY_EXT_TARGET_BYID[$id]}" "${INB_PORT[$id]}" || warn "  #$id: внешний Reality не спрятан за 443"
+      continue
+    fi
     [[ -z "${DECOY_TPL[$id]}" ]] && continue
     local dom="${DOMAIN[$id]}" cp_line="" c="" k=""
     cp_line=$(cert_paths "$dom") || true
