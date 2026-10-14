@@ -260,6 +260,20 @@ getent ahosts origin.example.com
 
 После этого повторите выпуск сертификата в разделе 3.
 
+## Благодарности и ссылки
+
+Проект использует и интегрируется с открытыми проектами:
+
+- [LucX UI](https://github.com/AlexeyLCP/lucx-ui) — панель управления прокси-инбаундами;
+- [3x-ui](https://github.com/MHSanaei/3x-ui) — основа панели и базы конфигурации;
+- [AdGuard Home](https://github.com/AdguardTeam/AdGuardHome) — DNS-фильтрация и DoH;
+- [nginx](https://nginx.org/) — HTTP- и SNI-маршрутизация;
+- [Certbot](https://certbot.eff.org/) — выпуск и продление сертификатов;
+- [fail2ban](https://github.com/fail2ban/fail2ban) — защита от перебора и автоматические блокировки;
+- [UFW](https://launchpad.net/ufw) — управление правилами firewall.
+
+Отдельная благодарность [Mannokia](https://github.com/Mannokia) за идеи и доработки, связанные с линиями сертификатов A/B, wildcard-выпуском через Cloudflare DNS-01, аудитом сертификатов, очисткой дублей и TUI-управлением firewall.
+
 ## Лицензия
 
 MIT. Используйте программное обеспечение в соответствии с законодательством вашей юрисдикции.
