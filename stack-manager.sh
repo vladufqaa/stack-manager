@@ -7104,7 +7104,10 @@ initial_setup() {
     echo "    default                       panel_backend;"
     echo "    $PANEL_DOMAIN                 panel_backend;"
     for id in "${INB_IDS[@]}"; do
-      [[ "${HIDE[$id]}" == true ]] && echo "    ${DOMAIN[$id]}    inb_${id}_backend;"
+      # Не выводим пустой SNI: иначе получается строка только с backend,
+      # и nginx сообщает «invalid number of the map parameters».
+      [[ "${HIDE[$id]}" == true && -n "${DOMAIN[$id]:-}" ]] && \
+        echo "    ${DOMAIN[$id]}    inb_${id}_backend;"
     done
     echo "}"
     echo
