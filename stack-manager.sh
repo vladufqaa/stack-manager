@@ -6521,8 +6521,8 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   fi
   panel_journal_capture_row inbounds "$id"   # снимок строки для отката (п.2/п.3)
   local sql="UPDATE inbounds SET stream_settings=json_set(stream_settings,"
-  sql+="'\$.tlsSettings.serverName','$origin_dom',"
-  sql+="'\$.xhttpSettings.host','$origin_dom',"
+  # У XHTTP могут быть два разных имени: внешний ORIGIN SNI nginx
+  # и TLS SNI из externalProxy. Не затираем второй origin-домен.
   sql+="'\$.xhttpSettings.path','$new_path',"
   sql+="'\$.xhttpSettings.mode','packet-up',"
   sql+="'\$.xhttpSettings.uplinkHTTPMethod','GET',"
@@ -6534,6 +6534,8 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   err_out=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "$sql" 2>&1) || {
     err "SQL: $err_out"; [[ "$xui_was" == 1 ]] && systemctl start x-ui >/dev/null 2>&1; return 1;
   }
+  # Внешний SNI ORIGIN используется только nginx-маршрутом; TLS SNI
+  # externalProxy сохраняется из исходной конфигурации XHTTP.
   # сертификат в tlsSettings (отдельным шагом: если массива certificates нет — не валим настройку)
   if [[ -n "$cp_line" ]]; then
     cert="${cp_line%% *}"; key="${cp_line##* }"
