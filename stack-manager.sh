@@ -6569,7 +6569,7 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   # домену ts.* одновременно работать как XHTTP и как заглушка.
   local _xhttp_webport=""
   _xhttp_webport=$(xhttp_cdn_nginx_apply "$id" "$origin_dom" "$port" "$new_path" "${cert:-/etc/letsencrypt/live/$origin_dom/fullchain.pem}" "${key:-/etc/letsencrypt/live/$origin_dom/privkey.pem}" "$_cdn_tpl")"
-  if [[ -z "$_xhttp_webport" || ! "$_xhttp_webport" =~ ^[0-9]+$ ]]; then
+  if [[ -z "$_xhttp_webport" ]] || ! [[ "$_xhttp_webport" =~ ^[0-9]+$ ]]; then
     err "Не удалось создать nginx-origin для #$id"
     [[ "$xui_was" == 1 ]] && { systemctl start x-ui >/dev/null 2>&1 || true; }
     return 1
