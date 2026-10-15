@@ -6554,7 +6554,7 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   sql+="'\$.xhttpSettings.xPaddingHeader','X-Cache',"
   sql+="'\$.xhttpSettings.xPaddingKey','_dc',"
   sql+="'\$.xhttpSettings.xPaddingMethod','tokenish',"
-  sql+="'\$.xhttpSettings.xPaddingObfsMode','true')"
+  sql+="'\$.xhttpSettings.xPaddingObfsMode',json('true'))"
   sql+=" WHERE id=$id;"
   local err_out
   err_out=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "$sql" 2>&1) || {
