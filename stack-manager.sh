@@ -6413,6 +6413,12 @@ xhttp_cdn_nginx_apply() {
   local marker="# >>> xhttp-cdn port=$webport domain=$origin"
   mkdir -p "$root" 2>/dev/null || true
   [[ -f "$DECOY_TPL_DIR/$tpl.html" ]] && cp -f "$DECOY_TPL_DIR/$tpl.html" "$root/index.html" 2>/dev/null || true
+  # Даже если шаблон отсутствует, origin не должен отдавать 403 из-за пустого root.
+  if [[ ! -s "$root/index.html" ]]; then
+    cat > "$root/index.html" <<'HTML'
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Welcome</title></head><body><h1>Welcome</h1></body></html>
+HTML
+  fi
   # Удаляем старый блок этого CDN-инбаунда, если настройка выполняется повторно.
   if [[ -f "$STACK_CONF" ]]; then
     sed -i "/# >>> xhttp-cdn .*domain=$(printf '%s' "$origin" | sed 's/[.[\*^$\\/]/\\\\&/g')/,/# <<< xhttp-cdn .*domain=$(printf '%s' "$origin" | sed 's/[.[\*^$\\/]/\\\\&/g')/d" "$STACK_CONF" 2>/dev/null || true
