@@ -6553,13 +6553,11 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
     while ss -tlnH "sport = :$_cdn_decoy_port" 2>/dev/null | grep -q .; do _cdn_decoy_port=$((_cdn_decoy_port+1)); done
     mk_decoy "$_cdn_decoy_port" "$origin_dom" "${cp_line%% *}" "${cp_line##* }" "$_cdn_root" "$_cdn_tpl" >/dev/null 2>&1 || _cdn_decoy_port=""
   fi
-  # XHTTP идёт в основной inbound, обычный TLS/browser probe — в decoy
-  # того же ORIGIN через Xray fallback. CDN-домен при этом не меняется.
+  # Один inbound и один внешний 443: XHTTP и обычный браузерный decoy
+  # разделяются по HTTP path в локальном nginx-origin. Fallback Xray не
+  # используем, чтобы не перехватывать XHTTP и externalProxy.
   if [[ -n "$_cdn_decoy_port" ]]; then
-    sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-      "UPDATE inbounds SET settings=json_set(COALESCE(settings,'{}'),'\$.fallbacks',json('[{\"dest\":\"127.0.0.1:'"$_cdn_decoy_port"'\"}]')) WHERE id=$id;" 2>/dev/null \
-      && log "  + CDN ORIGIN-decoy: $origin_dom → 127.0.0.1:$_cdn_decoy_port (шаблон=$_cdn_tpl)" \
-      || warn "  CDN ORIGIN-decoy не записан — XHTTP-маршрут оставлен"
+    log "  + CDN ORIGIN-decoy: $origin_dom → path $new_path, остальные URL → decoy (шаблон=$_cdn_tpl)"
   else
     warn "  CDN ORIGIN-decoy пропущен: нет сертификата для $origin_dom"
   fi
