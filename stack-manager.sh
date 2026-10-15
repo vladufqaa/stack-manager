@@ -13076,6 +13076,15 @@ auto_full_setup() {
     if [[ -n "$new_id" ]]; then
       log "  → #$new_id $remark :$port${sn:+ (SNI $sn)}"
       [[ -n "$dom" ]] && A_DOM["$new_id"]="$dom"
+      # Для нового VLESS XHTTP + TLS спрашиваем CDN сразу после создания.
+      # После ответа CDN-функция переводит Xray в security=none и создаёт
+      # nginx TLS-origin, поэтому поздний initial_setup уже не спрашивает это
+      # повторно и не перезаписывает готовый маршрут.
+      if [[ "$proto" == "vless" && "$transport" == "xhttp" && "$security" == "tls" ]]; then
+        if xhttp_cdn_setup "$new_id" "$proto" "$port"; then
+          log "  #$new_id: CDN/XHTTP настроен при создании инбаунда"
+        fi
+      fi
       # своя заглушка на этот инбаунд (для initial_setup)
       [[ -n "$rdtpl" ]] && REALITY_DECOY_TPL_BYID["$new_id"]="$rdtpl"
     else
