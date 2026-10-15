@@ -6408,8 +6408,9 @@ reality_ext_hide() {
 
 xhttp_cdn_nginx_apply() {
   local id="$1" origin="$2" port="$3" path="$4" cert="$5" key="$6" tpl="${7:-corporate}"
-  local webport=$((48000 + id)) root="/var/www/decoy-cdn-$id" marker="# >>> xhttp-cdn port=$webport domain=$origin"
+  local webport=$((48000 + id)) root="/var/www/decoy-cdn-$id"
   while ss -tlnH "sport = :$webport" 2>/dev/null | grep -q .; do webport=$((webport+1)); done
+  local marker="# >>> xhttp-cdn port=$webport domain=$origin"
   mkdir -p "$root" 2>/dev/null || true
   [[ -f "$DECOY_TPL_DIR/$tpl.html" ]] && cp -f "$DECOY_TPL_DIR/$tpl.html" "$root/index.html" 2>/dev/null || true
   # Удаляем старый блок этого CDN-инбаунда, если настройка выполняется повторно.
@@ -6566,7 +6567,9 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   # SNI-роутер: ORIGIN-домен → nginx-origin backend (а не напрямую Xray)
   sni_upstream_add "nginx_xhttp_${id}_backend" "$_xhttp_webport"
   sni_map_add "$origin_dom" "nginx_xhttp_${id}_backend"
-  SNI_USED["$origin_dom"]="inb_${id}_backend"
+  # В map должен оставаться именно nginx-origin backend. Не записываем
+  # фиктивный inb_* backend, иначе nginx обходит path-router.
+  SNI_USED["$origin_dom"]="nginx_xhttp_${id}_backend"
   hosts_cdn_upsert "$id" "$cdn_dom"
   [[ "$xui_was" == 1 ]] && { systemctl start x-ui >/dev/null 2>&1 || true; sleep 2; }
   nginx_reload || true
