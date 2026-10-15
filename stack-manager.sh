@@ -6411,6 +6411,9 @@ xhttp_cdn_nginx_apply() {
   local webport=$((48000 + id)) root="/var/www/decoy-cdn-$id"
   while ss -tlnH "sport = :$webport" 2>/dev/null | grep -q .; do webport=$((webport+1)); done
   local marker="# >>> xhttp-cdn port=$webport domain=$origin"
+  # Эта функция оставлена для обратной совместимости со старыми профилями.
+  # Yandex CDN с TLS внутри Xray не должен создавать HTTP-origin blocks.
+  return 1
   mkdir -p "$root" 2>/dev/null || true
   [[ -f "$DECOY_TPL_DIR/$tpl.html" ]] && cp -f "$DECOY_TPL_DIR/$tpl.html" "$root/index.html" 2>/dev/null || true
   # Даже если шаблон отсутствует, origin не должен отдавать 403 из-за пустого root.
@@ -6557,6 +6560,10 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   # inbound. Nginx здесь только передаёт TLS по SNI.
   db_set_listen "$id" '127.0.0.1' direct 2>/dev/null || true
   # Для Yandex CDN TLS остаётся внутри Xray; nginx маршрутизирует только SNI.
+  # Удаляем ранее созданные HTTP-origin/decoy блоки этого ORIGIN.
+  if [[ -f "$STACK_CONF" ]]; then
+    sed -i "/# >>> xhttp-cdn .*domain=$(printf '%s' "$origin_dom" | sed 's/[.[\*^$\\/]/\\\\&/g')/,/# <<< xhttp-cdn .*domain=$(printf '%s' "$origin_dom" | sed 's/[.[\*^$\\/]/\\\\&/g')/d" "$STACK_CONF" 2>/dev/null || true
+  fi
   sni_upstream_add "inb_${id}_backend" "$port"
   sni_map_add "$origin_dom" "inb_${id}_backend"
   SNI_USED["$origin_dom"]="inb_${id}_backend"
