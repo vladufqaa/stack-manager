@@ -216,7 +216,7 @@ DECOY_TEMPLATES=(
 # mtproto из скрипта не создаём — в LucX его роль играет tproxy (TG WEB-PROXY).
 RECOMMENDED_INBOUNDS=(
   "VLESS TCP REALITY|vless|tcp|reality|xtls-rprx-vision|tcp"
-  "VLESS XHTTP TLS (CDN/decoy)|vless|xhttp|tls||tcp"
+  "VLESS XHTTP (CDN/decoy, TLS на nginx)|vless|xhttp|none||tcp"
   "VLESS XHTTP REALITY|vless|xhttp|reality||tcp"
   "NAIVE (TLS, за 443)|naive|naive|tls|-|tcp"
   "TRUSTTUNNEL (TLS, за 443)|trusttunnel|trusttunnel|tls|-|tcp"
@@ -6485,7 +6485,9 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" ]] && return 1
   local stream=""
   stream=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-  inbound_is_xhttp_tls "$stream" || return 1
+  # CDN-ветка работает для любого VLESS+XHTTP: TLS завершается nginx,
+  # поэтому в Xray security может быть none.
+  grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$stream" || return 1
   echo
   echo -e "${B}Инбаунд #$id ($proto): VLESS + XHTTP + TLS${N}"
   local use_cdn=""
@@ -13045,7 +13047,8 @@ auto_full_setup() {
     used_ports+=("$port")
     # ── Шаблон страницы для всех TLS-инбаундов с собственным SNI.
     local rdtpl=""
-    if [[ "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ]]; then
+    if [[ "$proto" == "vless" && "$transport" == "xhttp" ]] || \
+       [[ "$security" == "tls" && "$proto" == "trojan" ]]; then
       rdtpl="corporate"
       if [[ -t 0 ]]; then
         decoy_template_choose rdtpl "Decoy-заглушка для $name (страница на SNI-домене)" "corporate"
@@ -13080,7 +13083,7 @@ auto_full_setup() {
       # После ответа CDN-функция переводит Xray в security=none и создаёт
       # nginx TLS-origin, поэтому поздний initial_setup уже не спрашивает это
       # повторно и не перезаписывает готовый маршрут.
-      if [[ "$proto" == "vless" && "$transport" == "xhttp" && "$security" == "tls" ]]; then
+      if [[ "$proto" == "vless" && "$transport" == "xhttp" ]]; then
         if xhttp_cdn_setup "$new_id" "$proto" "$port"; then
           log "  #$new_id: CDN/XHTTP настроен при создании инбаунда"
         fi
