@@ -6562,7 +6562,10 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   }
   # TLS остаётся в Xray; для CDN-origin используем его сертификат и SNI.
   if [[ -n "$cp_line" ]]; then
-    local tls_sql="UPDATE inbounds SET stream_settings=json_set(stream_settings,'\$.tlsSettings.serverName','$origin_dom','\$.tlsSettings.certificates[0].certificateFile','${cert//\'/\'\'}','\$.tlsSettings.certificates[0].keyFile','${key//\'/\'\'}') WHERE id=$id;"
+    local _ecert _ekey tls_sql
+    _ecert=$(printf '%s' "$cert" | sed "s/'/''/g")
+    _ekey=$(printf '%s' "$key" | sed "s/'/''/g")
+    tls_sql="UPDATE inbounds SET stream_settings=json_set(stream_settings,'\$.tlsSettings',json_object('serverName','$origin_dom','minVersion','1.2','maxVersion','1.3','certificates',json_array(json_object('certificateFile','$_ecert','keyFile','$_ekey'))) ) WHERE id=$id;"
     sqlite3 -cmd ".timeout 3000" "$XUI_DB" "$tls_sql" 2>/dev/null || warn "Не удалось записать сертификат Xray для $origin_dom"
   fi
   db_set_listen "$id" '127.0.0.1' direct 2>/dev/null || true
