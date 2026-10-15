@@ -216,7 +216,7 @@ DECOY_TEMPLATES=(
 # mtproto из скрипта не создаём — в LucX его роль играет tproxy (TG WEB-PROXY).
 RECOMMENDED_INBOUNDS=(
   "VLESS TCP REALITY|vless|tcp|reality|xtls-rprx-vision|tcp"
-  "VLESS XHTTP (CDN/decoy, TLS на nginx)|vless|xhttp|none||tcp"
+  "VLESS XHTTP TLS (CDN)|vless|xhttp|tls||tcp"
   "VLESS XHTTP REALITY|vless|xhttp|reality||tcp"
   "NAIVE (TLS, за 443)|naive|naive|tls|-|tcp"
   "TRUSTTUNNEL (TLS, за 443)|trusttunnel|trusttunnel|tls|-|tcp"
@@ -6534,53 +6534,32 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
     sleep 1
   fi
   panel_journal_capture_row inbounds "$id"   # снимок строки для отката (п.2/п.3)
-  # Для CDN TLS завершается на nginx. Внутри Xray остаётся чистый
-  # VLESS + XHTTP: security=none, без tlsSettings.
-  local sql="UPDATE inbounds SET stream_settings=json_set(json_remove(stream_settings,'\$.tlsSettings'),'\$.security','none',"
+  # Для Yandex CDN TLS завершается внутри Xray. Nginx работает только как
+  # stream/SNI-router и не должен расшифровывать HTTP path.
+  local sql="UPDATE inbounds SET stream_settings=json_set(stream_settings,'\$.security','tls',"
   sql+="'\$.xhttpSettings.path','$new_path',"
   sql+="'\$.xhttpSettings.mode','packet-up',"
   sql+="'\$.xhttpSettings.uplinkHTTPMethod','GET',"
   sql+="'\$.xhttpSettings.uplinkChunkSize',2048,"
   sql+="'\$.xhttpSettings.uplinkDataPlacement','header',"
-  sql+="'\$.xhttpSettings.uplinkDataKey','X-Data')"
+  sql+="'\$.xhttpSettings.uplinkDataKey','X-Data',"
+  sql+="'\$.xhttpSettings.xPaddingPlacement','queryInHeader',"
+  sql+="'\$.xhttpSettings.xPaddingHeader','X-Cache',"
+  sql+="'\$.xhttpSettings.xPaddingKey','_dc',"
+  sql+="'\$.xhttpSettings.xPaddingMethod','tokenish',"
+  sql+="'\$.xhttpSettings.xPaddingObfsMode',true)"
   sql+=" WHERE id=$id;"
   local err_out
   err_out=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "$sql" 2>&1) || {
     err "SQL: $err_out"; [[ "$xui_was" == 1 ]] && systemctl start x-ui >/dev/null 2>&1; return 1;
   }
-  # TLS для CDN-профиля завершается nginx-origin, поэтому tlsSettings
-  # Xray не заполняем и не возвращаем обратно в stream_settings.
+  # TLS остаётся в Xray; сертификат и serverName сохраняются из исходного
+  # inbound. Nginx здесь только передаёт TLS по SNI.
   db_set_listen "$id" '127.0.0.1' direct 2>/dev/null || true
-  # Для CDN ORIGIN используется отдельный decoy именно его домена
-  # (например ts.mediadok.xyz), а не общий /var/www/html и не CDN-домен.
-  local _cdn_tpl="corporate" _cdn_decoy_port="" _cdn_root="/var/www/decoy-cdn-$id"
-  if [[ -t 0 ]]; then
-    decoy_template_choose _cdn_tpl "Decoy для ORIGIN $origin_dom (отдельный домен)" "corporate"
-  fi
-  if [[ -n "$cp_line" ]]; then
-    _cdn_decoy_port=$((47000 + id))
-    while ss -tlnH "sport = :$_cdn_decoy_port" 2>/dev/null | grep -q .; do _cdn_decoy_port=$((_cdn_decoy_port+1)); done
-    mk_decoy "$_cdn_decoy_port" "$origin_dom" "${cp_line%% *}" "${cp_line##* }" "$_cdn_root" "$_cdn_tpl" >/dev/null 2>&1 || _cdn_decoy_port=""
-  fi
-  # Один inbound и один внешний 443: XHTTP и обычный браузерный decoy
-  # разделяются по HTTP path в локальном nginx-origin. Fallback Xray не
-  # используем, чтобы не перехватывать XHTTP и externalProxy.
-  if [[ -n "$_cdn_decoy_port" ]]; then
-    log "  + CDN ORIGIN-decoy: $origin_dom → path $new_path, остальные URL → decoy (шаблон=$_cdn_tpl)"
-  else
-    warn "  CDN ORIGIN-decoy пропущен: нет сертификата для $origin_dom"
-  fi
-  # Отдельный HTTPS-origin nginx: path XHTTP проксируется в inbound,
-  # остальные URL получают выбранный decoy. Именно это позволяет одному
-  # домену ts.* одновременно работать как XHTTP и как заглушка.
-  local _xhttp_webport=""
-  _xhttp_webport=$(xhttp_cdn_nginx_apply "$id" "$origin_dom" "$port" "$new_path" "${cert:-/etc/letsencrypt/live/$origin_dom/fullchain.pem}" "${key:-/etc/letsencrypt/live/$origin_dom/privkey.pem}" "$_cdn_tpl")"
-  # SNI-роутер: ORIGIN-домен → nginx-origin backend (а не напрямую Xray)
-  sni_upstream_add "nginx_xhttp_${id}_backend" "$_xhttp_webport"
-  sni_map_add "$origin_dom" "nginx_xhttp_${id}_backend"
-  # В map должен оставаться именно nginx-origin backend. Не записываем
-  # фиктивный inb_* backend, иначе nginx обходит path-router.
-  SNI_USED["$origin_dom"]="nginx_xhttp_${id}_backend"
+  # Для Yandex CDN TLS остаётся внутри Xray; nginx маршрутизирует только SNI.
+  sni_upstream_add "inb_${id}_backend" "$port""
+  sni_map_add "$origin_dom" "inb_${id}_backend"
+  SNI_USED["$origin_dom"]="inb_${id}_backend"
   hosts_cdn_upsert "$id" "$cdn_dom"
   [[ "$xui_was" == 1 ]] && { systemctl start x-ui >/dev/null 2>&1 || true; sleep 2; }
   nginx_reload || true
