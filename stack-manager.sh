@@ -6533,6 +6533,13 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   else
     warn "  серт для $origin_dom не найден — после настройки проверь выпуск сертификата"
   fi
+  # cert_paths может вернуть панельный сертификат, если отдельный origin
+  # lineage отсутствует. Для TLS внутри Xray нужен сертификат самого origin;
+  # иначе клиент получает TLS-ошибку по SNI.
+  if [[ -z "$cert" || ! -f "$cert" || ! -f "$key" ]]; then
+    err "Для ORIGIN $origin_dom не найден сертификат и ключ"
+    return 1
+  fi
   # правки БД — только при остановленной панели (иначе перетрёт из памяти)
   local xui_was=""
   if systemctl is-active --quiet x-ui 2>/dev/null; then
@@ -6564,7 +6571,7 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
     local _ecert _ekey tls_sql
     _ecert=$(printf '%s' "$cert" | sed "s/'/''/g")
     _ekey=$(printf '%s' "$key" | sed "s/'/''/g")
-    tls_sql="UPDATE inbounds SET stream_settings=json_set(stream_settings,'\$.tlsSettings',json_object('serverName','$origin_dom','minVersion','1.2','maxVersion','1.3','certificates',json_array(json_object('certificateFile','$_ecert','keyFile','$_ekey'))) ) WHERE id=$id;"
+    tls_sql="UPDATE inbounds SET stream_settings=json_set(stream_settings,'\$.tlsSettings.serverName','$origin_dom','\$.tlsSettings.minVersion','1.2','\$.tlsSettings.maxVersion','1.3','\$.tlsSettings.certificates',json_array(json_object('certificateFile','$_ecert','keyFile','$_ekey'))) WHERE id=$id;"
     sqlite3 -cmd ".timeout 3000" "$XUI_DB" "$tls_sql" 2>/dev/null || warn "Не удалось записать сертификат Xray для $origin_dom"
   fi
   db_set_listen "$id" '127.0.0.1' direct 2>/dev/null || true
