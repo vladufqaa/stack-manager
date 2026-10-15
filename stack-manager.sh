@@ -13238,7 +13238,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     warn "x-ui.db не найден — панель (LucX UI / 3x-ui) не установлена."
     echo "  Установка доступна через меню (п.13 — панель LucX UI)."
     echo "  Если уже стоит оригинальный 3x-ui — убедись, что x-ui.db в /etc/x-ui/."
-    local install_now=""
+    install_now=""
     askyn install_now "Установить панель LucX UI сейчас?" "n"
     if [[ "$install_now" == true ]]; then
       install_lucx_panel || warn "Установка не удалась — можно повторить через п.13."
