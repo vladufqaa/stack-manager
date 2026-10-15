@@ -6498,6 +6498,7 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   # CDN-ветка работает для любого VLESS+XHTTP: TLS завершается nginx,
   # поэтому в Xray security может быть none.
   grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$stream" || return 1
+  grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$stream" || return 1
   echo
   echo -e "${B}Инбаунд #$id ($proto): VLESS + XHTTP + TLS${N}"
   local use_cdn=""
