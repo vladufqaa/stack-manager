@@ -6556,9 +6556,14 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   err_out=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "$sql" 2>&1) || {
     err "SQL: $err_out"; [[ "$xui_was" == 1 ]] && systemctl start x-ui >/dev/null 2>&1; return 1;
   }
-  # TLS остаётся в Xray; сертификат и serverName сохраняются из исходного
-  # inbound. Nginx здесь только передаёт TLS по SNI.
+  # TLS остаётся в Xray; для CDN-origin используем его сертификат и SNI.
+  if [[ -n "$cp_line" ]]; then
+    local tls_sql="UPDATE inbounds SET stream_settings=json_set(stream_settings,'\$.tlsSettings.serverName','$origin_dom','\$.tlsSettings.certificates[0].certificateFile','${cert//\'/\'\'}','\$.tlsSettings.certificates[0].keyFile','${key//\'/\'\'}') WHERE id=$id;"
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "$tls_sql" 2>/dev/null || warn "Не удалось записать сертификат Xray для $origin_dom"
+  fi
   db_set_listen "$id" '127.0.0.1' direct 2>/dev/null || true
+  # Удаляем старый backend HTTPS-origin от прежней схемы TLS на nginx.
+  sni_upstream_remove "nginx_xhttp_${id}_backend"
   # Для Yandex CDN TLS остаётся внутри Xray; nginx маршрутизирует только SNI.
   # Удаляем ранее созданные HTTP-origin/decoy блоки этого ORIGIN.
   if [[ -f "$STACK_CONF" ]]; then
