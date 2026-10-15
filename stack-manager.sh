@@ -6433,12 +6433,12 @@ EOF
   printf '%s' "$webport"
 }
 
-inbound_is_xhttp_tls() {   # <stream_json> → 0, если network=xhttp и security=tls
+inbound_is_xhttp_tls() {   # <stream_json> → 0, если это VLESS XHTTP
+  # Имя оставлено для совместимости: после перехода на TLS-nginx Xray
+  # должен иметь security=none, поэтому security здесь не проверяется.
   local s="$1"
-  [[ -z "$s" ]] && return 1
-  grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$s" || return 1
-  grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$s" || return 1
-  return 0
+  [[ -n "$s" ]] || return 1
+  grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$s"
 }
 
 # hosts-запись CDN-профиля: адрес/SNI/Host header = домен CDN
