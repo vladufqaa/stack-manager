@@ -6406,6 +6406,33 @@ reality_ext_hide() {
   return 0
 }
 
+xhttp_cdn_nginx_apply() {
+  local id="$1" origin="$2" port="$3" path="$4" cert="$5" key="$6" tpl="${7:-corporate}"
+  local webport=$((48000 + id)) root="/var/www/decoy-cdn-$id" marker="# >>> xhttp-cdn port=$webport domain=$origin"
+  while ss -tlnH "sport = :$webport" 2>/dev/null | grep -q .; do webport=$((webport+1)); done
+  mkdir -p "$root" 2>/dev/null || true
+  [[ -f "$DECOY_TPL_DIR/$tpl.html" ]] && cp -f "$DECOY_TPL_DIR/$tpl.html" "$root/index.html" 2>/dev/null || true
+  # Удаляем старый блок этого CDN-инбаунда, если настройка выполняется повторно.
+  if [[ -f "$STACK_CONF" ]]; then
+    sed -i "/# >>> xhttp-cdn .*domain=$(printf '%s' "$origin" | sed 's/[.[\*^$\\/]/\\\\&/g')/,/# <<< xhttp-cdn .*domain=$(printf '%s' "$origin" | sed 's/[.[\*^$\\/]/\\\\&/g')/d" "$STACK_CONF" 2>/dev/null || true
+  fi
+  cat >> "$STACK_CONF" <<EOF
+$marker root=$root path=$path
+server {
+    listen 127.0.0.1:$webport ssl http2;
+    server_name $origin;
+    ssl_certificate $cert;
+    ssl_certificate_key $key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location = $path { proxy_pass http://127.0.0.1:$port; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-Proto https; proxy_buffering off; proxy_request_buffering off; proxy_read_timeout 3600s; client_max_body_size 0; }
+    location $path/ { proxy_pass http://127.0.0.1:$port; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_buffering off; proxy_request_buffering off; proxy_read_timeout 3600s; client_max_body_size 0; }
+    location / { root $root; try_files \$uri \$uri/ /index.html; }
+}
+# <<< xhttp-cdn port=$webport domain=$origin
+EOF
+  printf '%s' "$webport"
+}
+
 inbound_is_xhttp_tls() {   # <stream_json> → 0, если network=xhttp и security=tls
   local s="$1"
   [[ -z "$s" ]] && return 1
@@ -6532,9 +6559,14 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   else
     warn "  CDN ORIGIN-decoy пропущен: нет сертификата для $origin_dom"
   fi
-  # SNI-роутер: ORIGIN-домен → инбаунд (клиент-CDN и прямой клиент приходят с SNI ORIGIN)
-  sni_upstream_add "inb_${id}_backend" "$port"
-  sni_map_add "$origin_dom" "inb_${id}_backend"
+  # Отдельный HTTPS-origin nginx: path XHTTP проксируется в inbound,
+  # остальные URL получают выбранный decoy. Именно это позволяет одному
+  # домену ts.* одновременно работать как XHTTP и как заглушка.
+  local _xhttp_webport=""
+  _xhttp_webport=$(xhttp_cdn_nginx_apply "$id" "$origin_dom" "$port" "$new_path" "${cert:-/etc/letsencrypt/live/$origin_dom/fullchain.pem}" "${key:-/etc/letsencrypt/live/$origin_dom/privkey.pem}" "$_cdn_tpl")"
+  # SNI-роутер: ORIGIN-домен → nginx-origin backend (а не напрямую Xray)
+  sni_upstream_add "nginx_xhttp_${id}_backend" "$_xhttp_webport"
+  sni_map_add "$origin_dom" "nginx_xhttp_${id}_backend"
   SNI_USED["$origin_dom"]="inb_${id}_backend"
   hosts_cdn_upsert "$id" "$cdn_dom"
   [[ "$xui_was" == 1 ]] && { systemctl start x-ui >/dev/null 2>&1 || true; sleep 2; }
