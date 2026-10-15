@@ -6520,9 +6520,9 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
     sleep 1
   fi
   panel_journal_capture_row inbounds "$id"   # снимок строки для отката (п.2/п.3)
-  local sql="UPDATE inbounds SET stream_settings=json_set(stream_settings,"
-  # У XHTTP могут быть два разных имени: внешний ORIGIN SNI nginx
-  # и TLS SNI из externalProxy. Не затираем второй origin-домен.
+  # Для CDN TLS завершается на nginx. Внутри Xray остаётся чистый
+  # VLESS + XHTTP: security=none, без tlsSettings.
+  local sql="UPDATE inbounds SET stream_settings=json_set(json_remove(stream_settings,'\$.tlsSettings'),'\$.security','none',"
   sql+="'\$.xhttpSettings.path','$new_path',"
   sql+="'\$.xhttpSettings.mode','packet-up',"
   sql+="'\$.xhttpSettings.uplinkHTTPMethod','GET',"
@@ -6534,15 +6534,8 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   err_out=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "$sql" 2>&1) || {
     err "SQL: $err_out"; [[ "$xui_was" == 1 ]] && systemctl start x-ui >/dev/null 2>&1; return 1;
   }
-  # Внешний SNI ORIGIN используется только nginx-маршрутом; TLS SNI
-  # externalProxy сохраняется из исходной конфигурации XHTTP.
-  # сертификат в tlsSettings (отдельным шагом: если массива certificates нет — не валим настройку)
-  if [[ -n "$cp_line" ]]; then
-    cert="${cp_line%% *}"; key="${cp_line##* }"
-    sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-      "UPDATE inbounds SET stream_settings=json_set(stream_settings,'\$.tlsSettings.certificates[0].certificateFile','$cert','\$.tlsSettings.certificates[0].keyFile','$key') WHERE id=$id;" 2>/dev/null \
-      || warn "  сертификат в tlsSettings не прописан (нет массива certificates) — пропущено"
-  fi
+  # TLS для CDN-профиля завершается nginx-origin, поэтому tlsSettings
+  # Xray не заполняем и не возвращаем обратно в stream_settings.
   db_set_listen "$id" '127.0.0.1' direct 2>/dev/null || true
   # Для CDN ORIGIN используется отдельный decoy именно его домена
   # (например ts.mediadok.xyz), а не общий /var/www/html и не CDN-домен.
