@@ -6497,9 +6497,13 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   local cdn_dom="" origin_dom=""
   ask cdn_dom    "Домен, привязанный к CDN (например cdn.example.com)" "cdn.example.com" '^[a-zA-Z0-9.-]+$'
   ask origin_dom "ORIGIN-домен (A-запись → этот сервер)"              "ts.example.com"  '^[a-zA-Z0-9.-]+$'
-  # база ORIGIN-домена = первая метка (ts.mediadok.xyz → ts)
+  # Путь XHTTP задаётся пользователем и должен совпадать с путём
+  # в клиентской конфигурации. По умолчанию предлагаем прежний вариант.
   local base="${origin_dom%%.*}"
   local new_path="/api/stream/${base}.ts"
+  if [[ -t 0 ]]; then
+    ask new_path "Путь XHTTP (вставь такой же путь в клиент)" "$new_path" '^/[A-Za-z0-9._~/-]+$'
+  fi
   # серт для ORIGIN: TLS терминирует сам Xray
   local cp_line="" cert="" key=""
   cp_line=$(cert_paths "$origin_dom") || true
