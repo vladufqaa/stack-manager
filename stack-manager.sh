@@ -6523,7 +6523,11 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
     cert_issue "$origin_dom" >/dev/null 2>&1 || true
     cp_line=$(cert_paths "$origin_dom") || true
   fi
-  if [[ -n "$cp_line" ]]; then
+  if [[ -f "/etc/letsencrypt/live/$origin_dom/fullchain.pem" && -f "/etc/letsencrypt/live/$origin_dom/privkey.pem" ]]; then
+    cert="/etc/letsencrypt/live/$origin_dom/fullchain.pem"
+    key="/etc/letsencrypt/live/$origin_dom/privkey.pem"
+    cp_line="$cert $key"
+  elif [[ -n "$cp_line" ]]; then
     cert="${cp_line%% *}"
     key="${cp_line##* }"
   else
