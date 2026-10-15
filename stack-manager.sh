@@ -6557,7 +6557,7 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   # inbound. Nginx здесь только передаёт TLS по SNI.
   db_set_listen "$id" '127.0.0.1' direct 2>/dev/null || true
   # Для Yandex CDN TLS остаётся внутри Xray; nginx маршрутизирует только SNI.
-  sni_upstream_add "inb_${id}_backend" "$port""
+  sni_upstream_add "inb_${id}_backend" "$port"
   sni_map_add "$origin_dom" "inb_${id}_backend"
   SNI_USED["$origin_dom"]="inb_${id}_backend"
   hosts_cdn_upsert "$id" "$cdn_dom"
