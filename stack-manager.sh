@@ -11761,9 +11761,11 @@ update_self() {
   sha256sum "$bakdir/stack-manager.sh" > "$bakdir/stack-manager.sh.sha256"; sync
   mv -f "$tmp" "$cur" || { err "Не удалось атомарно заменить скрипт"; return 1; }
   chmod "$mode" "$cur" 2>/dev/null || chmod 700 "$cur"; sync
-  if ! bash -n "$cur" || [[ "$(sha256sum "$cur" | awk '{print $1}')" != "$new_sha" ]] || ! bash "$cur" --check >/tmp/stack-manager-update-check.log 2>&1; then
-    err "Проверка после замены не пройдена — выполняю откат"
-    tail -20 /tmp/stack-manager-update-check.log 2>/dev/null || true
+  # После замены проверяем только сам файл. --check запускает полноценный аудит
+  # сервера и закономерно возвращает ненулевой код при удалённой панели/nginx,
+  # поэтому его результат нельзя использовать как критерий валидности обновления.
+  if ! bash -n "$cur" || [[ "$(sha256sum "$cur" | awk '{print $1}')" != "$new_sha" ]]; then
+    err "Проверка нового файла не пройдена — выполняю откат"
     cp -p "$bakdir/stack-manager.sh" "$cur"; chmod "$mode" "$cur" 2>/dev/null || true; sync; return 1
   fi
   printf '%s' "$src_url" > /root/.stack-src && chmod 600 /root/.stack-src
