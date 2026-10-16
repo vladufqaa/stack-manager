@@ -7606,6 +7606,32 @@ cdn_disable_for_inbound() {   # <id>
   return 0
 }
 
+# Сменить decoy CDN ORIGIN без изменения CDN-доменов и пути.
+cdn_change_decoy() {   # <id>
+  local id="$1" row proto origin cdn path oldtpl dport port tpl cp cert key ndport
+  row=$(cdn_profile_get "$id" 2>/dev/null) || return 1
+  [[ -n "$row" ]] || { err "У #$id нет CDN-профиля"; return 1; }
+  proto=$(printf '%s' "$row" | cut -d'|' -f2); origin=$(printf '%s' "$row" | cut -d'|' -f3)
+  cdn=$(printf '%s' "$row" | cut -d'|' -f4); path=$(printf '%s' "$row" | cut -d'|' -f5)
+  oldtpl=$(printf '%s' "$row" | cut -d'|' -f6); dport=$(printf '%s' "$row" | cut -d'|' -f7)
+  port=$(sqlite3 -noheader "$XUI_DB" "SELECT port FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  decoy_template_choose_impl tpl "Decoy для ORIGIN $origin" "$oldtpl" || return 1
+  tpl="${tpl:-$oldtpl}"
+  cp=$(cert_paths "$origin" 2>/dev/null || true)
+  [[ -z "$cp" && "$origin" == "$(xui_get webDomain 2>/dev/null || true)" ]] && cp="$(xui_get webCertFile) $(xui_get webKeyFile)"
+  cert="${cp%% *}"; key="${cp##* }"
+  [[ -f "$cert" && -f "$key" ]] || { err "Серт ORIGIN $origin не найден"; return 1; }
+  [[ "$dport" =~ ^[0-9]+$ ]] || dport=$((47000 + id))
+  ndport="$dport"
+  while ss -tlnH "sport = :$ndport" 2>/dev/null | grep -q .; do ndport=$((ndport+1)); done
+  [[ "$ndport" != "$dport" ]] && dport="$ndport"
+  mk_decoy "$dport" "$origin" "$cert" "$key" "/var/www/decoy-cdn-$id" "$tpl" || return 1
+  stack_cdn_upsert "$origin" "$cdn" "$path" "$port" "$dport" "$cert" "$key"
+  cdn_profile_save_add "$id" "$proto" "$origin" "$cdn" "$path" "$tpl" "$dport"
+  nginx_reload || true
+  log "CDN ORIGIN $origin: decoy обновлён ($tpl)"
+}
+
 # Мини-меню для инбаунда, у которого CDN-профиль уже есть.
 cdn_existing_menu() {   # <id>
   local id="$1"
@@ -10096,6 +10122,19 @@ change_decoy() {
     _decoy_row="${#_decoy_rows[@]}"
     printf "   %s) Hysteria #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_hid" "$_d_dom" "$_hport"
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE port>0 AND lower(protocol) LIKE '%hysteria%' ORDER BY id;" 2>/dev/null || true)
+  # CDN-инбаунд не попадает в SNI-map: его decoy обслуживается ORIGIN-доменом
+  # через nginx CDN-фронтенд. Показываем ORIGIN в этом меню отдельно, чтобы
+  # пользователь мог сменить его шаблон так же, как у Reality/Hysteria.
+  local -a _cdn_decoy_ids=()
+  local _cid _cproto _corigin _ccdn _cpath _ctpl _cdport
+  cdn_profiles_load
+  while IFS='|' read -r _cid _cproto _corigin _ccdn _cpath _ctpl _cdport; do
+    [[ -n "$_cid" && -n "$_corigin" ]] || continue
+    _decoy_rows+=("$_corigin|$_cid|${_cdport:-0}")
+    _cdn_decoy_ids+=("$_cid")
+    _decoy_row="${#_decoy_rows[@]}"
+    printf "   %s) CDN ORIGIN #%-3s — %-30s :%s (decoy=%s)\n" "$((_decoy_row+1))" "$_cid" "$_corigin" "${_cdport:-0}" "${_ctpl:-default}"
+  done < <(cat "$CDN_PROFILES" 2>/dev/null)
   echo "   t) Шаблоны decoy ПО ДОМЕНАМ (каждому домену свой шаблон/свой сайт)"
   echo "   0) Назад"
   local m=""
@@ -10106,6 +10145,10 @@ change_decoy() {
     local _ri=$((m-2))
     (( _ri >= 0 && _ri < ${#_decoy_rows[@]} )) || { err "Нет такого объекта"; pause; return 1; }
     IFS='|' read -r _pick_dom _pick_id _pick_port <<<"${_decoy_rows[$_ri]}"
+    if [[ -n "$(cdn_profile_get "$_pick_id" 2>/dev/null)" ]]; then
+      cdn_change_decoy "$_pick_id"
+      return $?
+    fi
     decoy_pick_inbound "$_pick_id" "$_pick_dom"
     return $?
   fi
