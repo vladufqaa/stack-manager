@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -7432,9 +7432,7 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   echo
   echo -e "${B}Инбаунд #$id ($proto): transport=xhttp${N}"
   local use_cdn=""
-  if [[ " ${CDN_FORCE_IDS:-} " == *" $id "* ]] || [[ -n "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
-    use_cdn=true
-  elif [[ -n "${CDN_PRE_ANSWER:-}" ]]; then
+  if [[ -n "${CDN_PRE_ANSWER:-}" ]]; then
     use_cdn="$CDN_PRE_ANSWER"
   elif [[ "$_was_tls" == true && -t 0 ]]; then
     warn "  Сейчас в инбаунде security=tls (TLS терминирует Xray)."
@@ -14586,7 +14584,13 @@ auto_full_setup() {
     # цель «чужого реалити» уже в REALITY_EXT_TARGET (шаг выше)
     new_id=$(create_inbound_db "$proto" "$transport" "$security" "$flow" "$port" "$remark" "$net" "$sn" "$vkn") || true
     if [[ -n "$new_id" ]]; then
-      [[ "${_is_cdn:-false}" == true ]] && CDN_FORCE_IDS="${CDN_FORCE_IDS:-} $new_id"
+      if [[ "${_is_cdn:-false}" == true ]]; then
+        CDN_FORCE_IDS="${CDN_FORCE_IDS:-} $new_id"
+        # Профиль CDN нужно применить сразу к созданной строке БД:
+        # initial_setup запускается позже и не должен быть единственным местом,
+        # где пытаемся заполнить stream_settings/hosts.
+        xhttp_cdn_setup "$new_id" "$proto" "$port" || warn "  CDN-профиль для #$new_id не применён — повтори настройку инбаунда"
+      fi
       log "  → #$new_id $remark :$port${sn:+ (SNI $sn)}"
       [[ -n "$dom" ]] && A_DOM["$new_id"]="$dom"
       # своя заглушка на этот инбаунд (для initial_setup)
@@ -14785,6 +14789,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   main_menu
 fi
+
 
 
 
