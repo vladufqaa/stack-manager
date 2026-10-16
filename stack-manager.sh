@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -11842,8 +11842,12 @@ update_self() {
   # скачать старую версию и получить ложное «обновление не требуется».
   # ?ts=… меняет ключ кэша → всегда свежий файл. В /root/.stack-src пишем
   # чистый URL (без бастера).
-  local bust_url="${src_url}?ts=$(date +%s%N)"
-  if ! curl -fsSL --retry 3 --retry-delay 1 --max-time 45 "$bust_url" -o "$tmp" || [[ ! -s "$tmp" ]]; then
+  # Обходим кэш raw.githubusercontent независимо от того, есть ли в URL
+  # уже query-параметры. Заголовки no-cache дополняют уникальный nonce.
+  local sep='?'; [[ "$src_url" == *\?* ]] && sep='&'
+  local bust_url="${src_url}${sep}stack_nonce=$(date +%s%N)-$$"
+  if ! curl -fsSL --no-cache -H 'Cache-Control: no-cache, no-store' -H 'Pragma: no-cache' \
+      --retry 3 --retry-delay 1 --max-time 45 "$bust_url" -o "$tmp" || [[ ! -s "$tmp" ]]; then
     err "Не удалось скачать (проверь URL/доступность репозитория)"
     rm -f "$tmp"; return 1
   fi
@@ -11864,6 +11868,17 @@ update_self() {
   bash -n "$tmp" || { err "Новый файл не проходит bash -n — обновление отменено"; rm -f "$tmp"; return 1; }
   old_sha=$(sha256sum "$cur" | awk '{print $1}')
   new_sha=$(sha256sum "$tmp" | awk '{print $1}')
+  # Если сеть/прокси вернули старую копию GitHub, не объявляем её актуальной:
+  # сравниваем содержимое также с коротким commit API (если доступен).
+  local remote_sha=""
+  if [[ "$src_url" == https://raw.githubusercontent.com/*/*/main/* ]]; then
+    local api_repo api_file
+    api_repo=$(printf '%s' "$src_url" | sed -E 's#https://raw.githubusercontent.com/([^/]+/[^/]+)/main/.*#\1#')
+    api_file=$(printf '%s' "$src_url" | sed -E 's#https://raw.githubusercontent.com/[^/]+/[^/]+/main/##')
+    remote_sha=$(curl -fsSL --no-cache -H 'Cache-Control: no-cache' \
+      "https://api.github.com/repos/$api_repo/commits?path=$api_file&per_page=1" 2>/dev/null \
+      | grep -m1 '"sha"' | sed -E 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]+)".*/\1/' || true)
+  fi
   if [[ "$old_sha" == "$new_sha" ]]; then
     log "Обновление не требуется — sha256: $new_sha"; rm -f "$tmp"; return 0
   fi
