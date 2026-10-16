@@ -2639,34 +2639,39 @@ create_inbounds_menu() {
   echo
   echo -e "${B}Выберите инбаунды для создания:${N}"
   echo
-  # Гейт по типу панели: в оригинальном 3x-ui работают только обычные VLESS-инбаунды.
+  # Гейт по типу панели: в оригинальном 3x-ui доступны VLESS и Hysteria2.
   # QWDTT/CSQTT/tproxy/naive/anytls/trusttunnel/hysteria — рецепты LucX UI:
   # панель LucX сама поднимает sidecar'ы и понимает свои форматы settings.
   local flavor="${PANEL_FLAVOR:-}"
   [[ -z "$flavor" ]] && flavor=$(detect_panel_flavor)
+  case "$flavor" in
+    lucx) echo "  Обнаружена панель: LucX UI — доступны LucX sidecar-протоколы." ;;
+    3x-ui) echo "  Обнаружена панель: оригинальный 3x-ui — доступны только VLESS и Hysteria2." ;;
+    *) echo "  Панель не распознана — доступны только базовые протоколы VLESS и Hysteria2." ;;
+  esac
   if [[ "$flavor" != "lucx" ]]; then
     warn "Панель: ${flavor:-неизвестно} — показываю только то, что она умеет запускать."
-    [[ "$flavor" == "3x-ui" ]] && warn "QWDTT/CSQTT/tproxy/naive/anytls/trusttunnel/hysteria — это LucX: п.13 → «Обновить 3x-ui → LucX UI»."
+    [[ "$flavor" == "3x-ui" ]] && warn "QWDTT/CSQTT/tproxy/naive/anytls/trusttunnel — доступны только в LucX UI: п.7 → «Мигрировать 3x-ui → LucX UI»."
   fi
   local i=1 entry name proto
   local -a NAMES=()
   for entry in "${RECOMMENDED_INBOUNDS[@]}"; do
     IFS='|' read -r _ proto _ <<<"$entry"
-    [[ "$flavor" != "lucx" && "$proto" != "vless" ]] && continue
+    [[ "$flavor" != "lucx" && "$proto" != "vless" && "$proto" != "hysteria" ]] && continue
     name="${entry%%|*}"
     printf "  %2d) %s\n" "$i" "$name"
     NAMES+=("$entry")
     i=$((i+1))
   done
   if [[ ${#NAMES[@]} -eq 0 ]]; then
-    err "Для панели ${flavor:-неизвестно} создавать из скрипта нечего — нужны протоколы LucX UI (п.13 → обновление)."
+    err "Для панели ${flavor:-неизвестно} доступных протоколов нет — открой п.7 и проверь установленную панель."
     return 1
   fi
   echo
   echo "  0) Отмена"
   echo
   echo "Пример: 1 2    (VLESS TCP Reality, VLESS XHTTP Reality)"
-  [[ "$flavor" == "lucx" ]] && echo "naive/anytls/trusttunnel/mtproto — создавайте в UI панели (sidecar-протоколы LucX)."
+  [[ "$flavor" == "lucx" ]] && echo "LucX sidecar-протоколы (naive/anytls/trusttunnel/tproxy) доступны в этом меню и в UI панели."
   echo
 
   local choices=""
@@ -5156,6 +5161,13 @@ cert_issue() {
   # на них не выдаст (HTTP-01/DNS-01 недоступны), а спрашивать пользователя
   # «какой сертификат для www.samsung.com» — баг, какими бы путями домен
   # сюда ни приехал (утёкший serverNames из старой БД и т.п.).
+  # Домен, привязанный к внешнему CDN, тоже не наш: TLS для CDN-фронта
+  # завершается на стороне CDN, поэтому сертификат Let's Encrypt на него
+  # выпускать нельзя. Сертификат нужен только для ORIGIN-домена.
+  if cdn_front_domain_is "$d"; then
+    warn "cert_issue: «$d» — CDN-домен, TLS завершает CDN; сертификат не выпускается"
+    return 1
+  fi
   local _rt_x
   for _rt_x in "${REALITY_TARGETS[@]}"; do
     if [[ "$d" == "$_rt_x" ]]; then
@@ -7829,7 +7841,7 @@ initial_setup() {
       ask pd_ask "Домен панели (A-запись → этот сервер)" "${PANEL_DOMAIN:-panel.example.com}" '^[a-zA-Z0-9.-]+$'
       PANEL_DOMAIN="$pd_ask"
     fi
-    local install_now=false
+    install_now=false
     [[ "$PLAN_INSTALL" == true ]] && install_now=true
     if [[ "$install_now" != true ]]; then
       err "Без панели работа невозможна."
@@ -12547,17 +12559,17 @@ panel_upgrade_lucx() {
   return 0
 }
 
-# Единый пункт п.13: смотрим какая панель стоит и предлагаем действия.
+# Единый пункт п.7: смотрим какая панель стоит и предлагаем действия.
 panel_manage() {
   line; echo -e "${B}   ПАНЕЛЬ — УСТАНОВКА / ОБНОВЛЕНИЕ / УДАЛЕНИЕ${N}"; line
   local flavor
   flavor=$(detect_panel_flavor)
   case "$flavor" in
     lucx)
-      log "Установлена: LucX UI (x-ui.db: ${XUI_DB:-?})"
+      log "Установлена: LucX UI (найдены schema-маркеры; x-ui.db: ${XUI_DB:-?})"
       ;;
     3x-ui)
-      log "Установлена: оригинальный 3x-ui (x-ui.db: ${XUI_DB:-?})"
+      log "Установлена: оригинальный 3x-ui (LucX schema-маркеры не найдены; x-ui.db: ${XUI_DB:-?})"
       warn "Протоколы LucX (qwdtt/csqtt/tproxy/naive/anytls/trusttunnel/hysteria) в ней работать не будут."
       ;;
     *)
@@ -12568,9 +12580,9 @@ panel_manage() {
   esac
   echo
   if [[ "$flavor" == "3x-ui" ]]; then
-    echo "  1) Обновить 3x-ui → LucX UI (бэкап БД + установщик, инбаунды сохранятся)"
+    echo "  1) Мигрировать оригинальный 3x-ui → LucX UI (бэкап БД; инбаунды сохранятся)"
   else
-    echo "  1) Переустановить/обновить LucX UI (бэкап БД + установщик)"
+    echo "  1) Переустановить/обновить LucX UI (бэкап БД; инбаунды сохранятся)"
   fi
   echo "  2) Удалить панель со всеми данными"
   echo "  0) Назад"
@@ -14143,16 +14155,25 @@ auto_full_setup() {
     le_email_save "$EMAIL" || return 1
   fi
 
-  # --- 4) ИНБАУНДЫ: какие ставить? (Enter — весь набор)
-  echo -e "${B}Выберите инбаунды для установки:${N}"
-  local i=1 entry
+  # --- 4) ИНБАУНДЫ: какие ставить? (Enter — весь доступный набор)
+  echo -e "${B}Выберите доступные для этой панели инбаунды:${N}"
+  local i=1 entry entry_proto
   local -a CAND=()
+  local _auto_flavor="${PANEL_FLAVOR:-$(detect_panel_flavor)}"
   for entry in "${RECOMMENDED_INBOUNDS[@]}"; do
+    IFS='|' read -r _ entry_proto _ <<<"$entry"
+    if [[ "$_auto_flavor" != "lucx" && "$entry_proto" != "vless" && "$entry_proto" != "hysteria" ]]; then
+      continue
+    fi
     printf "  %2d) %s\n" "$i" "${entry%%|*}"
     CAND+=("$entry"); i=$((i+1))
   done
   echo
-  echo "  Enter — установить ВСЕ"
+  if [[ "$_auto_flavor" == "lucx" ]]; then
+    echo "  Enter — установить ВСЕ доступные LucX-инбаунды"
+  else
+    echo "  Enter — установить VLESS и Hysteria2"
+  fi
   local choices=""
   ask choices "Номера (через пробел)" "" '^[0-9 ]*$'
   local -a SEL=()
@@ -14438,9 +14459,7 @@ auto_full_setup() {
   echo "    панель  → /root/panel-credentials.txt"
   [[ "$ADG_PRESENT" == true ]] && echo "    adguard → /root/adguard-credentials.txt"
   line
-  if [[ -t 0 ]]; then
-    read -rp "$(echo -e "${B}Нажмите Enter чтобы продолжить…${N}")" _ || true
-  fi
+  pause
   return 0
 }
 
@@ -14500,10 +14519,10 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   # CDN-профили: если маршрутизация была задета (heal старой версии, ручные правки
   # nginx) — тихо восстановить map/блоки до открытия меню
   cdn_repair 1
-  # heal-юнит мог быть поставлен старой версией (source /root/stack-manager.sh —
-  # без CDN-логики, сносит cdn-блоки каждые 2 мин) — переустановить на себя
-  local _self_path="${BASH_SOURCE[0]}"
-  [[ -z "$_self_path" || ! -f "$_self_path" ]] && _self_path="/root/LLM_GLM_stack-manager.sh"
+  # heal-юнит мог быть поставлен старой версией — переустановить на текущий скрипт.
+  # Точка входа находится вне функции, поэтому здесь нельзя использовать local.
+  _self_path="${BASH_SOURCE[0]}"
+  [[ -z "$_self_path" || ! -f "$_self_path" ]] && _self_path="/root/stack-manager.sh"
   if systemctl is-enabled stack-heal.timer >/dev/null 2>&1; then
     grep -q "$_self_path" /etc/systemd/system/stack-heal.service 2>/dev/null || {
       HEAL_TIMER_DONE=0; install_heal_timer
@@ -14518,15 +14537,15 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   auto_full=false   # НЕ local: точка входа — вне функции
   if [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]]; then
     warn "x-ui.db не найден — панель (LucX UI / 3x-ui) не установлена."
-    echo "  Установка доступна через меню (п.13 — панель LucX UI)."
+    echo "  Установка доступна через п.7 — Панель и AdGuard → Управление LucX/3x-ui."
     echo "  Если уже стоит оригинальный 3x-ui — убедись, что x-ui.db в /etc/x-ui/."
-    local install_now=""
+    install_now=""
     askyn install_now "Установить панель LucX UI сейчас?" "n"
     if [[ "$install_now" == true ]]; then
-      install_lucx_panel || warn "Установка не удалась — можно повторить через п.13."
+      install_lucx_panel || warn "Установка не удалась — можно повторить через п.7."
       [[ -n "$XUI_DB" && -f "$XUI_DB" ]] && auto_full=true
     else
-      warn "Панель не установлена — меню откроется, установка доступна через п.13."
+      warn "Панель не установлена — меню откроется, установка доступна через п.7."
     fi
   fi
 
