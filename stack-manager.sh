@@ -14361,16 +14361,9 @@ auto_full_setup() {
     done
   fi
   [[ ${#SEL[@]} -eq 0 ]] && { warn "Ничего не выбрано — инбаунды не создаются"; }
-  local have_qwdtt=false
-  for entry in "${SEL[@]}"; do
-    [[ "$entry" == *"|qwdtt|"* || "$entry" == *"|csqtt|"* ]] && have_qwdtt=true
-  done
-
-  # --- 2) VK call hashes (если выбраны qwdtt/csqtt); Enter — создать без них
+  # VK call hashes запрашиваются в цикле создания отдельно для каждого
+  # qwdtt/csqtt, рядом с его портом и остальными параметрами.
   local vk=""
-  if [[ "$have_qwdtt" == true ]]; then
-    ask vk "VK call hashes для qwdtt/csqtt (через запятую, БЕЗ пробелов; Enter — пропустить)" "" '^[a-zA-Z0-9,_-]*$'
-  fi
 
   # Тип сертификатов уже выбран до мастера инбаундов — здесь повторно не спрашиваем.
 
