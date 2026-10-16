@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -2772,7 +2772,7 @@ create_inbounds_menu() {
         break
       done
       sni_domain="$d_new"
-      if [[ "$security" == "tls" && ( "$proto" == "naive" || "$proto" == "anytls" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ]]; then
+      if [[ "$security" == "tls" && ( "$proto" == "vless" && "$transport" == "xhttp" ) ]]; then
         decoy_template_choose_impl rdtpl "Decoy-заглушка для ${sni_domain:-${dom:-$name}} (страница на этом домене)" "$(decoy_tpl_current "${sni_domain:-${dom:-}}")"
         decoy_tpl_store_set "${sni_domain:-${dom:-}}" "${rdtpl:-$(decoy_tpl_for "${sni_domain:-${dom:-}}")}" >/dev/null 2>&1 || true
       elif [[ "$security" == "reality" && "$rmode" != "1" ]]; then
@@ -14474,7 +14474,7 @@ auto_full_setup() {
     # Шаблон задаётся ПО ДОМЕНУ (store домена), по умолчанию — уже действующий.
     local rdtpl=""
     local _tpl_dom="${sni_domain:-${dom:-}}"
-    if [[ "$security" == "tls" && ( "$proto" == "trojan" || "$proto" == "naive" || "$proto" == "anytls" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ]]; then
+    if [[ "$security" == "tls" && ( "$proto" == "trojan" || "$proto" == "vless" && "$transport" == "xhttp" ) ]]; then
       rdtpl="corporate"
       if [[ -t 0 ]]; then
         decoy_template_choose_impl rdtpl "Decoy-заглушка для ${_tpl_dom:-$name} (страница на этом домене)" "$(decoy_tpl_current "$_tpl_dom")"
@@ -14713,6 +14713,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   main_menu
 fi
+
 
 
 
