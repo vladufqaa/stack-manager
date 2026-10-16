@@ -6795,7 +6795,7 @@ reality_set_dest() {
   local _stored=""
   _stored=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
   if [[ "$_stored" != "127.0.0.1:$decoy_port" ]]; then
-    warn "  Reality dest НЕ удержался в БД (#$id: в базе '${_stored:-пусто}', ожидалось 127.0.0.1:$decoy_port) — защита БД (п.25) мешает правке"
+    warn "  Reality dest НЕ удержался в БД (#$id: в базе '${_stored:-пусто}', ожидалось 127.0.0.1:$decoy_port) — защита БД «Заморозка самолечения» мешает правке"
   fi
   db_protect_resume
   log "  Reality dest → 127.0.0.1:$decoy_port (decoy nginx)"
@@ -10086,7 +10086,7 @@ show_status() {
 
 # =====================================================================
 # PRE-INSTALL SNAPSHOT — снимок всего, во что скрипт может вмешаться.
-# Делается при первом запуске (по согласию пользователя) или по п.24.
+# Делается при первом запуске (по согласию пользователя) или через раздел 5 → Pre-install snapshot.
 # Хранится в /root/stack-backups/pre-install-<timestamp>/
 # =====================================================================
 take_pre_install_snapshot() {
