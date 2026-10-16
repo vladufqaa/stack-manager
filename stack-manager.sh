@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -252,7 +252,10 @@ ask() {
     if [[ -n "$__d" ]]; then
       # Не вставляем ANSI-коды в read -rp: readline считает их печатными
       # символами и Backspace после кириллицы стирает часть prompt.
-      read_safe "? ${__p} [${__d}]: " __in
+      if ! read_safe "? ${__p} [${__d}]: " __in; then
+        warn "Ввод завершён (EOF) — возврат в меню"
+        exit 42
+      fi
       __in="${__in:-$__d}"
     else
       read_safe "? ${__p}: " __in
@@ -14494,7 +14497,8 @@ auto_full_setup() {
     local id idproto idport dom stream_s
     while IFS='|' read -r id idproto idport stream_s; do
       [[ -z "$id" ]] && continue
-      is_udp_proto "$idproto" && continue       # UDP — без вопросов в initial_setup
+      is_udp_proto "$idproto" && continue
+       [[ "" == "tproxy" ]] && continue # TG web-proxy настраивается своим SNI-механизмом       # UDP — без вопросов в initial_setup
       # уже привязан к SNI — initial_setup вопросов по нему не задаёт, строк не пишем
       grep -Eq "^[[:space:]]*[^[:space:]]+[[:space:]]+inb_${id}_backend" "$SNI_CONF" 2>/dev/null && continue
       # CDN-профиль назначен в мастере: xhttp_cdn_setup ответит сам (CDN_PRE_*),
@@ -14665,4 +14669,5 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   main_menu
 fi
+
 
