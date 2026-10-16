@@ -157,20 +157,33 @@ Decoy применяется только там, где он не ломает 
 
 ### Скачать и запустить
 
+> **Важно для Linux:** GitHub/raw-прокси иногда возвращает файл с Windows-окончаниями строк `CRLF`. Перед запуском обязательно удалить символы `\r`, иначе Bash покажет `invalid option name` и `syntax error near $'{\\r''`.
+
 ```bash
 curl -4 -fsSL \
-  "https://raw.githubusercontent.com/vladufqaa/stack-manager/main/stack-manager.sh?ts=$(date +%s)" \
+  "https://raw.githubusercontent.com/vladufqaa/stack-manager/main/stack-manager.sh?ts=$(date +%s%N)-$$" \
   -o /root/stack-manager.sh
-chmod +x /root/stack-manager.sh
+sed -i 's/\r$//' /root/stack-manager.sh
+chmod 700 /root/stack-manager.sh
+bash -n /root/stack-manager.sh
 bash /root/stack-manager.sh
 ```
 
 Или одной командой:
 
 ```bash
-curl -4 -fsSL "https://raw.githubusercontent.com/vladufqaa/stack-manager/main/stack-manager.sh?ts=$(date +%s)" \
-  -o /root/stack-manager.sh && chmod +x /root/stack-manager.sh && bash /root/stack-manager.sh
+curl -4 -fsSL "https://raw.githubusercontent.com/vladufqaa/stack-manager/main/stack-manager.sh?ts=$(date +%s%N)-$$" \
+  | tr -d '\r' > /root/stack-manager.sh && chmod 700 /root/stack-manager.sh && \
+  bash -n /root/stack-manager.sh && bash /root/stack-manager.sh
 ```
+
+Проверить окончания строк можно так:
+
+```bash
+file /root/stack-manager.sh
+# в выводе не должно быть: CRLF line terminators
+grep -U $'\r' /root/stack-manager.sh
+# команда выше не должна вывести строк
 
 Пункт 1 работает в два этапа: сначала собираются параметры и показывается план, затем изменения применяются только после подтверждения.
 
