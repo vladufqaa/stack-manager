@@ -38,7 +38,7 @@ export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8 LANG=C.UTF-8
 read_safe() {
   local __prompt="$1" __var="$2"
-  builtin read -e -r -p "$__prompt" "$__var" || true
+  builtin read -e -r -p "$__prompt" "$__var"
 }
 
 BACKUP_DIR="/root/stack-backups"
@@ -14504,6 +14504,8 @@ auto_full_setup() {
       fi
     done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null)
     echo "n"                                    # файрвол: настроим сами ниже
+    # Завершающий Enter не даёт EOF превратить последний вопрос в цикл.
+    echo ""
   } > "$ansf"
   log "Первичная настройка (автоответы: $ansf)…"
   initial_setup < "$ansf" > >(tee /tmp/stack-initial-setup.log /tmp/auto-setup.log) 2>&1 || warn "initial_setup вернул ошибку — смотри /tmp/stack-initial-setup.log"
