@@ -14399,12 +14399,7 @@ auto_full_setup() {
     CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""
     local _is_cdn=false
     if [[ "$transport" == "xhttp" && "$security" != "reality" ]]; then
-      # Пункт «VLESS XHTTP (через CDN)» — это фиксированный CDN-профиль.
-      # Не спрашиваем повторно «работать ли через CDN»: здесь CDN является
-      # частью схемы, TLS завершается nginx, а Xray слушает локальный backend.
-      if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
-        _is_cdn=true
-      elif [[ -t 0 ]]; then
+       if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
         local _cdn_ans=""
         echo
         askyn _cdn_ans "Это соединение будет работать через CDN (nginx TLS, инбаунд без security)?" "n"
@@ -14569,8 +14564,8 @@ auto_full_setup() {
     local id idproto idport dom stream_s
     while IFS='|' read -r id idproto idport stream_s; do
       [[ -z "$id" ]] && continue
-       is_udp_proto "$idproto" && continue       # UDP — без вопросов в initial_setup`n       [[ "$idproto" == "tproxy" || "$idproto" == "naive" || "$idproto" == "anytls" || "$idproto" == "trusttunnel" || "$idproto" == "trust-tunnel" ]] && continue # sidecar/TG уже настроены своим SNI-механизмом
-       [[ "" == "tproxy" ]] && continue # TG web-proxy настраивается своим SNI-механизмом       # UDP — без вопросов в initial_setup
+      is_udp_proto "$idproto" && continue       # UDP — без вопросов в initial_setup
+      [[ "$idproto" == "tproxy" || "$idproto" == "naive" || "$idproto" == "anytls" || "$idproto" == "trusttunnel" || "$idproto" == "trust-tunnel" ]] && continue # sidecar/TG уже настроены своим SNI-механизмом
       # уже привязан к SNI — initial_setup вопросов по нему не задаёт, строк не пишем
       grep -Eq "^[[:space:]]*[^[:space:]]+[[:space:]]+inb_${id}_backend" "$SNI_CONF" 2>/dev/null && continue
       # CDN-профиль назначен в мастере: xhttp_cdn_setup ответит сам (CDN_PRE_*),
@@ -14741,6 +14736,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   main_menu
 fi
+
+
+
+
+
 
 
 
