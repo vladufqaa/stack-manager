@@ -7475,9 +7475,13 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   # Для ORIGIN=домена панели используем уже настроенный сертификат панели.
   # cert_paths может не видеть его из-за разных записей в LucX, поэтому
   # берём пару путей непосредственно из webDomain/settings.
-  if [[ -z "$cp_line" && "$origin_dom" == "${PANEL_DOMAIN:-}" ]]; then
+  local _panel_dom="${PANEL_DOMAIN:-}"
+  [[ -z "$_panel_dom" ]] && _panel_dom=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$_panel_dom" ]] && _panel_dom=$(xui_get subDomain 2>/dev/null || true)
+  if [[ -z "$cp_line" && -n "$_panel_dom" && "$origin_dom" == "$_panel_dom" ]]; then
     cert=$(xui_get webCertFile 2>/dev/null || true)
     key=$(xui_get webKeyFile 2>/dev/null || true)
+    [[ -z "$key" ]] && key=$(xui_get subKeyFile 2>/dev/null || true)
     [[ -f "$cert" && -f "$key" ]] && cp_line="$cert $key"
   fi
   if [[ -z "$cp_line" ]]; then
