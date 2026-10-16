@@ -6197,6 +6197,10 @@ sni_map_add() {
 sni_map_remove() { sed -i "/^\s*$1\s\+/d" "$SNI_CONF" 2>/dev/null || true; }
 
 nginx_reload() {
+  if ! command -v nginx >/dev/null 2>&1; then
+    warn "nginx не установлен — проверка/перезагрузка пропущена"
+    return 0
+  fi
   # СТРИМ-конфиг (443/SNI) обязан быть подключён ДО старта/перезагрузки nginx:
   # если nginx поднимется раньше, чем в nginx.conf появится
   # `include /etc/nginx/streams-enabled/*.conf`, порт 443 не откроется вообще
@@ -11690,7 +11694,11 @@ uninstall_panel_lucx() {
   if [[ "$drop_nginx" == true ]]; then
     rm -f /etc/nginx/streams-enabled/sni-router.conf /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
     rm -f "$STACK_LINK" "$STACK_CONF" 2>/dev/null || true
-    nginx_reload || true
+    if command -v nginx >/dev/null 2>&1; then
+      nginx_reload || warn "Конфиги удалены, но nginx не удалось проверить/перезагрузить"
+    else
+      log "Конфиги nginx стека удалены; nginx уже не установлен."
+    fi
     log "Конфиги nginx стека удалены."
   fi
   log "Панель LucX UI удалена. Бэкап: /root/x-ui-backup-*.tar.gz"
