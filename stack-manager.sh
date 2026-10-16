@@ -14442,10 +14442,15 @@ auto_full_setup() {
     fi
     local vkn=""
     [[ "$proto" == "qwdtt" || "$proto" == "csqtt" ]] && vkn="$vk"
-    # TLS-инбаундам серт нужен СРАЗУ (naive/anytls/trusttunnel/hysteria).
-    # Тип (wildcard/персональный) учтён ВНУТРИ cert_issue: при живом wildcard
-    # это no-op (переиспользует его), иначе выпустит персональный.
-    if [[ -n "$dom" ]] && { [[ "$net" == "tcp" && "$security" == "tls" ]] || [[ "$proto" == "hysteria" ]]; }; then
+    # Сертификат нужен TLS-инбаундам и собственному SNI Reality:
+    # для Reality-режима 2 nginx/decoy обслуживает домен, поэтому сертификат
+    # должен быть выпущен до генерации маршрута, как и для обычного TLS.
+    # Тип (wildcard/персональный) учтён внутри cert_issue: при живом wildcard
+    # это no-op (переиспользует его), иначе выпускается персональный сертификат.
+    local _own_reality=false
+    [[ "$security" == "reality" && "${REALITY_MODE[$proto-$transport]:-}" == "2" ]] && _own_reality=true
+    if [[ -n "$dom" ]] && { [[ "$net" == "tcp" && "$security" == "tls" ]] || [[ "$proto" == "hysteria" ]] || [[ "$_own_reality" == true ]]; }; then
+      log "  Сертификат для $dom: проверка/выпуск перед настройкой $name"
       cert_issue "$dom" || warn "  ИТОГ: серт $dom НЕ выпущен — $name (${proto}) не поднимется; докати позже: Сертификаты → обновить (причина выше)"
     fi
     local remark="${proto}-${transport}"
