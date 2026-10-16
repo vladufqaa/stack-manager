@@ -11754,9 +11754,10 @@ update_self() {
   fi
   local _shebang=""
   _shebang=$(head -n1 "$tmp")
-  if [[ ! "$_shebang" =~ ^#!.*bash ]]; then
-    err "Загруженный файл не похож на Bash-скрипт (первая строка: ${_shebang:0:80})"
-    rm -f "$tmp"; return 1
+  # Shebang проверяем мягко: некоторые прокси меняют BOM/пробелы, но
+  # главным доказательством остаётся строгий синтаксический bash -n.
+  if [[ ! "$_shebang" =~ bash ]]; then
+    warn "Первая строка не распознана как shebang Bash — продолжаю, bash -n проверит файл"
   fi
   bash -n "$tmp" || { err "Новый файл не проходит bash -n — обновление отменено"; rm -f "$tmp"; return 1; }
   old_sha=$(sha256sum "$cur" | awk '{print $1}')
