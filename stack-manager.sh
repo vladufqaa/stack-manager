@@ -11890,6 +11890,11 @@ update_self() {
     cp -p "$bakdir/stack-manager.sh" "$cur"; chmod "$mode" "$cur" 2>/dev/null || true; sync; return 1
   fi
   printf '%s' "$src_url" > /root/.stack-src && chmod 600 /root/.stack-src
+  # Обновление запускается поверх уже существующей системы. Не считаем
+  # перезапуск после self-update «первым запуском» и не показываем повторно
+  # pre-install-вопрос только из-за отсутствующего старого маркера.
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+  touch "$BACKUP_DIR/.stack-ever-ran" 2>/dev/null || true
   log "Обновлено атомарно ✓ (backup: $bakdir) — перезапускаюсь…"
   trap - RETURN; flock -u 9 2>/dev/null || true
   exec bash "$cur"
