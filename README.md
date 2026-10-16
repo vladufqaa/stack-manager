@@ -64,8 +64,9 @@
 
 ```text
 1) VLESS TCP Reality
-2) VLESS XHTTP TLS (CDN или decoy)
-3) VLESS XHTTP Reality
+2) VLESS TCP TLS (с HTTPS-decoy)
+3) VLESS XHTTP TLS (CDN или HTTPS-decoy)
+4) VLESS XHTTP Reality
 4) NAIVE (TLS, за 443)
 5) TRUSTTUNNEL (TLS, за 443)
 6) ANYTLS (TLS, за 443)

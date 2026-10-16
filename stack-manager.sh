@@ -224,7 +224,9 @@ DECOY_TEMPLATES=(
 # mtproto из скрипта не создаём — в LucX его роль играет tproxy (TG WEB-PROXY).
 RECOMMENDED_INBOUNDS=(
   "VLESS TCP REALITY|vless|tcp|reality|xtls-rprx-vision|tcp"
+  "VLESS TCP TLS|vless|tcp|tls||tcp"
   "VLESS XHTTP (через CDN)|vless|xhttp|tls||tcp"
+  "VLESS XHTTP TLS|vless|xhttp|tls||tcp"
   "VLESS XHTTP REALITY|vless|xhttp|reality||tcp"
   "NAIVE (TLS, за 443)|naive|naive|tls|-|tcp"
   "TRUSTTUNNEL (TLS, за 443)|trusttunnel|trusttunnel|tls|-|tcp"
@@ -2750,7 +2752,7 @@ create_inbounds_menu() {
       REALITY_EXT_TARGET="$tgt"
       printf '%s' "$tgt" > /tmp/.reality-found-target 2>/dev/null || true
       log "  $name: цель → $tgt (dest+serverNames, за 443 по SNI цели)"
-    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" && "$name" != "VLESS XHTTP (через CDN)" ) ) ) || "$security" == "reality" ]]; then
+    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || "$security" == "reality" || ( "$security" == "tls" && ( "$proto" == "trojan" || "$proto" == "vless" ) && ! ( "$proto" == "vless" && "$transport" == "xhttp" && "$name" == "VLESS XHTTP (через CDN)" ) ) ]]; then
       echo
       if [[ -z "$panel_domain" ]]; then
         panel_domain="${PANEL_DOMAIN:-}"
