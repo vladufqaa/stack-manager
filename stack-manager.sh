@@ -11846,7 +11846,7 @@ update_self() {
   # уже query-параметры. Заголовки no-cache дополняют уникальный nonce.
   local sep='?'; [[ "$src_url" == *\?* ]] && sep='&'
   local bust_url="${src_url}${sep}stack_nonce=$(date +%s%N)-$$"
-  if ! curl -fsSL --no-cache -H 'Cache-Control: no-cache, no-store' -H 'Pragma: no-cache' \
+  if ! curl -fsSL -H 'Cache-Control: no-cache, no-store' -H 'Pragma: no-cache' \
       --retry 3 --retry-delay 1 --max-time 45 "$bust_url" -o "$tmp" || [[ ! -s "$tmp" ]]; then
     err "Не удалось скачать (проверь URL/доступность репозитория)"
     rm -f "$tmp"; return 1
@@ -11875,7 +11875,7 @@ update_self() {
     local api_repo api_file
     api_repo=$(printf '%s' "$src_url" | sed -E 's#https://raw.githubusercontent.com/([^/]+/[^/]+)/main/.*#\1#')
     api_file=$(printf '%s' "$src_url" | sed -E 's#https://raw.githubusercontent.com/[^/]+/[^/]+/main/##')
-    remote_sha=$(curl -fsSL --no-cache -H 'Cache-Control: no-cache' \
+    remote_sha=$(curl -fsSL -H 'Cache-Control: no-cache' \
       "https://api.github.com/repos/$api_repo/commits?path=$api_file&per_page=1" 2>/dev/null \
       | grep -m1 '"sha"' | sed -E 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]+)".*/\1/' || true)
   fi
