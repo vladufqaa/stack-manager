@@ -7125,10 +7125,31 @@ cdn_profiles_load() {
   CDN_PROFILE_IDS=()
   [[ -s "$CDN_PROFILES" ]] || return 0
   local l id
+  local -a _stale=()
   while IFS= read -r l; do
     id="${l%%|*}"
-    [[ "$id" =~ ^[0-9]+$ ]] && CDN_PROFILE_IDS+=("$id")
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    if [[ -f "$XUI_DB" ]] && [[ "$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE id=$id;" 2>/dev/null || echo 0)" == "0" ]]; then
+      _stale+=("$id")
+    else
+      CDN_PROFILE_IDS+=("$id")
+    fi
   done < "$CDN_PROFILES"
+  # Удаляем осиротевшие профили после удаления инбаунда, чтобы старый ID
+  # не появлялся в меню decoy и не восстанавливался автопочинкой.
+  local _sid _srow _sorigin _sdport _tmp
+  for _sid in "${_stale[@]}"; do
+    _srow=$(grep -m1 -E "^${_sid}\\|" "$CDN_PROFILES" 2>/dev/null || true)
+    _sorigin=$(printf '%s' "$_srow" | cut -d'|' -f3)
+    _sdport=$(printf '%s' "$_srow" | cut -d'|' -f7)
+    [[ -n "$_sorigin" ]] && stack_cdn_del "$_sorigin" 2>/dev/null || true
+    [[ "$_sdport" =~ ^[0-9]+$ && "$_sdport" != "0" ]] && stack_del_decoy "$_sorigin" 2>/dev/null || true
+    sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$_sid;" 2>/dev/null || true
+    _tmp=$(mktemp)
+    grep -vE "^${_sid}\\|" "$CDN_PROFILES" > "$_tmp" 2>/dev/null || true
+    mv -f "$_tmp" "$CDN_PROFILES"
+    warn "Удалён осиротевший CDN-профиль #$_sid: инбаунд отсутствует"
+  done
 }
 cdn_profile_get() {   # <id> → печатает строку профиля (пусто — нет)
   [[ -s "$CDN_PROFILES" ]] || return 1
