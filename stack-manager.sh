@@ -2737,7 +2737,7 @@ create_inbounds_menu() {
       REALITY_EXT_TARGET="$tgt"
       printf '%s' "$tgt" > /tmp/.reality-found-target 2>/dev/null || true
       log "  $name: цель → $tgt (dest+serverNames, за 443 по SNI цели)"
-    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" ) ) ) || "$security" == "reality" ]]; then
+    elif [[ "$proto" == "hysteria" || "$proto" == "tproxy" || "$proto" == "naive" || "$proto" == "anytls" || "$proto" == "trusttunnel" || "$proto" == "trust-tunnel" || ( "$security" == "tls" && ( "$proto" == "trojan" || ( "$proto" == "vless" && "$transport" == "xhttp" && "$name" != "VLESS XHTTP (через CDN)" ) ) ) || "$security" == "reality" ]]; then
       echo
       if [[ -z "$panel_domain" ]]; then
         panel_domain="${PANEL_DOMAIN:-}"
@@ -14473,6 +14473,8 @@ auto_full_setup() {
     fi
     local vkn=""
     [[ "$proto" == "qwdtt" || "$proto" == "csqtt" ]] && vkn="$vk"
+    # CDN-XHTTP не получает отдельный SNI/decoy: его домены и decoy
+    # запрашиваются только в CDN-профиле ниже.
     # Сертификат нужен TLS-инбаундам и собственному SNI Reality:
     # для Reality-режима 2 nginx/decoy обслуживает домен, поэтому сертификат
     # должен быть выпущен до генерации маршрута, как и для обычного TLS.
