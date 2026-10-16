@@ -14165,21 +14165,25 @@ print_menu_actions() {
 }
 
 fast_menu_header() {
-  local nb=0 ufw_state="down" ngx xui adg f2b
+  local nb=0 ufw_state="down" ngx xui adg f2b panel="—"
   [[ -f "$XUI_DB" ]] && nb=$(sqlite3 -cmd ".timeout 1000" "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
   ufw_is_active && ufw_state="active"
   ngx=$(systemctl is-active nginx 2>/dev/null || echo unknown)
   xui=$(systemctl is-active x-ui 2>/dev/null || echo unknown)
   adg="—"; [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && adg=$(systemctl is-active "$ADG_SERVICE" 2>/dev/null || echo unknown)
   f2b=$(systemctl is-active fail2ban 2>/dev/null || echo unknown)
+  case "${PANEL_FLAVOR:-$(detect_panel_flavor)}" in
+    lucx) panel="LucX UI" ;; 3x-ui) panel="3x-ui" ;; *) panel="не установлена" ;;
+  esac
   line
-  echo -e "${B}      🛰️  STACK-MANAGER  ·  SNI-STACK${N}"
-  echo -e "${D}      LucX/x-ui  ·  nginx 443  ·  Reality  ·  decoy  ·  AdGuard${N}"
+  printf "  ${B}%-56s${N}\n" "STACK-MANAGER / SNI-STACK"
+  printf "  ${D}%-56s${N}\n" "Панель: $panel | nginx: 443 | SNI | CDN | AdGuard"
   line
-  printf "  %-14s %-12s  %-14s %-12s\n" "nginx" "$ngx" "x-ui" "$xui"
-  printf "  %-14s %-12s  %-14s %-12s\n" "AdGuard" "$adg" "fail2ban" "$f2b"
-  printf "  %-14s %-12s  %-14s %s\n" "UFW" "$ufw_state" "inbounds" "${nb:-0} active"
-  echo -e "${D}  Быстрый переход: 1–7 разделы  ·  0 выход  ·  полный аудит — раздел 6${N}"
+  printf "  %-18s %-12s | %-18s %-12s\n" "nginx" "$ngx" "x-ui" "$xui"
+  printf "  %-18s %-12s | %-18s %-12s\n" "AdGuard" "$adg" "fail2ban" "$f2b"
+  printf "  %-18s %-12s | %-18s %-12s\n" "UFW" "$ufw_state" "inbounds" "${nb:-0} active"
+  line
+  printf "  ${D}%-56s${N}\n" "Быстрый переход: 1–7 разделы | 0 выход | аудит: раздел 6"
   line
 }
 
