@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -4294,8 +4294,31 @@ cert_lines_load() {
     [[ -n "$nm" && "$nm" != "null" ]] && CERT_LINES=("$nm")
     return 0
   fi
-  # Режим B: список из файла
-  [[ -f "$CERT_LINES_FILE" ]] || return 0
+  # Режим B: список из файла. Если список линий потерян, восстанавливаем
+  # его по cert-line-*.domains и по установленным certbot live-каталогам.
+  if [[ ! -f "$CERT_LINES_FILE" ]]; then
+    local _lf _ln
+    for _lf in "${CERT_LINE_FILE_PREFIX}"*.domains; do
+      [[ -f "$_lf" ]] || continue
+      _ln="${_lf#${CERT_LINE_FILE_PREFIX}}"; _ln="${_ln%.domains}"
+      cert_line_name_valid "$_ln" && CERT_LINES+=("$_ln")
+    done
+    if [[ ${#CERT_LINES[@]} -gt 0 ]]; then
+      cert_lines_save
+      return 0
+    fi
+    # Старые установки режима B могли не иметь файлов линий: создаём линии
+    # из доменов списка A, распределив их через cert_line_for.
+    if [[ -s "$CERT_DOMAINS_FILE" ]]; then
+      local _d _line
+      while IFS= read -r _d; do
+        _d="$(printf '%s' "$_d" | tr -d '[:space:]')"; [[ -z "$_d" ]] && continue
+        _line=$(cert_line_for "$_d") || continue
+        cert_lines_add "$_line"; cert_line_domains_add "$_line" "$_d"
+      done < "$CERT_DOMAINS_FILE"
+    fi
+    return 0
+  fi
   local l
   while IFS= read -r l; do
     l="$(printf '%s' "$l" | tr -d '[:space:]')"
