@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -7403,7 +7403,7 @@ cdn_ask_profile() {   # <id> <proto>
     echo
     echo -e "${B}CDN-профиль #$id ($proto, transport=xhttp):${N}"
     ask CDN_DOM   "Домен, привязанный к CDN (например cdn.$base)"  "cdn.$base"  '^[a-zA-Z0-9.-]+$'
-    ask CDN_ORIGIN "ORIGIN-домен (A-запись → этот сервер)"          "ts.$base"   '^[a-zA-Z0-9.-]+$'
+    ask CDN_ORIGIN "ORIGIN-домен (A-запись → этот сервер)"          "$base"   '^[a-zA-Z0-9.-]+$'
   fi
   local def_path; def_path=$(cdn_default_path "$CDN_ORIGIN")
   if [[ -n "${CDN_PRE_PATH:-}" ]]; then
