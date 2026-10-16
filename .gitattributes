@@ -1,0 +1,2 @@
+*.sh text eol=lf
+stack-manager.sh text working-tree-encoding=UTF-8 eol=lf
