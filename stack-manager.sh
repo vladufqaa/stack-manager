@@ -11745,10 +11745,15 @@ update_self() {
     err "Не удалось скачать (проверь URL/доступность репозитория)"
     rm -f "$tmp"; return 1
   fi
-  # GitHub/прокси иногда добавляют CRLF или UTF-8 BOM перед shebang.
-  # Нормализуем только первую строку для проверки, сам загруженный файл не меняем.
+  # GitHub/прокси иногда добавляют CRLF или UTF-8 BOM. Нормализуем
+  # загруженный файл ДО bash -n и атомарной установки, иначе Bash увидит
+  # shebang с CR и после перезапуска выдаст «/usr/bin/env: No such file».
+  sed -i 's/\r$//' "$tmp"
+  if [[ "$(LC_ALL=C od -An -t x1 -N3 "$tmp" 2>/dev/null | tr -d ' ')" == "efbbbf" ]]; then
+    tail -c +4 "$tmp" > "${tmp}.nobom" && mv -f "${tmp}.nobom" "$tmp"
+  fi
   local _shebang=""
-  _shebang=$(head -n1 "$tmp" | tr -d '\r' | sed $'s/^\357\273\277//')
+  _shebang=$(head -n1 "$tmp")
   if [[ ! "$_shebang" =~ ^#!.*bash ]]; then
     err "Загруженный файл не похож на Bash-скрипт (первая строка: ${_shebang:0:80})"
     rm -f "$tmp"; return 1
