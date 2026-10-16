@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -5501,15 +5501,23 @@ cert_paths() {
 # cert_issue при виде домена из списка тоже переиспользует SAN (find_covering_cert).
 # Добавить домен в мультисписок вручную
 certs_domain_add_manual() {
-  cert_domains_load
-  local newd=""
+  cert_mode_load >/dev/null 2>&1 || true
+  local newd="" _line=""
   ask newd "Домен для добавления" "" '^[a-zA-Z0-9.-]+$'
   [[ -z "$newd" ]] && { warn "Отменено"; return 0; }
-  if [[ " ${CERT_DOMAINS[*]} " == *" $newd "* ]]; then
-    log "Домен $newd уже в списке"; return 0
+  if [[ "${CERT_MODE:-A}" == "B" ]]; then
+    _line=$(cert_line_for "$newd") || true
+    [[ -z "$_line" ]] && { err "Не удалось определить линию сертификата для $newd"; pause; return 1; }
+    cert_line_domains_load "$_line"
+    [[ " ${CERT_LINE_DOMAINS[*]} " == *" $newd "* ]] && { log "Домен уже в линии $_line"; return 0; }
+    cert_line_domains_add "$_line" "$newd"
+    log "Добавлен в линию сертификата $_line: $newd"
+  else
+    cert_domains_load
+    [[ " ${CERT_DOMAINS[*]} " == *" $newd "* ]] && { log "Домен $newd уже в списке"; return 0; }
+    cert_domains_add "$newd" 1
+    log "Добавлен в мультисписок: $newd"
   fi
-  cert_domains_add "$newd" 1
-  log "Добавлен в мультисписок: $newd"
   local r=""
   askyn r "Перевыпустить мультисерт сейчас?" "y"
   [[ "$r" == true ]] && { CERT_DEFER=0; cert_batch_flush; }
@@ -5518,6 +5526,24 @@ certs_domain_add_manual() {
 
 # Удалить домен из мультисписка вручную
 certs_domain_remove_manual() {
+  cert_mode_load >/dev/null 2>&1 || true
+  if [[ "${CERT_MODE:-A}" == "B" ]]; then
+    cert_lines_load
+    local _all=() _ln _d
+    for _ln in "${CERT_LINES[@]}"; do
+      cert_line_domains_load "$_ln"
+      for _d in "${CERT_LINE_DOMAINS[@]}"; do _all+=("$_ln|$_d"); done
+    done
+    [[ ${#_all[@]} -eq 0 ]] && { warn "Линии сертификатов пусты"; pause; return 0; }
+    echo; echo "Домены линий сертификатов:"
+    local i=1 d
+    for d in "${_all[@]}"; do printf "  %2d) %s (линия %s)\n" "$i" "${d#*|}" "${d%%|*}"; i=$((i+1)); done
+    local pick=""; ask pick "Номер для удаления (0 — отмена)" "0" '^[0-9]+$'
+    [[ "$pick" == "0" ]] && return 0
+    (( pick < 1 || pick > ${#_all[@]} )) && { err "Нет такого номера"; pause; return 1; }
+    local target="${_all[$((pick-1))]}"; cert_line_domains_remove "${target%%|*}" "${target#*|}"
+    log "Удалён из линии ${target%%|*}: ${target#*|}"; pause; return 0
+  fi
   cert_domains_load
   cert_multi_name_resolve >/dev/null 2>&1 || true
   [[ ${#CERT_DOMAINS[@]} -eq 0 ]] && { warn "Мультисписок пуст"; pause; return 0; }
