@@ -5110,19 +5110,49 @@ cert_batch_flush() {
 
 # Просмотр: список доменов + сведения о сертах
 certs_view() {
+  cert_mode_load >/dev/null 2>&1 || true
   cert_multi_name_resolve >/dev/null 2>&1 || true
   line; echo -e "${B}   СЕРТИФИКАТЫ — ОБЗОР${N}"; line
-  echo "  Имя серта (= домен панели): ${CERT_MULTI_NAME:-<домен панели не задан>}"
-  echo -e "${B}▸ Домены в SAN-списке ($CERT_DOMAINS_FILE):${N}"
-  if [[ -s "$CERT_DOMAINS_FILE" ]]; then
-    local i=1 d
-    while IFS= read -r d; do
-      d="$(printf '%s' "$d" | tr -d '[:space:]')"
-      [[ -z "$d" ]] && continue
-      printf "  %2d) %s\n" "$i" "$d"; i=$((i+1))
-    done < "$CERT_DOMAINS_FILE"
+  if [[ "${CERT_MODE:-A}" == "B" ]]; then
+    echo "  Режим: B — отдельные линии сертификатов по базовым доменам"
+    echo -e "${B}▸ Фактические линии и их сертификаты:${N}"
+    cert_lines_load >/dev/null 2>&1 || true
+    if [[ ${#CERT_LINES[@]} -gt 0 ]]; then
+      local _ln _i=1 _d
+      for _ln in "${CERT_LINES[@]}"; do
+        echo "  Линия $_i: $_ln"
+        cert_line_domains_load "$_ln" >/dev/null 2>&1 || true
+        if [[ ${#CERT_LINE_DOMAINS[@]} -eq 0 ]]; then
+          echo "      (список доменов пуст)"
+        else
+          for _d in "${CERT_LINE_DOMAINS[@]}"; do
+            [[ -n "$_d" ]] && echo "      - $_d"
+          done
+        fi
+        if [[ -f "/etc/letsencrypt/live/$_ln/fullchain.pem" ]]; then
+          echo "      Сертификат: установлен"
+        else
+          echo "      Сертификат: не выпущен"
+        fi
+        _i=$((_i+1))
+      done
+    else
+      echo "  (линии ещё не сформированы)"
+    fi
   else
-    echo "  (пусто — мультисписок ещё не создан)"
+    echo "  Режим: A — одна SAN-линия"
+    echo "  Имя линии (= домен панели): ${CERT_MULTI_NAME:-<домен панели не задан>}"
+    echo -e "${B}▸ Домены в SAN-списке ($CERT_DOMAINS_FILE):${N}"
+    if [[ -s "$CERT_DOMAINS_FILE" ]]; then
+      local i=1 d
+      while IFS= read -r d; do
+        d="$(printf '%s' "$d" | tr -d '[:space:]')"
+        [[ -z "$d" ]] && continue
+        printf "  %2d) %s\n" "$i" "$d"; i=$((i+1))
+      done < "$CERT_DOMAINS_FILE"
+    else
+      echo "  (список SAN ещё не создан)"
+    fi
   fi
   echo
   local ldir="/etc/letsencrypt/live/$CERT_MULTI_NAME"
