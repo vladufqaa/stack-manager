@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -2695,6 +2695,19 @@ create_inbounds_menu() {
     local entry="${NAMES[$((num-1))]}"
     IFS='|' read -r name proto transport security flow net <<<"$entry"
 
+    # Фиксированный пункт CDN в ручном мастере тоже должен пройти полный
+    # CDN-профиль. Раньше create_inbounds_menu создавал только голый XHTTP,
+    # потому что CDN-логика была реализована лишь в auto_full_setup.
+    local _is_cdn=false
+    CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""
+    if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
+      _is_cdn=true
+      cdn_ask_profile "0" "$proto"
+      CDN_PRE_ANSWER="true"
+      CDN_PRE_CDN="$CDN_DOM"; CDN_PRE_ORIGIN="$CDN_ORIGIN"; CDN_PRE_PATH="$CDN_PATH"; CDN_PRE_TPL="$CDN_TPL"
+      security="none"
+    fi
+
     local port
     case "$proto" in
       tproxy) port=11443 ;;
@@ -2870,6 +2883,10 @@ create_inbounds_menu() {
           log "  Секрет сохранён: /root/.lucx-tg-web-proxy-info"
           ;;
         *)
+           if [[ "${_is_cdn:-false}" == true ]]; then
+             CDN_FORCE_IDS="${CDN_FORCE_IDS:-} $new_id"
+             xhttp_cdn_setup "$new_id" "$proto" "$port" || warn "  CDN-профиль для #$new_id не применён"
+           fi
           log "  → id=$new_id, listen=$([[ "$net" == "udp" ]] && echo "0.0.0.0" || echo "127.0.0.1")"
           if [[ -n "$sni_domain" ]]; then
             SNI_USED["$sni_domain"]="inb_${new_id}_backend"
