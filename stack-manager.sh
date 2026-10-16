@@ -6549,7 +6549,18 @@ decoy_template_choose_impl() {
   printf "  %2d) %-15s %s\n" "$__custom_num" "custom" "▶ Свой сайт — папка со статикой (index.html и т.д.)" >&2
   echo >&2
   local __c=""
-  ask __c "$prompt" "$default" '^[0-9]+$|^[a-z:_/.-]+$' || { printf -v "$__result" '%s' "$default"; return 0; }
+  while :; do
+    ask __c "$prompt" "$default" '^[0-9]+$|^[a-z:_/.-]+$' || { printf -v "$__result" '%s' "$default"; return 0; }
+    if [[ "$__c" =~ ^[0-9]+$ ]] && (( __c < 1 || __c > __custom_num )); then
+      err "Выбор вне списка. Укажите номер от 1 до $__custom_num."
+      continue
+    fi
+    if [[ "$__c" =~ ^[a-z:_/.-]+$ ]] && [[ "$__c" != custom && "$__c" != custom:* ]]; then
+      err "Выбор вне списка. Укажите номер шаблона или custom."
+      continue
+    fi
+    break
+  done
   if [[ "$__c" == "custom" || "$__c" == "$__custom_num" || "$__c" == custom:* ]]; then
     local __path=""
     [[ "$__c" == custom:* ]] && __path="${__c#custom:}"
