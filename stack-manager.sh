@@ -72,6 +72,7 @@ DB_BIN="/usr/bin/sqlite3"
 # =====================================================================
 CDN_FE_PORT=47443                                        # локальный ssl-фронтенд nginx (http{})
 CDN_PROFILES="/root/stack-backups/cdn-profiles.tsv"      # id|proto|origin|cdn|path|tpl|decoy_port
+CDN_FORCE_IDS=""                                         # инбаунды, выбранные мастером как CDN
 declare -a CERT_LINES=()
 CERT_MULTI_NAME=""           # динамически = домен панели (cert_multi_name_resolve)
 CERT_DEFER=0
@@ -7341,7 +7342,9 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   echo
   echo -e "${B}Инбаунд #$id ($proto): transport=xhttp${N}"
   local use_cdn=""
-  if [[ -n "${CDN_PRE_ANSWER:-}" ]]; then
+  if [[ " ${CDN_FORCE_IDS:-} " == *" $id "* ]] || [[ -n "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
+    use_cdn=true
+  elif [[ -n "${CDN_PRE_ANSWER:-}" ]]; then
     use_cdn="$CDN_PRE_ANSWER"
   elif [[ "$_was_tls" == true && -t 0 ]]; then
     warn "  Сейчас в инбаунде security=tls (TLS терминирует Xray)."
@@ -14487,6 +14490,7 @@ auto_full_setup() {
     # цель «чужого реалити» уже в REALITY_EXT_TARGET (шаг выше)
     new_id=$(create_inbound_db "$proto" "$transport" "$security" "$flow" "$port" "$remark" "$net" "$sn" "$vkn") || true
     if [[ -n "$new_id" ]]; then
+      [[ "${_is_cdn:-false}" == true ]] && CDN_FORCE_IDS="${CDN_FORCE_IDS:-} $new_id"
       log "  → #$new_id $remark :$port${sn:+ (SNI $sn)}"
       [[ -n "$dom" ]] && A_DOM["$new_id"]="$dom"
       # своя заглушка на этот инбаунд (для initial_setup)
