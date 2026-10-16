@@ -10113,18 +10113,21 @@ change_decoy() {
     _d_id="${BASH_REMATCH[1]}"
     _d_proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$_d_id AND enable=1;" 2>/dev/null || true)
     _d_st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
-    # Показываем все созданные скриптом TCP-decoy: Reality любого протокола
-    # и XHTTP+TLS, а не только старую категорию VLESS Reality.
-    grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$_d_st" || \
-      inbound_is_xhttp_tls "$_d_st" || \
-      ! grep -Eqi '"network"[[:space:]]*:[[:space:]]*"tcp".*"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_d_st" || continue
+    # В список decoy попадают только VLESS/Trojan с собственным Reality
+    # или обычным TLS. LucX sidecar (naive/trusttunnel/anytls) сюда не входит,
+    # а CDN XHTTP не имеет inb_N_backend и показывается отдельным ORIGIN ниже.
+    [[ "$_d_proto" == "vless" || "$_d_proto" == "trojan" ]] || continue
+    if ! grep -Eqi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$_d_st" && \
+       ! grep -Eqi '"network"[[:space:]]*:[[:space:]]*"tcp".*"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_d_st"; then
+      continue
+    fi
     _d_port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
     _decoy_rows+=("$_d_dom|$_d_id|$_d_port")
     _decoy_row="${#_decoy_rows[@]}"
     if grep -qi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_d_st"; then
       printf "   %s) VLESS TLS #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port"
     else
-      printf "   %s) Reality #% -3s — %-30s :%s\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port"
+      printf "   %s) Reality #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port"
     fi
   done < <(awk '
     /^map / { inmap=1; next }
