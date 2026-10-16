@@ -1890,10 +1890,10 @@ decoy_panel_choose() {
   echo "  1) stub     — стандартная заглушка nginx"
   if [[ "$no_adg" != "1" ]]; then
     echo "  2) adguard  — AdGuard Home web UI + DoH через домен панели"
-  fi
-  echo "  3) шаблон   — decoy-заглушка из каталога (corporate, blog, docs, cloudflare, login-страницы...)"
-  if [[ "$no_adg" != "1" ]]; then
+    echo "  3) шаблон   — decoy-заглушка из каталога (corporate, blog, docs, cloudflare, login-страницы...)"
     echo "  4) adguard+ — AdGuard на ОТДЕЛЬНОМ SNI-домене (adguard.<база панели>)"
+  else
+    echo "  2) шаблон   — decoy-заглушка из каталога (corporate, blog, docs, cloudflare, login-страницы...)"
   fi
   echo
   if [[ "$no_adg" != "1" && "$ADG_PRESENT" != true ]]; then
@@ -1905,7 +1905,8 @@ decoy_panel_choose() {
   echo
   local choice=""
   if [[ "$no_adg" == "1" ]]; then
-    ask choice "Выбор" "1" '^[13]$'
+    ask choice "Выбор" "1" '^[12]$'
+    [[ "$choice" == "2" ]] && choice=3
   else
     ask choice "Выбор" "1" '^[1234]$'
   fi
