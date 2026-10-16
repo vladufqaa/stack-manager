@@ -14400,11 +14400,14 @@ auto_full_setup() {
     local _is_cdn=false
     if [[ "$transport" == "xhttp" && "$security" != "reality" ]]; then
        if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
-        local _cdn_ans=""
-        echo
-        askyn _cdn_ans "Это соединение будет работать через CDN (nginx TLS, инбаунд без security)?" "n"
-        [[ "$_cdn_ans" == true ]] && _is_cdn=true
-      fi
+         # Фиксированный пункт означает CDN без дополнительного y/n.
+         _is_cdn=true
+       elif [[ -t 0 ]]; then
+         local _cdn_ans=""
+         echo
+         askyn _cdn_ans "Это соединение будет работать через CDN (nginx TLS, инбаунд без security)?" "n"
+         [[ "$_cdn_ans" == true ]] && _is_cdn=true
+       fi
       if [[ "$_is_cdn" == true ]]; then
         cdn_ask_profile "0" "$proto"   # спросит CDN/ORIGIN-домены, путь, decoy
         CDN_PRE_ANSWER="true"
