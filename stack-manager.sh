@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -14569,7 +14569,7 @@ auto_full_setup() {
     local id idproto idport dom stream_s
     while IFS='|' read -r id idproto idport stream_s; do
       [[ -z "$id" ]] && continue
-       is_udp_proto "$idproto" && continue       # UDP — без вопросов в initial_setup`n       [[ "$idproto" == "tproxy" ]] && continue # TG web-proxy настраивается своим SNI-механизмом
+       is_udp_proto "$idproto" && continue       # UDP — без вопросов в initial_setup`n       [[ "$idproto" == "tproxy" || "$idproto" == "naive" || "$idproto" == "anytls" || "$idproto" == "trusttunnel" || "$idproto" == "trust-tunnel" ]] && continue # sidecar/TG уже настроены своим SNI-механизмом
        [[ "" == "tproxy" ]] && continue # TG web-proxy настраивается своим SNI-механизмом       # UDP — без вопросов в initial_setup
       # уже привязан к SNI — initial_setup вопросов по нему не задаёт, строк не пишем
       grep -Eq "^[[:space:]]*[^[:space:]]+[[:space:]]+inb_${id}_backend" "$SNI_CONF" 2>/dev/null && continue
@@ -14741,6 +14741,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   main_menu
 fi
+
 
 
 
