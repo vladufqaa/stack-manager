@@ -9323,11 +9323,28 @@ remove_inbound() {
     log "SNI-привязка снята: $dom → #$id"
   fi
 
-  # 2) сам инбаунд
+  # 2) сам инбаунд. Панель держит in-memory reconcile, а защита БД может
+  # вернуть строку при работающем x-ui. Поэтому останавливаем панель,
+  # временно приостанавливаем защитные триггеры и удаляем связанные строки.
   if [[ "$do_inb" == true && "$exists" != "0" ]]; then
     cp -n "$XUI_DB" "${XUI_DB}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
-    sqlite3 "$XUI_DB" "DELETE FROM inbounds WHERE id=$id;" 2>/dev/null || true
-    log "Инбаунд #$id удалён из панели (x-ui.db)"
+    local _xui_was=false
+    systemctl is-active --quiet x-ui 2>/dev/null && { _xui_was=true; systemctl stop x-ui >/dev/null 2>&1 || true; sleep 1; }
+    db_protect_suspend >/dev/null 2>&1 || true
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "
+      DELETE FROM client_inbounds WHERE inbound_id=$id;
+      DELETE FROM hosts WHERE inbound_id=$id;
+      DELETE FROM inbounds WHERE id=$id;
+    " 2>/dev/null || true
+    db_protect_resume >/dev/null 2>&1 || true
+    local _left
+    _left=$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE id=$id;" 2>/dev/null || echo 0)
+    if [[ "$_left" == "0" ]]; then
+      log "Инбаунд #$id удалён из панели (x-ui.db)"
+    else
+      err "Инбаунд #$id не удалился из x-ui.db — проверь права/защиту БД"
+    fi
+    [[ "$_xui_was" == true ]] && systemctl start x-ui >/dev/null 2>&1 || true
   fi
 
   nginx_reload || true
