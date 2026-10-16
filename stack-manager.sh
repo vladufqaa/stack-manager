@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -11708,38 +11708,52 @@ update_self() {
   line; echo -e "${B}   ОБНОВЛЕНИЕ СКРИПТА С GITHUB${N}"; line
   # Сравниваем именно запущенный файл, а не безусловно /root/stack-manager.sh:
   # при запуске копии из другого пути старый код ошибочно сообщал «идентичен».
-  local cur="${BASH_SOURCE[0]}" tmp=""
+  local cur="${BASH_SOURCE[0]}" src_url="$STACK_SRC_URL" tmp="" lock="" bakdir="" old_sha="" new_sha="" mode=""
   cur=$(readlink -f "$cur" 2>/dev/null || printf '%s' "$cur")
-  [[ -f "$cur" ]] || cur="/root/stack-manager.sh"
-  tmp="${cur}.new"
-  local src_url="$STACK_SRC_URL"
+  [[ -f "$cur" && ! -L "$cur" ]] || cur="/root/stack-manager.sh"
+  lock="${cur}.update.lock"
+  exec 9>"$lock" || { err "Не удалось открыть lock-файл обновления"; return 1; }
+  flock -n 9 || { err "Обновление уже выполняется другим процессом"; return 1; }
+  tmp=$(mktemp "$(dirname "$cur")/.stack-manager.update.XXXXXX") || { err "Не удалось создать временный файл"; return 1; }
+  trap 'rm -f "$tmp" 2>/dev/null || true; flock -u 9 2>/dev/null || true' RETURN
   ask src_url "Raw-URL скрипта (Enter — сохранённый)" "$src_url" '^https?://'
   log "Качаю: $src_url"
   # raw.githubusercontent кэшируется ~5 минут (Fastly): сразу после пуша можно
   # скачать старую версию и получить ложное «обновление не требуется».
   # ?ts=… меняет ключ кэша → всегда свежий файл. В /root/.stack-src пишем
   # чистый URL (без бастера).
-  local bust_url="${src_url}?ts=$(date +%s)"
-  if ! curl -fsSL --max-time 30 "$bust_url" -o "$tmp"; then
+  local bust_url="${src_url}?ts=$(date +%s%N)"
+  if ! curl -fsSL --retry 3 --retry-delay 1 --max-time 45 "$bust_url" -o "$tmp" || [[ ! -s "$tmp" ]]; then
     err "Не удалось скачать (проверь URL/доступность репозитория)"
     rm -f "$tmp"; return 1
   fi
-  if ! bash -n "$tmp"; then
-    err "Новый файл не проходит bash -n — обновление отменено"
-    rm -f "$tmp"; return 1
+  head -n1 "$tmp" | grep -qE '^#!.*bash' || { err "Загруженный файл не похож на Bash-скрипт"; rm -f "$tmp"; return 1; }
+  bash -n "$tmp" || { err "Новый файл не проходит bash -n — обновление отменено"; rm -f "$tmp"; return 1; }
+  old_sha=$(sha256sum "$cur" | awk '{print $1}')
+  new_sha=$(sha256sum "$tmp" | awk '{print $1}')
+  if [[ "$old_sha" == "$new_sha" ]]; then
+    log "Обновление не требуется — sha256: $new_sha"; rm -f "$tmp"; return 0
   fi
-  if cmp -s "$tmp" "$cur"; then
-    log "Обновление не требуется — файл байт-в-байт идентичен (sha256: $(sha256sum "$tmp" 2>/dev/null | cut -c1-12)…)"
-    rm -f "$tmp"; return 0
-  fi
-  echo "  было:  $(stat -c%s "$cur" 2>/dev/null || echo '?') байт (sha256: $(sha256sum "$cur" 2>/dev/null | cut -c1-12)…)"
-  echo "  стало: $(stat -c%s "$tmp") байт (sha256: $(sha256sum "$tmp" | cut -c1-12)…)"
+  echo "  было:  $old_sha"
+  echo "  стало: $new_sha"
   local yn=false
-  askyn yn "Заменить $cur и перезапустить?" "y"
-  if [[ "$yn" != true ]]; then rm -f "$tmp"; log "Отменено"; return 0; fi
-  mv "$tmp" "$cur" && chmod +x "$cur"
+  askyn yn "Сохранить резервную копию и заменить $cur?" "y"
+  [[ "$yn" == true ]] || { rm -f "$tmp"; log "Отменено"; return 0; }
+  bakdir="$BACKUP_DIR/self-update-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$bakdir" || { err "Не удалось создать каталог отката"; return 1; }
+  mode=$(stat -c '%a' "$cur" 2>/dev/null || echo 700)
+  cp -p "$cur" "$bakdir/stack-manager.sh" || { err "Не удалось сохранить старую версию"; return 1; }
+  printf 'old_sha=%s\nnew_sha=%s\nsource=%s\n' "$old_sha" "$new_sha" "$src_url" > "$bakdir/metadata"
+  sha256sum "$bakdir/stack-manager.sh" > "$bakdir/stack-manager.sh.sha256"; sync
+  mv -f "$tmp" "$cur" || { err "Не удалось атомарно заменить скрипт"; return 1; }
+  chmod "$mode" "$cur" 2>/dev/null || chmod 700 "$cur"; sync
+  if ! bash -n "$cur" || [[ "$(sha256sum "$cur" | awk '{print $1}')" != "$new_sha" ]]; then
+    err "Проверка после замены не пройдена — выполняю откат"
+    cp -p "$bakdir/stack-manager.sh" "$cur"; chmod "$mode" "$cur" 2>/dev/null || true; sync; return 1
+  fi
   printf '%s' "$src_url" > /root/.stack-src && chmod 600 /root/.stack-src
-  log "Обновлено ✓ — перезапускаюсь…"
+  log "Обновлено атомарно ✓ (backup: $bakdir) — перезапускаюсь…"
+  trap - RETURN; flock -u 9 2>/dev/null || true
   exec bash "$cur"
 }
 
@@ -14602,3 +14616,4 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   main_menu
 fi
+
