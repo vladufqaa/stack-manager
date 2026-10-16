@@ -10116,11 +10116,16 @@ change_decoy() {
     # Показываем все созданные скриптом TCP-decoy: Reality любого протокола
     # и XHTTP+TLS, а не только старую категорию VLESS Reality.
     grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$_d_st" || \
-      inbound_is_xhttp_tls "$_d_st" || continue
+      inbound_is_xhttp_tls "$_d_st" || \
+      ! grep -Eqi '"network"[[:space:]]*:[[:space:]]*"tcp".*"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_d_st" || continue
     _d_port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
     _decoy_rows+=("$_d_dom|$_d_id|$_d_port")
     _decoy_row="${#_decoy_rows[@]}"
-    printf "   %s) Reality #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port"
+    if grep -qi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_d_st"; then
+      printf "   %s) VLESS TLS #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port"
+    else
+      printf "   %s) Reality #% -3s — %-30s :%s\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port"
+    fi
   done < <(awk '
     /^map / { inmap=1; next }
     inmap && /^}/ { inmap=0 }
@@ -10145,8 +10150,7 @@ change_decoy() {
     printf "   %s) Hysteria #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_hid" "$_d_dom" "$_hport"
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE port>0 AND lower(protocol) LIKE '%hysteria%' ORDER BY id;" 2>/dev/null || true)
   # CDN-инбаунд не попадает в SNI-map: его decoy обслуживается ORIGIN-доменом
-  # через nginx CDN-фронтенд. Показываем ORIGIN в этом меню отдельно, чтобы
-  # пользователь мог сменить его шаблон так же, как у Reality/Hysteria.
+  # через nginx CDN-фронтенд. Показываем ORIGIN в этом меню отдельно.
   local -a _cdn_decoy_ids=()
   local _cid _cproto _corigin _ccdn _cpath _ctpl _cdport
   cdn_profiles_load
@@ -10157,12 +10161,10 @@ change_decoy() {
     _decoy_row="${#_decoy_rows[@]}"
     printf "   %s) CDN ORIGIN #%-3s — %-30s :%s (decoy=%s)\n" "$((_decoy_row+1))" "$_cid" "$_corigin" "${_cdport:-0}" "${_ctpl:-default}"
   done < <(cat "$CDN_PROFILES" 2>/dev/null)
-  echo "   t) Шаблоны decoy ПО ДОМЕНАМ (каждому домену свой шаблон/свой сайт)"
   echo "   0) Назад"
   local m=""
-  ask m "Объект" "1" '^[0-9]+$|^[tT]$'
+  ask m "Объект" "1" '^[0-9]+$'
   [[ "$m" == "0" ]] && return 0
-  case "$m" in t|T) decoy_templates_by_domain; return $? ;; esac
   if (( m > 1 )); then
     local _ri=$((m-2))
     (( _ri >= 0 && _ri < ${#_decoy_rows[@]} )) || { err "Нет такого объекта"; pause; return 1; }
