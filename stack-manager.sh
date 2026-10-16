@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -11745,7 +11745,14 @@ update_self() {
     err "Не удалось скачать (проверь URL/доступность репозитория)"
     rm -f "$tmp"; return 1
   fi
-  head -n1 "$tmp" | grep -qE '^#!.*bash' || { err "Загруженный файл не похож на Bash-скрипт"; rm -f "$tmp"; return 1; }
+  # GitHub/прокси иногда добавляют CRLF или UTF-8 BOM перед shebang.
+  # Нормализуем только первую строку для проверки, сам загруженный файл не меняем.
+  local _shebang=""
+  _shebang=$(head -n1 "$tmp" | tr -d '\r' | sed $'s/^\357\273\277//')
+  if [[ ! "$_shebang" =~ ^#!.*bash ]]; then
+    err "Загруженный файл не похож на Bash-скрипт (первая строка: ${_shebang:0:80})"
+    rm -f "$tmp"; return 1
+  fi
   bash -n "$tmp" || { err "Новый файл не проходит bash -n — обновление отменено"; rm -f "$tmp"; return 1; }
   old_sha=$(sha256sum "$cur" | awk '{print $1}')
   new_sha=$(sha256sum "$tmp" | awk '{print $1}')
