@@ -5206,12 +5206,28 @@ cert_issue() {
       return 0
     fi
   fi
+  # --- авто-поиск установленного сертификата по SAN (работает даже без флага wildcard) ---
+  # Делать его ДО проверки персональной линии: wildcard должен иметь приоритет
+  # для поддоменов, даже если ранее по ошибке уже выпустили персональный cert.
+  local hit wcdir wcbase
+  hit=$(find_covering_cert "$d") || hit=""
+  if [[ -n "$hit" ]]; then
+    wcdir="${hit%%|*}"; wcbase="${hit#*|}"
+    log "  cert $d: найден установленный сертификат «$(basename "$wcdir")» — используется он"
+    cert_mirror_to_certroot "$wcdir" "$d" >/dev/null 2>&1 || true
+    if [[ -n "$wcbase" ]]; then
+      echo "$wcbase" > "$WILDCARD_STATE" 2>/dev/null || true
+      WILDCARD_DOMAIN="$wcbase"
+      log "  флаг wildcard восстановлен: *.$wcbase"
+    fi
+    return 0
+  fi
   if [[ -f "$dir/fullchain.pem" && -f "$dir/privkey.pem" ]]; then
     log "  cert $d уже установлен — переустановка не нужна"
     return 0
   fi
 
-  # --- авто-поиск установленного сертификата по SAN (работает даже без флага wildcard) ---
+  # --- авто-поиск установленного сертификата по SAN (старый блок оставлен ниже для совместимости) ---
   local hit wcdir wcbase
   hit=$(find_covering_cert "$d") || hit=""
   if [[ -n "$hit" ]]; then
@@ -5410,7 +5426,7 @@ find_covering_cert() {
       fi
       if [[ "$entry" == \** ]]; then
         base="${entry#\*.}"
-        if [[ "$d" == "*.$base" || "$d" == "$base" ]]; then
+        if [[ "$d" == *."$base" || "$d" == "$base" ]]; then
           wcbase="$base"
           echo "${ldir%/}|$wcbase"; return 0
         fi
