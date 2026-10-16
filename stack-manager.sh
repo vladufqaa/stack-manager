@@ -7945,9 +7945,12 @@ configure_sni_for_inbound() {
       while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
       mk_decoy "$tls_port" "$domain" "$tls_cert" "$tls_key" "/var/www/decoy-tls-$id" "$tls_tpl"
       systemctl stop x-ui >/dev/null 2>&1 || true
-      sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":$tls_port}]') WHERE id=$id;" 2>/dev/null || true
+      # LucX сериализует settings.fallbacks строкой в config.json, из-за чего
+      # Xray падает с «cannot unmarshal string». Для LucX оставляем инбаунд
+      # рабочим; HTTPS-decoy создаём отдельно, без несовместимого fallback.
+      sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_remove(settings,'\$.fallbacks') WHERE id=$id;" 2>/dev/null || true
       systemctl start x-ui >/dev/null 2>&1 || true
-      log "  + HTTPS-decoy: $tls_tpl → 127.0.0.1:$tls_port"
+      log "  + HTTPS-decoy: $tls_tpl → 127.0.0.1:$tls_port (без fallback LucX)"
     else
       warn "Серт $domain не найден — HTTPS-decoy не создан"
     fi
