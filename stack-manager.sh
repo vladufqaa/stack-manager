@@ -9030,7 +9030,14 @@ add_inbound() {
       UNHID+=("$_id|$_proto|$_port")
       continue
     fi
-    grep -qE "^\s+\S+\s+inb_${_id}_backend" "$SNI_CONF" 2>/dev/null && continue
+    grep -qE "^[[:space:]]+[^[:space:]]+[[:space:]]+inb_${_id}_backend;[[:space:]]*$" "$SNI_CONF" 2>/dev/null && continue
+    # LucX sidecar-инбаунды должны скрываться автоматически сразу после
+    # создания: не показываем пользователю повторное окно «Спрятать за 443?».
+    if [[ "$_proto" == "naive" || "$_proto" == "anytls" || "$_proto" == "trusttunnel" || "$_proto" == "trust-tunnel" ]]; then
+      local _side_pd="${PANEL_DOMAIN:-$(xui_get subDomain 2>/dev/null || true)}"
+      configure_sni_for_inbound "$_id" "$_proto" "$_port" "$_side_pd" >/dev/null 2>&1 || true
+      grep -qE "^[[:space:]]+[^[:space:]]+[[:space:]]+inb_${_id}_backend;[[:space:]]*$" "$SNI_CONF" 2>/dev/null && continue
+    fi
     # CDN-инбаунд спрятан через cdn_frontend (nginx TLS), а не inb_N — не «непрятанный»
     cdn_profiles_load
     [[ " ${CDN_PROFILE_IDS[*]:-} " == *" $_id "* ]] && continue
