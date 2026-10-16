@@ -14190,7 +14190,9 @@ fast_menu_header() {
   line
   printf "  %-18s %-12s | %-18s %-12s\n" "nginx" "$ngx" "x-ui" "$xui"
   printf "  %-18s %-12s | %-18s %-12s\n" "AdGuard" "$adg" "fail2ban" "$f2b"
-  printf "  %-18s %-12s | %-18s %-12s\n" "UFW" "$ufw_state" "inbounds" "${nb:-0} active"
+  local inbound_label="—"
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] && inbound_label="${nb:-0} active"
+  printf "  %-18s %-12s | %-18s %-12s\n" "UFW" "$ufw_state" "inbounds" "$inbound_label"
   line
   printf "  ${D}%-56s${N}\n" "Быстрый переход: 1–7 разделы | 0 выход | аудит: раздел 6"
   line
