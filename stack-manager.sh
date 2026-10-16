@@ -4307,16 +4307,34 @@ cert_lines_load() {
       cert_lines_save
       return 0
     fi
-    # Старые установки режима B могли не иметь файлов линий: создаём линии
-    # из доменов списка A, распределив их через cert_line_for.
+    # Старые установки режима B могли не иметь служебных файлов линий:
+    # восстанавливаем их по существующим certbot live-каталогам. Выбор «4»
+    # в мастере означает personal+B, а не номер линии — линией является имя
+    # сертификата (например vladufqaa.ru или all.example.net).
+    local _lf _ln
+    for _lf in /etc/letsencrypt/live/*/; do
+      [[ -d "$_lf" ]] || continue
+      _ln="$(basename "${_lf%/}")"
+      [[ "$_ln" == "README" ]] && continue
+      cert_line_name_valid "$_ln" || continue
+      [[ " ${CERT_LINES[*]} " == *" $_ln "* ]] && continue
+      CERT_LINES+=("$_ln")
+      local _df; _df="$(cert_line_file "$_ln")"
+      [[ -s "$_df" ]] || printf '%s\n' "$_ln" > "$_df"
+    done
+    # Также подхватываем старый общий список, если certbot-каталоги были
+    # переименованы или очищены после выпуска.
     if [[ -s "$CERT_DOMAINS_FILE" ]]; then
       local _d _line
       while IFS= read -r _d; do
         _d="$(printf '%s' "$_d" | tr -d '[:space:]')"; [[ -z "$_d" ]] && continue
-        _line=$(cert_line_for "$_d") || continue
-        cert_lines_add "$_line"; cert_line_domains_add "$_line" "$_d"
+        _line="$_d"
+        [[ " ${CERT_LINES[*]} " == *" $_line "* ]] || CERT_LINES+=("$_line")
+        local _df2; _df2="$(cert_line_file "$_line")"
+        [[ -s "$_df2" ]] || printf '%s\n' "$_d" > "$_df2"
       done < "$CERT_DOMAINS_FILE"
     fi
+    [[ ${#CERT_LINES[@]} -gt 0 ]] && cert_lines_save
     return 0
   fi
   local l
