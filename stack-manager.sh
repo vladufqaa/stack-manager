@@ -2787,7 +2787,7 @@ create_inbounds_menu() {
         break
       done
       sni_domain="$d_new"
-      if [[ "$security" == "tls" && ( "$proto" == "vless" && "$transport" == "xhttp" ) ]]; then
+      if [[ "$security" == "tls" && "$proto" == "vless" ]]; then
         decoy_template_choose_impl rdtpl "Decoy-заглушка для ${sni_domain:-${dom:-$name}} (страница на этом домене)" "$(decoy_tpl_current "${sni_domain:-${dom:-}}")"
         decoy_tpl_store_set "${sni_domain:-${dom:-}}" "${rdtpl:-$(decoy_tpl_for "${sni_domain:-${dom:-}}")}" >/dev/null 2>&1 || true
       elif [[ "$security" == "reality" && "$rmode" != "1" ]]; then
@@ -7933,25 +7933,23 @@ configure_sni_for_inbound() {
     log "  + decoy (Reality) на порту $tls_port ($pre_tpl)"
   fi
 
-  # vless/trojan + TLS (не reality): спросить шаблон страницы до настройки
-  # fallback. Для Trojan шаблон применяется к HTTP-backend, а не к протоколу.
+  # vless/trojan + TLS (не Reality): браузерный fallback ведёт в HTTPS-decoy
+  # из выбранного списка, а не на произвольный сайт :80.
   if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$stream"; then
-    local has_fb=""
-    has_fb=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-    if [[ -z "$has_fb" || "$has_fb" == "[]" || "$has_fb" == "null" ]]; then
-      # заглушка включается по желанию (в не-TTY — по умолчанию да)
-      local want_fb=true
-      [[ -t 0 ]] && askyn want_fb "Заглушка для #$id ($domain): пробой браузером → сайт на :80?" "y"
-      if [[ "$want_fb" == true ]]; then
-        systemctl stop x-ui >/dev/null 2>&1 || true
-        if sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":80}]') WHERE id=$id;" 2>/dev/null; then
-          [[ -n "${pre_tpl:-}" ]] && log "  + шаблон decoy: $pre_tpl"
-          log "  + заглушка vless/tls: fallback → 127.0.0.1:80 (пробой браузером увидит сайт)"
-        fi
-        systemctl start x-ui >/dev/null 2>&1 || true
-      else
-        log "  заглушка vless/tls отключена по выбору"
-      fi
+    local tls_tpl="${pre_tpl:-default}" tls_cp tls_cert tls_key tls_port
+    tls_cp=$(cert_paths "$domain" 2>/dev/null || true)
+    [[ -z "$tls_cp" ]] && tls_cp="$(xui_get webCertFile 2>/dev/null || true) $(xui_get webKeyFile 2>/dev/null || true)"
+    tls_cert="${tls_cp%% *}"; tls_key="${tls_cp##* }"
+    if [[ -f "$tls_cert" && -f "$tls_key" ]]; then
+      tls_port=$((47000 + id))
+      while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
+      mk_decoy "$tls_port" "$domain" "$tls_cert" "$tls_key" "/var/www/decoy-tls-$id" "$tls_tpl"
+      systemctl stop x-ui >/dev/null 2>&1 || true
+      sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_set(settings,'\$.fallbacks','[{\"dest\":$tls_port}]') WHERE id=$id;" 2>/dev/null || true
+      systemctl start x-ui >/dev/null 2>&1 || true
+      log "  + HTTPS-decoy: $tls_tpl → 127.0.0.1:$tls_port"
+    else
+      warn "Серт $domain не найден — HTTPS-decoy не создан"
     fi
   fi
 
