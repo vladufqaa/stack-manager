@@ -2402,14 +2402,14 @@ EOF
       # tunnel-инбаунд LucX (trusttunnel_inbound.go): hostname+cert обязательны,
       # клиенты → HMAC-креды из authSeed (панель покажет их и в share-ссылках)
       settings_json=$(cat <<EOF
-{"remark":"trusttunnel-$port","hostname":"$sn","listen":"","ipv6":false,"certFile":"$cert","keyFile":"$key","clientDns":"1.1.1.1","upstreamProtocol":"http2","routeThroughXray":false,"routeXrayPort":0,"outboundTag":"","metricsPort":0,"listenPreset":"fast","clientRandomPrefix":"$(gen_hex 4)/ffffffff","authSeed":"$(gen_hex 32)","clients":[]}
+{"remark":"trusttunnel-$port","hostname":"$sn","listen":"127.0.0.1","port":$port,"ipv6":false,"certFile":"$cert","keyFile":"$key","clientDns":"1.1.1.1","upstreamProtocol":"http2","routeThroughXray":false,"routeXrayPort":0,"outboundTag":"","metricsPort":0,"listenPreset":"fast","clientRandomPrefix":"$(gen_hex 4)/ffffffff","authSeed":"$(gen_hex 32)","clients":[]}
 EOF
 ) ;;
     naive|naiveproxy)
       # tunnel-инбаунд LucX (naive_inbound.go): caddy forward_proxy за nginx 443.
       # СЕРВИСНЫЙ логин/пароль генерируем сразу + authSeed для клиентских пар.
       settings_json=$(cat <<EOF
-{"remark":"naive-$port","listen":"127.0.0.1","domain":"$sn","useAcme":false,"acmeEmail":"","certFile":"$cert","keyFile":"$key","authUser":"$(gen_hex 4)","authPass":"$(gen_b64)","enableH3":false,"probeResistance":false,"logLevel":"WARN","extraArgs":"","routeThroughXray":false,"routeXrayPort":0,"outboundTag":"","useRawConfig":false,"rawConfig":"","behindCover":false,"hideOn443":false,"authSeed":"$(gen_hex 32)","clients":[{"email":"user","enable":true}]}
+{"remark":"naive-$port","listen":"127.0.0.1","port":$port,"domain":"$sn","useAcme":false,"acmeEmail":"","certFile":"$cert","keyFile":"$key","authUser":"$(gen_hex 4)","authPass":"$(gen_b64)","enableH3":false,"probeResistance":false,"logLevel":"WARN","extraArgs":"","routeThroughXray":false,"routeXrayPort":0,"outboundTag":"","useRawConfig":false,"rawConfig":"","behindCover":false,"hideOn443":false,"authSeed":"$(gen_hex 32)","clients":[{"email":"user","enable":true}]}
 EOF
 ) ;;
     hysteria)
@@ -8756,14 +8756,14 @@ tunnel_inbound_fill() {
   local new_settings
   case "$proto" in
     naive)
-      upd+=",'\$.authUser','$cur_user','\$.authPass','$cur_pass','\$.useAcme',json('false'),'\$.behindCover',json('false'),'\$.hideOn443',json('false'),'\$.routeThroughXray',json('false')"
+      upd+=",'\$.authUser','$cur_user','\$.authPass','$cur_pass','\$.port',$port,'\$.useAcme',json('false'),'\$.behindCover',json('false'),'\$.hideOn443',json('false'),'\$.routeThroughXray',json('false')"
       [[ -z "$cur_clients" || "$cur_clients" == "null" ]] && upd+=",'\$.clients',json('[{\"email\":\"user\",\"enable\":true}]')"
       ;;
     anytls)
       upd+=",'\$.password','$cur_pw','\$.enabled',json('true'),'\$.port',$port"
       ;;
     trusttunnel|trust-tunnel)
-      upd+=",'\$.clientRandomPrefix','$cur_prefix','\$.upstreamProtocol','http2','\$.listenPreset','fast','\$.clientDns',COALESCE(json_extract(settings,'\$.clientDns'),'1.1.1.1'),'\$.routeThroughXray',json('false')"
+      upd+=",'\$.port',$port,'\$.clientRandomPrefix','$cur_prefix','\$.upstreamProtocol','http2','\$.listenPreset','fast','\$.clientDns',COALESCE(json_extract(settings,'\$.clientDns'),'1.1.1.1'),'\$.routeThroughXray',json('false')"
       [[ -z "$cur_clients" || "$cur_clients" == "null" ]] && upd+=",'\$.clients',json('[{\"email\":\"user\",\"enable\":true}]')"
       ;;
   esac
