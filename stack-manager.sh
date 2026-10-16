@@ -2390,7 +2390,7 @@ EOF
       # tunnel-инбаунд LucX (internal/lucx/tunnel/anytls_inbound.go):
       # панель запускает anytls-server, пароль общий на порт
       settings_json=$(cat <<EOF
-{"remark":"anytls-$port","enabled":true,"port":$port,"password":"$(gen_b64)","sni":"$sn","certFile":"$cert","keyFile":"$key"}
+{"remark":"anytls-$port","enabled":true,"port":$port,"listen":"127.0.0.1","password":"$(gen_b64)","sni":"$sn","certFile":"$cert","keyFile":"$key"}
 EOF
 ) ;;
     trusttunnel|trust-tunnel)
@@ -8651,6 +8651,9 @@ tunnel_inbound_fill() {
 
   # текущие значения — генерируем только пустые
   local cur_user="" cur_pass="" cur_seed="" cur_pw="" cur_prefix="" cur_clients=""
+  # AnyTLS-sidecar должен слушать только локальный backend: снаружи доступен
+  # через nginx SNI на 443. Не оставляем старый/публичный listen.
+  [[ "$proto" == "anytls" ]] && sqlite3 "$XUI_DB" "UPDATE inbounds SET listen='127.0.0.1' WHERE id=$id;" 2>/dev/null || true
   cur_user=$(sqlite3 "$XUI_DB" "SELECT json_extract(settings,'\$.authUser') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
   cur_pass=$(sqlite3 "$XUI_DB" "SELECT json_extract(settings,'\$.authPass') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
   cur_seed=$(sqlite3 "$XUI_DB" "SELECT json_extract(settings,'\$.authSeed') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
