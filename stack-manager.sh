@@ -223,7 +223,7 @@ DECOY_TEMPLATES=(
 # mtproto из скрипта не создаём — в LucX его роль играет tproxy (TG WEB-PROXY).
 RECOMMENDED_INBOUNDS=(
   "VLESS TCP REALITY|vless|tcp|reality|xtls-rprx-vision|tcp"
-  "VLESS XHTTP TLS (CDN/decoy)|vless|xhttp|tls||tcp"
+  "VLESS XHTTP (через CDN)|vless|xhttp|tls||tcp"
   "VLESS XHTTP REALITY|vless|xhttp|reality||tcp"
   "NAIVE (TLS, за 443)|naive|naive|tls|-|tcp"
   "TRUSTTUNNEL (TLS, за 443)|trusttunnel|trusttunnel|tls|-|tcp"
@@ -14318,7 +14318,12 @@ auto_full_setup() {
     CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""
     local _is_cdn=false
     if [[ "$transport" == "xhttp" && "$security" != "reality" ]]; then
-      if [[ -t 0 ]]; then
+      # Пункт «VLESS XHTTP (через CDN)» — это фиксированный CDN-профиль.
+      # Не спрашиваем повторно «работать ли через CDN»: здесь CDN является
+      # частью схемы, TLS завершается nginx, а Xray слушает локальный backend.
+      if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
+        _is_cdn=true
+      elif [[ -t 0 ]]; then
         local _cdn_ans=""
         echo
         askyn _cdn_ans "Это соединение будет работать через CDN (nginx TLS, инбаунд без security)?" "n"
