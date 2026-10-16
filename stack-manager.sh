@@ -14497,7 +14497,7 @@ auto_full_setup() {
     local id idproto idport dom stream_s
     while IFS='|' read -r id idproto idport stream_s; do
       [[ -z "$id" ]] && continue
-      is_udp_proto "$idproto" && continue
+       is_udp_proto "$idproto" && continue       # UDP — без вопросов в initial_setup`n       [[ "$idproto" == "tproxy" ]] && continue # TG web-proxy настраивается своим SNI-механизмом
        [[ "" == "tproxy" ]] && continue # TG web-proxy настраивается своим SNI-механизмом       # UDP — без вопросов в initial_setup
       # уже привязан к SNI — initial_setup вопросов по нему не задаёт, строк не пишем
       grep -Eq "^[[:space:]]*[^[:space:]]+[[:space:]]+inb_${id}_backend" "$SNI_CONF" 2>/dev/null && continue
@@ -14669,5 +14669,6 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   main_menu
 fi
+
 
 
