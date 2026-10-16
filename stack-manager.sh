@@ -2674,8 +2674,12 @@ create_inbounds_menu() {
   echo
   echo "  0) Отмена"
   echo
-  echo "Пример: 1 2    (VLESS TCP Reality, VLESS XHTTP Reality)"
-  [[ "$flavor" == "lucx" ]] && echo "LucX sidecar-протоколы (naive/anytls/trusttunnel/tproxy) доступны в этом меню и в UI панели."
+  if [[ "$flavor" == "lucx" ]]; then
+    echo "Пример: 1 2    (VLESS TCP Reality, VLESS XHTTP Reality)"
+    echo "LucX sidecar-протоколы (naive/anytls/trusttunnel/tproxy) доступны в этом меню и в UI панели."
+  else
+    echo "Пример: 1 2    (из показанных протоколов VLESS или Hysteria2)"
+  fi
   echo
 
   local choices=""
