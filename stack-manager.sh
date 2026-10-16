@@ -5904,20 +5904,29 @@ cert_audit() {
     local used_in=""
     local in_db=0 in_nginx=0 in_sni=0 in_domains=0
 
-    # в БД?
-    local refs
+    # в БД? Сертификаты sidecar-инбаундов лежат в JSON settings,
+    # поэтому ищем не только в таблице settings панели.
+    local refs refs_json
     refs=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
       "SELECT COUNT(*) FROM settings WHERE value LIKE '%/live/$name/%';" 2>/dev/null || echo 0)
-    [[ "$refs" != "0" ]] && { in_db=1; used_in+=" БД"; }
+    refs_json=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+      "SELECT COUNT(*) FROM inbounds WHERE settings LIKE '%/live/$name/%' OR stream_settings LIKE '%/live/$name/%';" 2>/dev/null || echo 0)
+    if [[ "$refs" != "0" || "$refs_json" != "0" ]]; then
+      in_db=1; used_in+=" БД"
+    fi
 
     # в nginx?
     if [[ -f "$STACK_CONF" ]] && grep -q "/live/$name/" "$STACK_CONF" 2>/dev/null; then
       in_nginx=1; used_in+=" nginx"
     fi
 
-    # в SNI-карте? (по имени как домен)
-    if [[ -f "$SNI_CONF" ]] && grep -qE "^\s+$name\s+" "$SNI_CONF" 2>/dev/null; then
+    # в SNI-карте? (по имени как домен). Для wildcard-пути cert-name
+    # может отличаться от SNI-домена, поэтому JSON/БД проверяются отдельно.
+    if [[ -f "$SNI_CONF" ]] && grep -qE "^[[:space:]]+$name[[:space:]]+" "$SNI_CONF" 2>/dev/null; then
       in_sni=1; used_in+=" SNI"
+    fi
+    if [[ "$in_db" == 1 && "$used_in" != *"SNI"* ]]; then
+      : # уже отмечено через settings JSON
     fi
 
     # в stack-domains.txt?
