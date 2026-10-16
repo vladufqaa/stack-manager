@@ -14241,6 +14241,10 @@ auto_full_setup() {
     le_email_save "$EMAIL" || return 1
   fi
 
+  # Сначала выбираем тип сертификатов для домена панели и выпускаем его
+  # в штатном initial_setup; выбор не должен появляться посреди мастера инбаундов.
+  cert_type_ask force
+
   # --- 4) ИНБАУНДЫ: какие ставить? (Enter — весь доступный набор)
   echo -e "${B}Выберите доступные для этой панели инбаунды:${N}"
   local i=1 entry entry_proto
@@ -14283,8 +14287,7 @@ auto_full_setup() {
     ask vk "VK call hashes для qwdtt/csqtt (через запятую, БЕЗ пробелов; Enter — пропустить)" "" '^[a-zA-Z0-9,_-]*$'
   fi
 
-  # --- 2b) Тип сертификатов — единый явный выбор установки.
-  cert_type_ask force
+  # Тип сертификатов уже выбран до мастера инбаундов — здесь повторно не спрашиваем.
 
   # --- 3) SNI-домены для TLS-инбаундов (Enter — префикс по умолчанию)
   local -A PREFIX=( [vless-tcp]="r" [vless-xhttp]="rx" [naive-naive]="n" [anytls-anytls]="at" [trusttunnel-trusttunnel]="tt" [hysteria-hysteria]="h" )
