@@ -12673,9 +12673,10 @@ panel_manage() {
   case "$act" in
     1) panel_upgrade_lucx; pause ;;
     2)
-      local go=""
-      askyn go "ТОЧНО удалить панель со всеми данными?" "n"
-      [[ "$go" == true ]] && { uninstall_panel_lucx; pause; }
+      # Подтверждение выполняется внутри uninstall_panel_lucx после показа
+      # точного списка удаляемых файлов и создания бэкапа.
+      uninstall_panel_lucx
+      pause
       ;;
   esac
   return 0
