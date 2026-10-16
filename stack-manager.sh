@@ -6202,7 +6202,10 @@ sni_map_add() {
   ' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF"
   sni_conf_repair_map
 }
-sni_map_remove() { sed -i "/^\s*$1\s\+/d" "$SNI_CONF" 2>/dev/null || true; }
+sni_map_remove() { sed -i "/^[[:space:]]*${1}[[:space:]]\+/d" "$SNI_CONF" 2>/dev/null || true; }
+# Удаление по backend надёжнее доменного имени: чистит SNI даже если строка
+# была отформатирована нестандартно или домен не прочитался из карты.
+sni_map_remove_backend() { sed -i "/^[[:space:]]*[A-Za-z0-9.-][A-Za-z0-9.-]*[[:space:]]\+${1};[[:space:]]*$/d" "$SNI_CONF" 2>/dev/null || true; }
 
 nginx_reload() {
   if ! command -v nginx >/dev/null 2>&1; then
@@ -9229,9 +9232,9 @@ remove_inbound() {
   fi
 
   # 1) SNI-привязка
-  if [[ "$do_sni" == true && -n "$dom" ]]; then
-    sni_map_remove "$dom"
-    [[ -n "$be" && "$be" != "panel_backend" ]] && sni_upstream_remove "$be"
+  if [[ "$do_sni" == true ]]; then
+    [[ -n "$dom" ]] && sni_map_remove "$dom"
+    [[ -n "$be" && "$be" != "panel_backend" ]] && { sni_map_remove_backend "$be"; sni_upstream_remove "$be"; }
     unset "SNI_USED[$dom]" 2>/dev/null || true
     stack_del_decoy "$dom"   # decoy-блок в stack.conf
     local _qd; _qd=$(sql_escape "$dom")
