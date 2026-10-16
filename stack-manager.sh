@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -7472,6 +7472,14 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   # --- серт для ORIGIN: TLS терминирует nginx ---
   local cp_line="" cert="" key=""
   cp_line=$(cert_paths "$origin_dom") || true
+  # Для ORIGIN=домена панели используем уже настроенный сертификат панели.
+  # cert_paths может не видеть его из-за разных записей в LucX, поэтому
+  # берём пару путей непосредственно из webDomain/settings.
+  if [[ -z "$cp_line" && "$origin_dom" == "${PANEL_DOMAIN:-}" ]]; then
+    cert=$(xui_get webCertFile 2>/dev/null || true)
+    key=$(xui_get webKeyFile 2>/dev/null || true)
+    [[ -f "$cert" && -f "$key" ]] && cp_line="$cert $key"
+  fi
   if [[ -z "$cp_line" ]]; then
     cert_issue "$origin_dom" >/dev/null 2>&1 || true
     cp_line=$(cert_paths "$origin_dom") || true
@@ -7481,6 +7489,8 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
     warn "  Выпиши серт (Сертификаты → обновить) и повтори пункт; инбаунд не менялся."
     return 1
   fi
+  [[ -z "$cert" ]] && cert="${cp_line%% *}"
+  [[ -z "$key" ]] && key="${cp_line##* }"
   cert="${cp_line%% *}"; key="${cp_line##* }"
 
   # --- правки БД — только при остановленной панели ---
