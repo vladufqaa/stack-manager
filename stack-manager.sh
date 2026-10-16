@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -10356,7 +10356,13 @@ backup_config() {
     /etc/fail2ban/filter.d/decoy-login.conf
   )
   [[ -n "$ADG_CONFIG" && -f "$ADG_CONFIG" ]] && files+=("$ADG_CONFIG")
-  tar czf "$file" "${files[@]}" 2>/dev/null || true
+  if ! tar czf "$file" "${files[@]}" 2>/dev/null; then
+    rm -f "$file"
+    err "Бэкап не создан: tar завершился с ошибкой"
+    pause
+    return 1
+  fi
+  sha256sum "$file" > "$file.sha256" 2>/dev/null || true
   log "Бэкап: $file"
   ls -lh "$file" 2>/dev/null || true
   pause
@@ -11747,8 +11753,9 @@ update_self() {
   sha256sum "$bakdir/stack-manager.sh" > "$bakdir/stack-manager.sh.sha256"; sync
   mv -f "$tmp" "$cur" || { err "Не удалось атомарно заменить скрипт"; return 1; }
   chmod "$mode" "$cur" 2>/dev/null || chmod 700 "$cur"; sync
-  if ! bash -n "$cur" || [[ "$(sha256sum "$cur" | awk '{print $1}')" != "$new_sha" ]]; then
+  if ! bash -n "$cur" || [[ "$(sha256sum "$cur" | awk '{print $1}')" != "$new_sha" ]] || ! bash "$cur" --check >/tmp/stack-manager-update-check.log 2>&1; then
     err "Проверка после замены не пройдена — выполняю откат"
+    tail -20 /tmp/stack-manager-update-check.log 2>/dev/null || true
     cp -p "$bakdir/stack-manager.sh" "$cur"; chmod "$mode" "$cur" 2>/dev/null || true; sync; return 1
   fi
   printf '%s' "$src_url" > /root/.stack-src && chmod 600 /root/.stack-src
@@ -12300,11 +12307,14 @@ PYPORTS
     local dbsize nbak nauto nman fresh
     dbsize=$(du -h "$XUI_DB" 2>/dev/null | awk '{print $1}')
     nauto=$(ls -1dt "$BACKUP_DIR"/auto-* 2>/dev/null | wc -l)              # автобэкап (старт скрипта)
-    nman=$(ls -1 "$BACKUP_DIR"/stack-backup-*.tar.gz 2>/dev/null | wc -l)  # ручные (п.8)
-    nbak=$((nauto + nman))
-    fresh=$(ls -1dt "$BACKUP_DIR"/auto-* "$BACKUP_DIR"/stack-backup-*.tar.gz 2>/dev/null | head -1 | xargs -r basename)
-    ok "x-ui.db: ${dbsize:-?} · бэкапов: $nbak (авто:$nauto/руками:$nman; свежий: $fresh)"
-    (( nbak == 0 )) && warn2 "бэкапов нет — п.8"
+    nman=$(ls -1 "$BACKUP_DIR"/stack-backup-*.tar.gz 2>/dev/null | wc -l)
+    local nself npre
+    nself=$(ls -1d "$BACKUP_DIR"/self-update-* 2>/dev/null | wc -l)
+    npre=$(ls -1d "$BACKUP_DIR"/pre-install-* 2>/dev/null | grep -v '\.tar\.gz$' | wc -l)
+    nbak=$((nauto + nman + nself + npre))
+    fresh=$(ls -1dt "$BACKUP_DIR"/auto-* "$BACKUP_DIR"/stack-backup-*.tar.gz "$BACKUP_DIR"/self-update-* "$BACKUP_DIR"/pre-install-* 2>/dev/null | head -1 | xargs -r basename)
+    ok "x-ui.db: ${dbsize:-?} · бэкапов: $nbak (авто:$nauto/ручные:$nman/self-update:$nself/pre-install:$npre; свежий: $fresh)"
+    (( nbak == 0 )) && warn2 "резервных копий нет — раздел 5 → Бэкапы и откат"
   fi
   if [[ -f /var/run/reboot-required ]]; then
     bad "система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро/библиотеки)"
@@ -12344,8 +12354,12 @@ PYDOMS
   local d a_ip
   while IFS= read -r d; do
     [[ -z "$d" ]] && continue
-    a_ip=$(dig +short A "$d" 2>/dev/null | tail -1)
-    if [[ -n "$a_ip" && "$a_ip" == "$srv_ip" ]]; then ok "$d → $a_ip ✓"
+    a_ip=$(dig +short A "$d" @1.1.1.1 2>/dev/null | tail -1)
+    [[ -z "$a_ip" ]] && a_ip=$(dig +short A "$d" @8.8.8.8 2>/dev/null | tail -1)
+    local aaaa_ip
+    aaaa_ip=$(dig +short AAAA "$d" @1.1.1.1 2>/dev/null | tail -1)
+    if [[ -n "$a_ip" && "$a_ip" == "$srv_ip" ]]; then
+      [[ -n "$aaaa_ip" ]] && ok "$d → A $a_ip ✓; AAAA $aaaa_ip (dual-stack)" || ok "$d → A $a_ip ✓"
     elif [[ -z "$a_ip" ]]; then warn2 "$d: A-запись не резолвится"
     else warn2 "$d → $a_ip, а сервер: $srv_ip"; fi
   done <<<"$doms"
@@ -12354,7 +12368,7 @@ PYDOMS
   if systemctl is-enabled --quiet stack-heal.timer 2>/dev/null; then
     ok "самолечение включено (каждые 2 мин); последний лог: $(tail -1 /root/stack-heal.log 2>/dev/null | head -c 80)"
     if db_protect_state; then
-      ok "защита БД: серты/dest/hostname защищены от перезаписи панелью (п.25)"
+      ok "защита БД: серты/dest/hostname защищены от перезаписи панелью"
     else
       warn "защита БД выключена — панель может затирать серты/dest при правках (включается в разделе «Заморозка самолечения»)"
     fi
