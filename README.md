@@ -36,18 +36,9 @@
 
 Stack Manager — это управляющий слой над LucX/x-ui, Xray и nginx. Он не заменяет панель, а приводит связанные конфигурации к согласованному состоянию:
 
-```text
-                         ┌──────────────┐
-Client ── TLS/SNI :443 ─▶│ nginx stream │
-                         └──────┬───────┘
-              ┌──────────────────┼──────────────────┐
-              ▼                  ▼                  ▼
-        LucX/x-ui            Xray inbounds       CDN frontend
-        panel/API             Reality/TLS/XHTTP   ORIGIN + decoy
-              └──────────────────┬──────────────────┘
-                                 ▼
-                      backup · audit · repair
-```
+<p align="center">
+  <img src="assets/architecture.svg" alt="Архитектура Stack Manager" width="100%"/>
+</p>
 
 Ключевой принцип: сначала проверка, затем изменение. Read-only-аудит не меняет сервер и показывает рассогласования между SQLite, nginx, SNI, CDN-профилями, decoy и сертификатами.
 
@@ -66,15 +57,7 @@ Client ── TLS/SNI :443 ─▶│ nginx stream │
 
 `stack-manager.sh` объединяет сервисы на сервере и маршрутизирует TCP-соединения по SNI:
 
-```text
-Клиент ── TLS/SNI ──► nginx :443 ──┬── панель LucX/x-ui
-                                    ├── подписки
-                                    ├── AdGuard Home / DoH
-                                    ├── Reality-инбаунды
-                                    ├── XHTTP + TLS / CDN origin
-                                    ├── TCP-decoy
-                                    └── Hysteria HTTPS-decoy
-```
+Маршрут трафика и компоненты подробно показаны на схеме выше. Stack Manager управляет не только входящими соединениями, но и связанными артефактами: SQLite, nginx, SNI-map, CDN-профилями, сертификатами и decoy.
 
 По умолчанию наружу публикуются только необходимые порты. TCP-сервисы могут работать за `443`, а UDP-протоколы проверяются отдельно и не маскируются под TCP.
 

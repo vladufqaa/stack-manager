@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+<title id="title">Stack Manager architecture</title><desc id="desc">Architecture of the Stack Manager proxy orchestrator</desc>
+<defs>
+ <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#07111f"/><stop offset="1" stop-color="#172554"/></linearGradient>
+ <linearGradient id="cyan"><stop stop-color="#67e8f9"/><stop offset="1" stop-color="#38bdf8"/></linearGradient>
+ <linearGradient id="violet"><stop stop-color="#c4b5fd"/><stop offset="1" stop-color="#818cf8"/></linearGradient>
+ <filter id="shadow"><feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#020617" flood-opacity=".45"/></filter>
+ <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0 9 3 0 6Z" fill="#67e8f9"/></marker>
+ <style>
+ .h{font:700 24px Arial,sans-serif;fill:#f8fafc}.s{font:500 15px Arial,sans-serif;fill:#bae6fd}.tiny{font:600 13px Arial,sans-serif;fill:#cbd5e1}.box{stroke-width:2}.line{stroke:#67e8f9;stroke-width:3;fill:none;marker-end:url(#arrow)}
+ </style>
+</defs>
+<rect width="1200" height="760" rx="30" fill="url(#bg)"/>
+<text x="60" y="60" class="h" font-size="30">STACK MANAGER · PROXY ORCHESTRATOR</text>
+<text x="60" y="88" class="s">SNI routing · protocol lifecycle · CDN/XHTTP · audit &amp; repair</text>
+<!-- client -->
+<g filter="url(#shadow)"><rect x="60" y="160" width="250" height="125" rx="18" fill="#102a43" stroke="#38bdf8" class="box"/><text x="185" y="205" text-anchor="middle" class="h">CLIENTS</text><text x="185" y="238" text-anchor="middle" class="s">TLS / SNI · TCP / UDP</text><text x="185" y="263" text-anchor="middle" class="tiny">one public entry: :443</text></g>
+<!-- ingress -->
+<g filter="url(#shadow)"><rect x="410" y="145" width="380" height="155" rx="20" fill="#12304a" stroke="url(#cyan)" class="box"/><text x="600" y="190" text-anchor="middle" class="h">NGINX EDGE</text><text x="600" y="225" text-anchor="middle" class="s">stream SNI router · TLS frontend</text><text x="600" y="254" text-anchor="middle" class="tiny">maps domains to protocol backends</text></g>
+<path d="M310 222h95" class="line"/><text x="332" y="207" class="tiny">443</text>
+<!-- branches -->
+<path d="M600 300v55M600 355H240v55M600 355H600v55M600 355h360v55" class="line"/>
+<!-- cards -->
+<g filter="url(#shadow)"><rect x="70" y="415" width="340" height="145" rx="18" fill="#172554" stroke="#818cf8" class="box"/><text x="240" y="455" text-anchor="middle" class="h">LUСX / X-UI</text><text x="240" y="488" text-anchor="middle" class="s">panel · users · SQLite</text><text x="240" y="520" text-anchor="middle" class="tiny">inbound lifecycle &amp; subscriptions</text></g>
+<g filter="url(#shadow)"><rect x="430" y="415" width="340" height="145" rx="18" fill="#103b46" stroke="#67e8f9" class="box"/><text x="600" y="455" text-anchor="middle" class="h">XRAY CORE</text><text x="600" y="488" text-anchor="middle" class="s">VLESS · Reality · XHTTP · TLS</text><text x="600" y="520" text-anchor="middle" class="tiny">local protocol backends</text></g>
+<g filter="url(#shadow)"><rect x="790" y="415" width="340" height="145" rx="18" fill="#312e5f" stroke="#c4b5fd" class="box"/><text x="960" y="455" text-anchor="middle" class="h">CDN FRONTEND</text><text x="960" y="488" text-anchor="middle" class="s">ORIGIN · path · decoy</text><text x="960" y="520" text-anchor="middle" class="tiny">nginx TLS → XHTTP backend</text></g>
+<!-- control -->
+<path d="M240 560v80h720v-80" class="line"/>
+<g filter="url(#shadow)"><rect x="190" y="640" width="820" height="75" rx="18" fill="#0f172a" stroke="#38bdf8" class="box"/><text x="600" y="672" text-anchor="middle" class="h" font-size="20">CONTROL PLANE</text><text x="600" y="697" text-anchor="middle" class="s">backups · certificates · UFW · health/drift audit · repair</text></g>
+</svg>
