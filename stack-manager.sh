@@ -7901,8 +7901,16 @@ configure_sni_for_inbound() {
     cdn_existing_menu "$id"
     return 0
   fi
-  if xhttp_cdn_setup "$id" "$proto" "$port"; then
-    return 0
+  # CDN спрашиваем только у XHTTP без TLS: это отдельный CDN-режим.
+  # XHTTP+TLS из меню — обычный TLS-инбаунд и не должен неожиданно
+  # предлагать CDN; CDN-вариант выбирается отдельным пунктом.
+  local _xhttp_stream=""
+  _xhttp_stream=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  if grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$_xhttp_stream" && \
+     grep -Eqi '"security"[[:space:]]*:[[:space:]]*"none"' <<<"$_xhttp_stream"; then
+    if xhttp_cdn_setup "$id" "$proto" "$port"; then
+      return 0
+    fi
   fi
   # При ручной настройке не-CDN XHTTP+TLS продолжаем обычную ветку,
   # чтобы спросить SNI и шаблон decoy, а не завершать настройку молча.
