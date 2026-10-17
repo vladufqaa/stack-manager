@@ -14713,6 +14713,10 @@ auto_full_setup() {
        if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
          # Фиксированный пункт означает CDN без дополнительного y/n.
          _is_cdn=true
+       elif [[ "$name" == "VLESS XHTTP TLS" ]]; then
+         # Явный TLS-пункт: CDN не спрашиваем.
+         security="tls"
+         _is_cdn=false
        elif [[ -t 0 ]]; then
          local _cdn_ans=""
          echo
