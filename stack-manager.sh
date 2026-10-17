@@ -1,8 +1,5 @@
-         # Для любого XHTTP без TLS предложить CDN так же, как при создании VLESS XHTTP.
-         if inbound_is_xhttp_cdn_candidate "$stream" && [[ -z "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
-           xhttp_cdn_setup "$id" "$proto" "$port" || true
-         fi
 #!/usr/bin/env bash
+STACK_MANAGER_VERSION="1.0.0"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
