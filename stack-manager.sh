@@ -5560,6 +5560,7 @@ cert_paths() {
 # и соответствует приватному ключу.
 cert_preflight() {
   local d="$1" pair cert key san_end
+  [[ "$d" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
   pair=$(cert_paths "$d" 2>/dev/null) || return 1
   cert="${pair%% *}"; key="${pair##* }"
   [[ -s "$cert" && -s "$key" ]] || return 1
@@ -7345,6 +7346,12 @@ stack_full_audit() {
       if [[ "$st" == *'"security":"tls"'* && ( -z "$cert" || ! -f "$cert" || -z "$key" || ! -f "$key" ) ]]; then
         warn "#${id}: TLS-сертификат/ключ не найден"; issues=$((issues+1))
       fi
+      if [[ "$st" == *'"security":"tls"'* ]]; then
+        dom=$(grep -oE '"serverName"[[:space:]]*:[[:space:]]*"[^"]+"' <<<"$st" | head -1 | sed -E 's/.*"([^"]+)"/\1/')
+        if [[ -n "$dom" ]] && ! cert_preflight "$dom" >/dev/null 2>&1; then
+          warn "#${id}: сертификат не прошёл проверку домена/срока/ключа ($dom)"; issues=$((issues+1))
+        fi
+      fi
     fi
     if ! sqlite3 "$XUI_DB" "SELECT 1 FROM hosts WHERE inbound_id=$id LIMIT 1;" 2>/dev/null | grep -q 1 && [[ "$proto" == vless || "$proto" == naive || "$proto" == anytls || "$proto" == trusttunnel ]]; then
       warn "#${id} $proto:$port — hosts отсутствует"; issues=$((issues+1))
@@ -7357,6 +7364,15 @@ stack_full_audit() {
   for svc in nginx x-ui stack-heal.timer; do
     systemctl is-active --quiet "$svc" 2>/dev/null && log "$svc: active" || warn "$svc: не active"
   done
+  echo "[ Listening ports ]"
+  while IFS='|' read -r id proto port listen en; do
+    [[ "$en" == 1 && "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || continue
+    if ! ss -ltnup 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
+      warn "#${id} $proto:$port — сокет не слушает"; issues=$((issues+1))
+    else
+      log "#${id} $proto:$port — socket OK"
+    fi
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port,COALESCE(listen,''),enable FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
   echo "[ CDN ]"
   cdn_audit_report || issues=$((issues+1))
   echo "[ CDN profile orphans ]"
