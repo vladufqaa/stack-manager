@@ -5371,7 +5371,11 @@ cert_issue() {
   [[ "$wbase" != *.* ]] && wbase="$d"   # d — сам базовый домен
   if [[ -n "${CERT_MODE_CHOICE:-}" ]]; then
     mode="$CERT_MODE_CHOICE"
-  elif [[ -t 0 ]]; then
+  elif [[ "$name" == "VLESS XHTTP TLS" ]]; then
+          # Явный TLS-пункт: CDN не спрашиваем и security сохраняем как tls.
+          security="tls"
+          _is_cdn=false
+        elif [[ -t 0 ]]; then
     echo "  Какой сертификат выпустить для $d?"
     echo "   1) Wildcard *.$wbase — Cloudflare DNS-01, покроет $wbase и все поддомены"
     echo "   2) Обычный персональный — только $d (HTTP-01)"
