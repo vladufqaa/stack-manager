@@ -14282,9 +14282,10 @@ diagnostics_maintenance_menu() {
     echo "  4) Обновить скрипт"
     echo "  5) Заморозка самолечения"
     echo "  6) Проверить UDP-инбаунды и открыть порты UFW"
+     echo "  7) Read-only аудит CDN и drift"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-6]$'
-    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) freeze_menu ;; 6) udp_inbound_firewall_check; pause ;; 0) return 0 ;; esac
+    local c=""; ask c "Выбор" "1" '^[0-7]$'
+    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) freeze_menu ;; 6) udp_inbound_firewall_check; pause ;; 7) cdn_audit_report; pause ;; 0) return 0 ;; esac
   done
 }
 panel_adguard_menu() {
