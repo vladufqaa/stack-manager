@@ -5566,7 +5566,11 @@ cert_preflight() {
   [[ -s "$cert" && -s "$key" ]] || return 1
   openssl x509 -noout -checkend 86400 -in "$cert" >/dev/null 2>&1 || return 1
   openssl x509 -noout -checkhost "$d" -in "$cert" 2>/dev/null | grep -q 'Hostname .* was found' || return 1
-  [[ "$(openssl x509 -noout -modulus -in "$cert" 2>/dev/null | sha256sum | cut -d' ' -f1)" == "$(openssl rsa -noout -modulus -in "$key" 2>/dev/null | sha256sum | cut -d' ' -f1)" ]] || return 1
+  # Поддерживаем RSA и ECDSA: сравниваем DER публичных ключей, а не modulus.
+  local cert_pub key_pub
+  cert_pub=$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)
+  key_pub=$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)
+  [[ -n "$cert_pub" && "$cert_pub" != "$(printf '0%.0s' {1..64})" && "$cert_pub" == "$key_pub" ]] || return 1
   printf '%s %s\n' "$cert" "$key"
 }
 
