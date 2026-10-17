@@ -37,7 +37,7 @@
 Stack Manager — это управляющий слой над LucX/x-ui, Xray и nginx. Он не заменяет панель, а приводит связанные конфигурации к согласованному состоянию:
 
 <p align="center">
-  <img src="assets/architecture.svg" alt="Архитектура Stack Manager" width="100%"/>
+  <img src="assets/architecture-ru.svg" alt="Архитектура Stack Manager" width="100%"/>
 </p>
 
 Ключевой принцип: сначала проверка, затем изменение. Read-only-аудит не меняет сервер и показывает рассогласования между SQLite, nginx, SNI, CDN-профилями, decoy и сертификатами.
