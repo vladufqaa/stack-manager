@@ -7312,6 +7312,45 @@ cdn_audit_report() {
   log "Аудит завершён: CDN-профили согласованы"
 }
 
+# Полный read-only аудит стека: inbound/hosts/SNI/CDN/decoy/certs/services/UFW.
+stack_full_audit() {
+  line; echo -e "${B}   ПОЛНЫЙ АУДИТ СТЕКА (READ-ONLY)${N}"; line
+  local issues=0 id proto port listen en st dom backend cert key exp svc
+  [[ -f "$XUI_DB" ]] || { err "x-ui.db не найден"; return 1; }
+  echo "[ Inbounds / hosts ]"
+  while IFS='|' read -r id proto port listen en st; do
+    [[ -n "$id" ]] || continue
+    if [[ "$en" != 1 ]]; then warn "#${id} $proto:$port — disabled"; continue; fi
+    [[ "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || { err "#${id}: некорректный порт $port"; issues=$((issues+1)); continue; }
+    if [[ "$port" != 443 && "$listen" != 127.0.0.1 && "$proto" != qwdtt && "$proto" != csqtt ]]; then
+      warn "#${id} $proto:$port — слушает не loopback"; issues=$((issues+1))
+    fi
+    if grep -Eqi '"security"[[:space:]]*:[[:space:]]*"(tls|reality)"' <<<"$st"; then
+      cert=$(grep -oE '"certificateFile"[[:space:]]*:[[:space:]]*"[^"]+"' <<<"$st" | head -1 | sed -E 's/.*"([^"]+)"/\1/')
+      key=$(grep -oE '"keyFile"[[:space:]]*:[[:space:]]*"[^"]+"' <<<"$st" | head -1 | sed -E 's/.*"([^"]+)"/\1/')
+      if [[ "$st" == *'"security":"tls"'* && ( -z "$cert" || ! -f "$cert" || -z "$key" || ! -f "$key" ) ]]; then
+        warn "#${id}: TLS-сертификат/ключ не найден"; issues=$((issues+1))
+      fi
+    fi
+    if ! sqlite3 "$XUI_DB" "SELECT 1 FROM hosts WHERE inbound_id=$id LIMIT 1;" 2>/dev/null | grep -q 1 && [[ "$proto" == vless || "$proto" == naive || "$proto" == anytls || "$proto" == trusttunnel ]]; then
+      warn "#${id} $proto:$port — hosts отсутствует"; issues=$((issues+1))
+    fi
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port,COALESCE(listen,''),enable,COALESCE(stream_settings,'') FROM inbounds ORDER BY id;" 2>/dev/null || true)
+  echo "[ SNI / nginx ]"
+  if command -v nginx >/dev/null 2>&1; then nginx -t >/dev/null 2>&1 && log "nginx -t: OK" || { err "nginx -t: FAIL"; issues=$((issues+1)); }; fi
+  [[ -f "$SNI_CONF" ]] && log "SNI-конфиг: найден" || { warn "SNI-конфиг отсутствует"; issues=$((issues+1)); }
+  echo "[ Services ]"
+  for svc in nginx x-ui stack-heal.timer; do
+    systemctl is-active --quiet "$svc" 2>/dev/null && log "$svc: active" || warn "$svc: не active"
+  done
+  echo "[ CDN ]"
+  cdn_audit_report || issues=$((issues+1))
+  echo "[ UFW ]"
+  if command -v ufw >/dev/null 2>&1; then ufw status | head -1; else warn "ufw не установлен"; fi
+  echo; if (( issues )); then err "Полный аудит: проблем $issues"; return 1; fi
+  log "Полный аудит: критических проблем не найдено"
+}
+
 # Проверка и починка CDN-маршрутизации по профилям: SNI-map, upstream,
 # http-блок, decoy. Живой тест: путь → xray (любой HTTP-ответ), остальное → decoy.
 #   quiet=1 — без вопросов/логов восстановления (вызов из автопутей)
@@ -14283,9 +14322,10 @@ diagnostics_maintenance_menu() {
     echo "  5) Заморозка самолечения"
     echo "  6) Проверить UDP-инбаунды и открыть порты UFW"
      echo "  7) Read-only аудит CDN и drift"
+      echo "  8) Полный read-only аудит стека"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-7]$'
-    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) freeze_menu ;; 6) udp_inbound_firewall_check; pause ;; 7) cdn_audit_report; pause ;; 0) return 0 ;; esac
+    local c=""; ask c "Выбор" "1" '^[0-8]$'
+    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) freeze_menu ;; 6) udp_inbound_firewall_check; pause ;; 7) cdn_audit_report; pause ;; 8) stack_full_audit; pause ;; 0) return 0 ;; esac
   done
 }
 panel_adguard_menu() {
