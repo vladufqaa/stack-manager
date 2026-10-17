@@ -1,3 +1,7 @@
+         # Для любого XHTTP без TLS предложить CDN так же, как при создании VLESS XHTTP.
+         if inbound_is_xhttp_cdn_candidate "$stream" && [[ -z "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
+           xhttp_cdn_setup "$id" "$proto" "$port" || true
+         fi
 #!/usr/bin/env bash
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
@@ -9370,13 +9374,17 @@ add_inbound() {
   [[ -z "$panel_domain" ]] && ask panel_domain "Домен панели" "panel.example.com" '^[a-zA-Z0-9.-]+$'
 
   if [[ "$mode" == "1" ]]; then
-    local id proto port count=0
-    while IFS='|' read -r id proto port; do
+    local id proto port stream count=0
+    while IFS='|' read -r id proto port stream; do
       [[ -z "$id" || -z "$proto" ]] && continue
       is_udp_proto "$proto" && continue
       local existing=""
       existing=$(grep -E "^\s+\S+\s+inb_${id}_backend" "$SNI_CONF" 2>/dev/null | awk '{print $1}' || true)
       if [[ -n "$existing" ]]; then
+         # Для любого XHTTP без TLS предложить CDN так же, как при создании VLESS XHTTP.
+         if inbound_is_xhttp_cdn_candidate "$stream" && [[ -z "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
+           xhttp_cdn_setup "$id" "$proto" "$port" || true
+         fi
         log "#$id ($proto/$port) → SNI: $existing ✓"
         # hosts-починка: адрес = домен панели; SNI = цель reality (если это
         # чужой реалити), иначе сам домен
@@ -9394,7 +9402,7 @@ add_inbound() {
         [[ "$do_it" == true ]] && configure_sni_for_inbound "$id" "$proto" "$port" "$panel_domain"
       fi
       count=$((count+1))
-    done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
+    done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
     # hosts-строки, ссылающиеся на несуществующие/выключенные инбаунды, — мусор
     # (например, от старого vless с неверной конечной точкой). Чистим.
     sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id NOT IN (SELECT id FROM inbounds WHERE enable=1);" 2>/dev/null || true
