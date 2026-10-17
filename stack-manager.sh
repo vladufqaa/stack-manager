@@ -7280,6 +7280,38 @@ cdn_frontend_ensure() {
   [[ -n "$cdn" ]] && sni_map_add "$cdn" "cdn_frontend"
 }
 
+# Аудит согласованности CDN без исправлений: база, hosts, профиль, nginx,
+# decoy и сертификат. Это read-only проверка в стиле desired/runtime state.
+cdn_audit_report() {
+  line; echo -e "${B}   АУДИТ CDN И DRIFT${N}"; line
+  [[ -f "$XUI_DB" ]] || { err "x-ui.db не найден"; return 1; }
+  cdn_profiles_load
+  if (( ! ${#CDN_PROFILE_IDS[@]} )); then
+    log "CDN-профилей нет — проверять нечего"; return 0
+  fi
+  local id proto origin cdn path tpl dport port st host ipath haddr hsni hhost hsec blk cert key issues=0
+  for id in "${CDN_PROFILE_IDS[@]}"; do
+    proto=$(cdn_profile_field "$id" 2); origin=$(cdn_profile_field "$id" 3)
+    cdn=$(cdn_profile_field "$id" 4); path=$(cdn_profile_field "$id" 5)
+    tpl=$(cdn_profile_field "$id" 6); dport=$(cdn_profile_field "$id" 7)
+    echo; echo "CDN #$id ($proto): origin=$origin cdn=$cdn path=$path"
+    if ! sqlite3 "$XUI_DB" "SELECT 1 FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null | grep -q 1; then
+      err "  DRIFT: inbound отсутствует или выключен"; issues=$((issues+1)); continue
+    fi
+    read -r host ipath port st <<<"$(sqlite3 -separator ' ' "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.xhttpSettings.host'),''),COALESCE(json_extract(stream_settings,'\$.xhttpSettings.path'),''),port,COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)"
+    [[ "$host" == "$origin" ]] && log "  DB host: OK" || { err "  DRIFT: DB host=$host (ожидался $origin)"; issues=$((issues+1)); }
+    [[ "$ipath" == "$path" ]] && log "  DB path: OK" || { err "  DRIFT: DB path=$ipath (ожидался $path)"; issues=$((issues+1)); }
+    IFS='|' read -r haddr hsni hhost hsec <<<"$(sqlite3 -separator '|' "$XUI_DB" "SELECT COALESCE(address,''),COALESCE(sni,''),COALESCE(host_header,''),COALESCE(security,'') FROM hosts WHERE inbound_id=$id AND port=443 LIMIT 1;" 2>/dev/null || true)"
+    [[ "$haddr" == "$cdn" && "$hsni" == "$cdn" && "$hhost" == "$cdn" && "$hsec" == "tls" ]] && log "  hosts: OK" || { err "  DRIFT: hosts address/sni/host/security = $haddr/$hsni/$hhost/$hsec"; issues=$((issues+1)); }
+    blk=$(sed -n "/# >>> cdn .*domain=${origin//./\.}/,/# <<< cdn/p" "$STACK_CONF" 2>/dev/null || true)
+    [[ -n "$blk" && "$blk" == *"location ^~"* ]] && log "  nginx block: OK" || { err "  DRIFT: nginx CDN-блок отсутствует или неполон"; issues=$((issues+1)); }
+    stack_decoy_meta "$origin" >/dev/null 2>&1 && log "  decoy $origin: OK" || { err "  DRIFT: decoy $origin отсутствует"; issues=$((issues+1)); }
+    cert_paths "$origin" >/dev/null 2>&1 && log "  certificate $origin: OK" || { err "  DRIFT: сертификат $origin не найден"; issues=$((issues+1)); }
+  done
+  echo; if (( issues )); then err "Аудит завершён: проблем $issues"; return 1; fi
+  log "Аудит завершён: CDN-профили согласованы"
+}
+
 # Проверка и починка CDN-маршрутизации по профилям: SNI-map, upstream,
 # http-блок, decoy. Живой тест: путь → xray (любой HTTP-ответ), остальное → decoy.
 #   quiet=1 — без вопросов/логов восстановления (вызов из автопутей)
