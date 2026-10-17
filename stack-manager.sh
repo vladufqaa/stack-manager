@@ -5555,6 +5555,20 @@ cert_paths() {
   return 0
 }
 
+# Строгая проверка сертификата и ключа для конкретного hostname.
+# Возвращает 0 только если сертификат существует, не истёк, покрывает домен
+# и соответствует приватному ключу.
+cert_preflight() {
+  local d="$1" pair cert key san_end
+  pair=$(cert_paths "$d" 2>/dev/null) || return 1
+  cert="${pair%% *}"; key="${pair##* }"
+  [[ -s "$cert" && -s "$key" ]] || return 1
+  openssl x509 -noout -checkend 86400 -in "$cert" >/dev/null 2>&1 || return 1
+  openssl x509 -noout -checkhost "$d" -in "$cert" 2>/dev/null | grep -q 'Hostname .* was found' || return 1
+  [[ "$(openssl x509 -noout -modulus -in "$cert" 2>/dev/null | sha256sum | cut -d' ' -f1)" == "$(openssl rsa -noout -modulus -in "$key" 2>/dev/null | sha256sum | cut -d' ' -f1)" ]] || return 1
+  printf '%s %s\n' "$cert" "$key"
+}
+
 # --- МУЛЬТИСЕРТ (SAN): один серт на несколько доменов (в т.ч. РАЗНЫХ зон) ---
 # Сосуществует с wildcard: cert_paths/find_covering_cert сами выберут wildcard
 # для его зоны, а для остальных доменов найдут SAN в линии stack-multi.
@@ -7306,7 +7320,7 @@ cdn_audit_report() {
     blk=$(sed -n "/# >>> cdn .*domain=${origin//./\.}/,/# <<< cdn/p" "$STACK_CONF" 2>/dev/null || true)
     [[ -n "$blk" && "$blk" == *"location ^~"* ]] && log "  nginx block: OK" || { err "  DRIFT: nginx CDN-блок отсутствует или неполон"; issues=$((issues+1)); }
     stack_decoy_meta "$origin" >/dev/null 2>&1 && log "  decoy $origin: OK" || { err "  DRIFT: decoy $origin отсутствует"; issues=$((issues+1)); }
-    cert_paths "$origin" >/dev/null 2>&1 && log "  certificate $origin: OK" || { err "  DRIFT: сертификат $origin не найден"; issues=$((issues+1)); }
+    cert_preflight "$origin" >/dev/null 2>&1 && log "  certificate $origin: OK (domain/expiry/key)" || { err "  DRIFT: сертификат $origin не прошёл проверку домена/срока/ключа"; issues=$((issues+1)); }
   done
   echo; if (( issues )); then err "Аудит завершён: проблем $issues"; return 1; fi
   log "Аудит завершён: CDN-профили согласованы"
@@ -7585,6 +7599,10 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   if [[ -z "$cp_line" ]]; then
     warn "  серт для $origin_dom не выпущен — nginx-фронтенд не настраиваю."
     warn "  Выпиши серт (Сертификаты → обновить) и повтори пункт; инбаунд не менялся."
+    return 1
+  fi
+  if ! cert_preflight "$origin_dom" >/dev/null 2>&1 && [[ "$origin_dom" != "$_panel_dom" ]]; then
+    warn "  сертификат ORIGIN $origin_dom не прошёл строгую проверку — CDN не применён"
     return 1
   fi
   [[ -z "$cert" ]] && cert="${cp_line%% *}"
