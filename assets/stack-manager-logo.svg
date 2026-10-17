@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 220" role="img" aria-labelledby="title desc">
+  <title id="title">Stack Manager</title>
+  <desc id="desc">A shield made of layered SNI routes surrounding a central 443 mark</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#172554"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="840" height="220" rx="28" fill="url(#bg)"/>
+  <g transform="translate(35 25)" filter="url(#glow)">
+    <path d="M85 0 155 26v57c0 44-30 70-70 87C45 153 15 127 15 83V26Z" fill="none" stroke="url(#cyan)" stroke-width="8"/>
+    <path d="M39 58h92M39 84h92M39 110h92" stroke="#a5f3fc" stroke-width="7" stroke-linecap="round" opacity=".9"/>
+    <circle cx="39" cy="58" r="6" fill="#fff"/><circle cx="131" cy="84" r="6" fill="#fff"/><circle cx="39" cy="110" r="6" fill="#fff"/>
+    <text x="85" y="99" text-anchor="middle" font-family="Arial,sans-serif" font-size="24" font-weight="700" fill="#0b1220">443</text>
+  </g>
+  <text x="225" y="100" font-family="Arial,sans-serif" font-size="48" font-weight="800" fill="#f8fafc" letter-spacing="2">STACK MANAGER</text>
+  <text x="228" y="140" font-family="Arial,sans-serif" font-size="20" fill="#bae6fd">SNI · ROUTING · PROXY ORCHESTRATION</text>
+</svg>
