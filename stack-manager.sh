@@ -7359,6 +7359,15 @@ stack_full_audit() {
   done
   echo "[ CDN ]"
   cdn_audit_report || issues=$((issues+1))
+  echo "[ CDN profile orphans ]"
+  if [[ -s "$CDN_PROFILES" ]]; then
+    while IFS='|' read -r id proto origin cdn path tpl dport; do
+      [[ "$id" =~ ^[0-9]+$ ]] || continue
+      if ! sqlite3 "$XUI_DB" "SELECT 1 FROM inbounds WHERE id=$id;" 2>/dev/null | grep -q 1; then
+        warn "orphan CDN profile #$id ($origin → $cdn)"; issues=$((issues+1))
+      fi
+    done < "$CDN_PROFILES"
+  fi
   echo "[ UFW ]"
   if command -v ufw >/dev/null 2>&1; then ufw status | head -1; else warn "ufw не установлен"; fi
   echo; if (( issues )); then err "Полный аудит: проблем $issues"; return 1; fi
