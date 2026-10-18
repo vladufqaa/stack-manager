@@ -5737,7 +5737,9 @@ cert_preflight() {
   cert="${pair%% *}"; key="${pair##* }"
   [[ -s "$cert" && -s "$key" ]] || return 1
   openssl x509 -noout -checkend 86400 -in "$cert" >/dev/null 2>&1 || return 1
-  openssl x509 -noout -checkhost "$d" -in "$cert" 2>/dev/null | grep -q 'Hostname .* was found' || return 1
+  # Не разбираем текст checkhost: в разных версиях OpenSSL успешный вывод
+  # отличается ("was found" или "does match"). Код возврата — стабильный API.
+  openssl x509 -noout -checkhost "$d" -in "$cert" >/dev/null 2>&1 || return 1
   # Поддерживаем RSA и ECDSA: сравниваем DER публичных ключей, а не modulus.
   local cert_pub key_pub
   cert_pub=$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)
