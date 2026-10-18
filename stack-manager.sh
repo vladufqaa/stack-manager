@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.4"
+STACK_MANAGER_VERSION="1.0.5"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -1403,6 +1403,11 @@ backfill_country_remarks() {
       new="$flag $remark"
     elif [[ "$remark" =~ ^${base//\/\\}[^0-9]*№[0-9]+$ ]]; then
       suffix="${remark#"$base"}"
+      new="$flag $base$suffix"
+    elif [[ "$remark" == *"$base"* ]]; then
+      # В старых версиях emoji-флаг мог сохраниться как «����».
+      # Восстанавливаем имя по протоколу и оставляем возможный №N.
+      suffix="${remark#*"$base"}"
       new="$flag $base$suffix"
     else
       continue
