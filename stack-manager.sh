@@ -73,8 +73,17 @@ read_safe() {
 }
 
 BACKUP_DIR="/root/stack-backups"
+# До явной настройки через меню скрипт работает только в режиме чтения.
+# Этот маркер создаётся только после подтверждённой настройки пользователем.
+STACK_CONFIGURED_FILE="/root/stack-backups/.stack-configured"
 FW_STATE_DIR="/root/stack-backups/firewall-state"
 ACTION_LOG="/root/stack-actions.log"
+
+stack_is_configured() { [[ -f "$STACK_CONFIGURED_FILE" ]]; }
+stack_mark_configured() {
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || return 1
+  printf '%s\n' "configured=$(date '+%F %T')" > "$STACK_CONFIGURED_FILE" 2>/dev/null
+}
 
 # Wildcard-сертификат Cloudflare (один на все поддомены базового домена)
 WILDCARD_DOMAIN=""
@@ -14742,6 +14751,7 @@ setup_routing_menu() {
         initial_setup > >(tee -a /tmp/stack-initial-setup.log) 2>&1
         local _setup_rc=$?
         if [[ $_setup_rc -eq 0 ]]; then
+          stack_mark_configured || warn "Не удалось сохранить маркер настройки; автоматические исправления останутся отключены."
           echo
           echo -e "${G}Первичная настройка завершена.${N}"
           pause
@@ -14825,7 +14835,13 @@ panel_adguard_menu() {
 # Действие пункта меню — вызывается в ПОД-ОБОЛОЧКЕ: exit 42 внутри (токен «q»
 # в любом вопросе) гасит только её, и мы оказываемся назад в меню.
 run_menu_action() {
-  audit "menu:${1:-}"     # каждое обращение к пункту — в журнал действий
+  # До первичной настройки даже журнал действий не создаём и не меняем.
+  stack_is_configured && audit "menu:${1:-}"
+  if ! stack_is_configured && [[ "${1:-}" != "1" ]]; then
+    warn "Безопасный режим: сначала завершите первичную настройку через раздел 1."
+    pause
+    return 0
+  fi
   case "$1" in
     1) setup_routing_menu ;;
     2) decoy_domains_menu ;;
@@ -15057,9 +15073,14 @@ fast_menu_header() {
 }
 
 main_menu() {
-  # Инициализация decoy и окружения выполняется до входа в цикл, а не при каждом возврате.
+  # До явной настройки пользователя — только меню и чтение состояния.
+  # Инициализация decoy сама меняет nginx/файлы, поэтому здесь запрещена.
   detect_env >/dev/null 2>&1 || true
-  decoy_full_init || true
+  if stack_is_configured; then
+    decoy_full_init || true
+  else
+    warn "Безопасный режим: стек ещё не настроен скриптом; автоматические изменения отключены."
+  fi
   while :; do
     clear
     fast_menu_header
@@ -15428,6 +15449,7 @@ auto_full_setup() {
   echo "    панель  → /root/panel-credentials.txt"
   [[ "$ADG_PRESENT" == true ]] && echo "    adguard → /root/adguard-credentials.txt"
   line
+  stack_mark_configured || warn "Не удалось сохранить маркер настройки; автоматические исправления останутся отключены."
   pause
   return 0
 }
@@ -15443,64 +15465,38 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     stack_audit_readonly
     exit $?
   fi
-  check_os
-  ensure_deps || { err "Невозможно продолжить без обязательных зависимостей"; exit 1; }
+  # СТРОГИЙ БЕЗОПАСНЫЙ СТАРТ:
+  # пока пользователь явно не завершил первичную настройку, запуск скрипта
+  # ничего не пишет и не перезапускает. Даже бэкап, hook, nginx, x-ui и heal
+  # здесь запрещены — существующий стек принадлежит пользователю.
+  # check_os/ensure_deps могут менять пакеты и конфигурацию, поэтому до
+  # явной настройки выполняем только определение окружения.
   detect_env
-  # Обновляем имена существующих инбаундов, если страна стала доступна.
-  backfill_country_remarks
-  # 443/SNI: модуль stream + включение SNI-карты. Если снаружи 443 не слушается
-  # (частый случай после отката: потерян modules-enabled или stream-блок) —
-  # поднимаем сразу, без повторного прогона п.1.
-  if nginx_stream_module_enable && ensure_stream_include; then
-    ss -tlnH 'sport = :443' 2>/dev/null | grep -q . || nginx_reload >/dev/null 2>&1 || true
-  fi
-  [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — сервер работает не на свежем ядре. Откройте раздел 6 → диагностика."
-
-  # Первый запуск — предложить pre-install снимок только для существующего стека.
-  # Если панели ещё нет, снимок до установки неинформативен: после установки
-  # будет создан обычный автобэкап уже фактического состояния.
-  if [[ -f "$XUI_DB" && ! -f "$BACKUP_DIR/.pre-install-done" && ! -f "$BACKUP_DIR/.stack-ever-ran" ]]; then
-    echo
-    warn "Первый запуск скрипта в этой системе."
-    echo "  Рекомендуется сохранить снимок ТЕКУЩЕГО состояния — всех файлов,"
-    echo "  которые скрипт может изменить: x-ui.db, /etc/nginx, UFW/iptables,"
-    echo "  fail2ban, systemd units, certbot renewal-hooks, AdGuardHome.yaml."
-    echo "  Это позволит откатить любые изменения одним кликом через раздел 5 «Бэкапы и откат»."
-    echo
-    mk_snap=""
-    askyn mk_snap "Сделать pre-install снимок сейчас?" "y"
-    if [[ "$mk_snap" == true ]]; then
-      mkdir -p "$BACKUP_DIR" 2>/dev/null || true
-      take_pre_install_snapshot && touch "$BACKUP_DIR/.pre-install-done" 2>/dev/null || true
-    else
-      warn "Снимок не сделан. Его можно сделать позже: раздел 5 → Pre-install snapshot."
+  if stack_is_configured; then
+    ensure_deps || { err "Невозможно продолжить без обязательных зависимостей"; exit 1; }
+    backfill_country_remarks
+    if nginx_stream_module_enable && ensure_stream_include; then
+      ss -tlnH 'sport = :443' 2>/dev/null | grep -q . || nginx_reload >/dev/null 2>&1 || true
     fi
-    echo
-  fi
-  # Фиксируем сам факт запуска отдельно от pre-install snapshot. При чистой
-  # установке маркер ставится после создания панели, чтобы следующий запуск
-  # не спрашивал снимок без существующей БД.
-  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
-  touch "$BACKUP_DIR/.stack-ever-ran" 2>/dev/null || true
-  # Автобэкап x-ui.db + nginx-конфигов стека (последние 5 копий)
-  auto_backup_stack
-  # deploy-hook renew (сертиф. живут в live/, зеркала нет) + дедупликация
-  cert_hook_install
-  cert_sync_all
-  # если серты появились позже установки — дозаписать пути в инбаунды
-  sync_inbound_certs
-  # CDN-профили: если маршрутизация была задета (heal старой версии, ручные правки
-  # nginx) — тихо восстановить map/блоки до открытия меню
-  cdn_repair 1
-  # heal-юнит мог быть поставлен старой версией — переустановить на текущий скрипт.
-  # Точка входа находится вне функции, поэтому здесь нельзя использовать local.
-  _self_path="${BASH_SOURCE[0]}"
-  [[ -z "$_self_path" || ! -f "$_self_path" ]] && _self_path="/root/stack-manager.sh"
-  if systemctl is-enabled stack-heal.timer >/dev/null 2>&1; then
-    grep -q "$_self_path" /etc/systemd/system/stack-heal.service 2>/dev/null || {
-      HEAL_TIMER_DONE=0; install_heal_timer
-      warn "heal-таймер переустановлен на этот скрипт (старый лечил стек без CDN-логики)"
-    }
+    [[ -f /var/run/reboot-required ]] && warn "Система ждёт ПЕРЕЗАГРУЗКУ (обновлено ядро) — откройте раздел 6 → диагностика."
+    mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+    touch "$BACKUP_DIR/.stack-ever-ran" 2>/dev/null || true
+    auto_backup_stack
+    cert_hook_install
+    cert_sync_all
+    sync_inbound_certs
+    cdn_repair 1
+    _self_path="${BASH_SOURCE[0]}"
+    [[ -z "$_self_path" || ! -f "$_self_path" ]] && _self_path="/root/stack-manager.sh"
+    if systemctl is-enabled stack-heal.timer >/dev/null 2>&1; then
+      grep -q "$_self_path" /etc/systemd/system/stack-heal.service 2>/dev/null || {
+        HEAL_TIMER_DONE=0; install_heal_timer
+        warn "heal-таймер переустановлен на этот скрипт"
+      }
+    fi
+  else
+    warn "Безопасный первый запуск: существующий сервер не изменяется."
+    warn "Откройте меню и явно запустите первичную настройку, когда будете готовы."
   fi
   [[ -f "$WILDCARD_STATE" ]] && WILDCARD_DOMAIN=$(head -n 1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]' || true)
   # wildcard виден в меню сертификатов и диагностике — на старте не шумим
