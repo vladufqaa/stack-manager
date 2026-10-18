@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.0"
+STACK_MANAGER_VERSION="1.0.3"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -14,7 +14,37 @@ set -o pipefail
 G=$'\033[0;32m'; R=$'\033[0;31m'; Y=$'\033[1;33m'; B=$'\033[0;36m'; N=$'\033[0m'
 log()  { echo -e "${G}[+]${N} $*"; }
 warn() { echo -e "${Y}[!]${N} $*"; }
-err()  { echo -e "${R}[x]${N} $*" >&2; }
+# Любая ошибка в интерактивном режиме должна быть замечена пользователем:
+# печатаем короткую рекомендацию и ждём Enter. Это защищает от ситуации,
+# когда важный отказ прокручивается следующими сообщениями.
+ERROR_PAUSED=0
+error_recommendation() {
+  local __m="$*" __r="Проверьте причину выше; исправьте её и повторите этот пункт."
+  case "$__m" in
+    *сертификат*|*серт*|*certbot*|*CERT*)
+      __r="Проверьте DNS A/AAAA, доступность порта 80 и лимиты Let's Encrypt; затем повторите выпуск сертификата." ;;
+    *DNS*|*dns*|*резолв*|*разреш*)
+      __r="Проверьте A/AAAA-запись домена: она должна указывать на этот сервер; после обновления DNS повторите операцию." ;;
+    *порт*|*Port*|*listen*|*занят*)
+      __r="Проверьте, какое приложение заняло порт (ss -lntup); выберите свободный порт или остановите конфликтующую службу." ;;
+    *nginx*|*Nginx*)
+      __r="Проверьте конфигурацию командой nginx -t и журнал systemctl status nginx; после исправления повторите." ;;
+    *UFW*|*фаервол*|*firewall*)
+      __r="Проверьте правила UFW и временно разрешите только необходимый порт; затем повторите операцию." ;;
+    *x-ui*|*Xray*|*инбаунд*)
+      __r="Проверьте состояние x-ui/Xray и журнал journalctl -u x-ui; исправьте причину и повторите настройку инбаунда." ;;
+  esac
+  echo -e "${Y}[>] Рекомендация: ${__r}${N}" >&2
+}
+err() {
+  echo -e "${R}[x]${N} $*" >&2
+  error_recommendation "$*"
+  # В автоматическом/не-TTY запуске не блокируем пайплайн.
+  if [[ -t 0 ]]; then
+    ERROR_PAUSED=1
+    pause
+  fi
+}
 ok()   { echo -e "${G}[✓]${N} $*"; }
 line() { echo -e "${B}────────────────────────────────────────────────────────${N}"; }
 
@@ -226,7 +256,7 @@ DECOY_TEMPLATES=(
 RECOMMENDED_INBOUNDS=(
   "VLESS TCP REALITY|vless|tcp|reality|xtls-rprx-vision|tcp"
   "VLESS TCP TLS|vless|tcp|tls||tcp"
-  "VLESS XHTTP (через CDN)|vless|xhttp|tls||tcp"
+  "VLESS XHTTP (через CDN)|vless|xhttp|none||tcp"
   "VLESS XHTTP TLS|vless|xhttp|tls||tcp"
   "VLESS XHTTP REALITY|vless|xhttp|reality||tcp"
   "NAIVE (TLS, за 443)|naive|naive|tls|-|tcp"
@@ -277,7 +307,16 @@ ask() {
 askyn() {
   local __v="$1" __p="$2" __d="$3" __in
   while :; do
-    read_safe "? ${__p} [${__d}]: " __in
+    # Не зацикливаться при stdin без TTY/EOF (например, запуск через tee):
+    # в этом случае безопасно принять значение по умолчанию.
+    if ! read_safe "? ${__p} [${__d}]: " __in; then
+      warn "Ввод недоступен (EOF) — принято значение по умолчанию: $__d"
+      __in="$__d"
+    fi
+    # Убираем CR от Windows/вставки и пробелы вокруг ответа.
+    __in="${__in//$'\r'/}"
+    __in="${__in#"${__in%%[![:space:]]*}"}"
+    __in="${__in%"${__in##*[![:space:]]}"}"
     __in="${__in:-$__d}"
     case "${__in,,}" in
       q|quit|exit|выход)
@@ -291,6 +330,15 @@ askyn() {
 }
 
 pause() { read_safe "Нажмите Enter" _; }
+# Ошибка сертификата не должна исчезать среди последующих сообщений.
+# В интерактивном мастере обязательно ждём Enter; в автоматическом запуске
+# не блокируем stdin, но полный текст ошибки всё равно остаётся в логе.
+cert_error_pause() {
+  if [[ -t 0 && "${ERROR_PAUSED:-0}" != 1 ]]; then
+    pause
+  fi
+  ERROR_PAUSED=0
+}
 
 # =====================================================================
 # ПРОВЕРКА ОС
@@ -1082,22 +1130,6 @@ db_update_inbound() {
 # Строка hosts/восстановление всей строки — та же логика для таблицы hosts
 db_capture_hosts() { panel_journal_capture_row hosts "$1"; }
 
-proto_remark() {
-  local proto="$1" stream="${2:-}"
-  case "$proto" in
-    vless) grep -q '"security": *"reality"' <<<"$stream" && echo "reality" || echo "vless" ;;
-    trusttunnel|trust-tunnel) echo "trusttunnel" ;;
-    naive|naiveproxy) echo "naive" ;;
-    mtproto) echo "mtproto" ;;
-    hysteria|hysteria2) echo "hysteria2" ;;
-    qwdtt) echo "qwdtt" ;;
-    csqtt|csqdtt) echo "csqtt" ;;
-    tproxy) echo "webproxy" ;;
-    awg|amneziawg|wireguard) echo "awg" ;;
-    *) echo "$proto" ;;
-  esac
-}
-
 # =====================================================================
 # ЖУРНАЛ ИЗМЕНЕНИЙ ПАНЕЛИ (для честного отката)
 #   Первая правка каждого объекта фиксирует значение ДО неё; повторные
@@ -1304,6 +1336,94 @@ proto_remark() {
     awg|amneziawg|wireguard) echo "awg" ;;
     *) echo "$proto" ;;
   esac
+}
+
+# Название инбаунда для remark. Страна определяется один раз по внешнему IPv4
+# сервера и кэшируется: это не зависит от SNI/домена и не требует ручного ввода.
+# Пример: «🇩🇪 VLESS TCP Reality», «🇩🇪 Naive», «🇩🇪 VLESS TCP Reality №2».
+SERVER_COUNTRY_CACHE="/root/stack-backups/server-country-code"
+server_country_code() {
+  local cc=""
+  if [[ -s "$SERVER_COUNTRY_CACHE" ]]; then
+    cc=$(tr -d '[:space:]' < "$SERVER_COUNTRY_CACHE" 2>/dev/null || true)
+  fi
+  if [[ ! "$cc" =~ ^[A-Z]{2}$ ]]; then
+    cc=$(curl -4 -fsS --connect-timeout 3 --max-time 6 https://ipapi.co/country/ 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]' || true)
+    [[ "$cc" =~ ^[A-Z]{2}$ ]] && { mkdir -p "$(dirname "$SERVER_COUNTRY_CACHE")" 2>/dev/null || true; printf '%s\n' "$cc" > "$SERVER_COUNTRY_CACHE" 2>/dev/null || true; }
+  fi
+  printf '%s' "$cc"
+}
+country_flag() {
+  local cc="${1^^}" a b
+  [[ "$cc" =~ ^[A-Z]{2}$ ]] || return 0
+  a=$(printf '%d' "'${cc:0:1}" 2>/dev/null) || return 0
+  b=$(printf '%d' "'${cc:1:1}" 2>/dev/null) || return 0
+  printf '%b' "\\U$((a+127397))\\U$((b+127397))"
+}
+inbound_remark_base() {
+  local proto="$1" transport="$2" security="$3" label=""
+  case "$proto:$transport:$security" in
+    vless:tcp:reality) label="VLESS TCP Reality" ;;
+    vless:tcp:tls)     label="VLESS TCP TLS" ;;
+    vless:xhttp:reality) label="VLESS XHTTP Reality" ;;
+    vless:xhttp:tls)   label="VLESS XHTTP TLS" ;;
+    vless:xhttp:*)     label="VLESS XHTTP" ;;
+    vless:*)           label="VLESS" ;;
+    naive:* )          label="Naive" ;;
+    trusttunnel:*|trust-tunnel:*) label="TrustTunnel" ;;
+    anytls:*)          label="AnyTLS" ;;
+    trojan:*)          label="Trojan" ;;
+    shadowsocks:*)     label="Shadowsocks" ;;
+    hysteria:*|hysteria2:*) label="Hysteria2" ;;
+    qwdtt:*)           label="QWDT" ;;
+    csqtt:*)           label="CSQTT" ;;
+    tproxy:*)          label="TG Web Proxy" ;;
+    *)                 label="${proto^}" ;;
+  esac
+  printf '%s' "$label"
+}
+# Добавляет флаг страны к уже созданным стандартным именам инбаундов.
+# Нужен для миграции: старые записи могли быть созданы, когда geo-API был
+# временно недоступен, поэтому у них remark остался без флага.
+backfill_country_remarks() {
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
+  local cc flag id proto stream remark transport security base new suffix
+  cc=$(server_country_code)
+  flag=$(country_flag "$cc")
+  [[ -n "$flag" ]] || return 0
+  while IFS='|' read -r id proto stream remark; do
+    [[ -n "$id" && -n "$remark" && "$remark" != "$flag"* ]] || continue
+    transport=$(grep -oE '"network"[[:space:]]*:[[:space:]]*"[^"]+' <<<"$stream" | head -1 | sed 's/.*"//')
+    security=$(grep -oE '"security"[[:space:]]*:[[:space:]]*"[^"]+' <<<"$stream" | head -1 | sed 's/.*"//')
+    [[ -n "$transport" ]] || transport="tcp"
+    [[ -n "$security" ]] || security="none"
+    base=$(inbound_remark_base "$proto" "$transport" "$security")
+    if [[ "$remark" == "$base" ]]; then
+      new="$flag $remark"
+    elif [[ "$remark" =~ ^${base//\/\\}[^0-9]*№[0-9]+$ ]]; then
+      suffix="${remark#"$base"}"
+      new="$flag $base$suffix"
+    else
+      continue
+    fi
+    sqlite3 "$XUI_DB" "UPDATE inbounds SET remark='$(sql_escape "$new")' WHERE id=$id;" 2>/dev/null || true
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,COALESCE(stream_settings,''),COALESCE(remark,'') FROM inbounds WHERE enable=1;" 2>/dev/null || true)
+}
+
+# Возвращает remark с порядковым номером только при повторе того же типа.
+inbound_remark_next() {
+  local proto="$1" transport="$2" security="$3" base flag prefix n=1 max=0 r suffix
+  base=$(inbound_remark_base "$proto" "$transport" "$security")
+  flag=$(country_flag "$(server_country_code)")
+  prefix="${flag:+$flag }$base"
+  while IFS= read -r r; do
+    [[ "$r" == "$prefix" ]] && (( max < 1 )) && max=1
+    local re="^${prefix//\/\\} №([0-9]+)$"
+    if [[ "$r" =~ $re ]]; then
+      n="${BASH_REMATCH[1]}"; (( n > max )) && max=$n
+    fi
+  done < <(sqlite3 "$XUI_DB" "SELECT COALESCE(remark,'') FROM inbounds WHERE remark IS NOT NULL;" 2>/dev/null || true)
+  (( max > 0 )) && printf '%s №%d' "$prefix" "$((max+1))" || printf '%s' "$prefix"
 }
 
 # IP сервера (IPv4) — для subHost у tunnel-протоколов
@@ -2490,6 +2610,12 @@ EOF
 {"network":"xhttp","security":"reality","realitySettings":{"show":false,"xver":0,"dest":"$dest_show","target":"$dest_show","serverNames":["$sn_show"],"privateKey":"$priv","shortIds":["$short_id"],"settings":{"publicKey":"$pub","fingerprint":"firefox","serverName":"","spiderX":"/"},"fingerprint":"firefox"},"xhttpSettings":{"path":"/$(gen_hex 6)","host":"","mode":"auto"}}
 EOF
 )
+      elif [[ "$security" == "tls" ]]; then
+        if [[ -n "$cert" && -n "$key" ]]; then
+          stream_json="{\"network\":\"xhttp\",\"security\":\"tls\",\"tlsSettings\":{\"serverName\":\"$sn\",\"minVersion\":\"1.2\",\"certificates\":[{\"certificateFile\":\"$cert\",\"keyFile\":\"$key\"}]},\"xhttpSettings\":{\"path\":\"/$(gen_hex 6)\",\"host\":\"$sn\",\"mode\":\"auto\"}}"
+        else
+          stream_json="{\"network\":\"xhttp\",\"security\":\"tls\",\"tlsSettings\":{\"serverName\":\"$sn\",\"minVersion\":\"1.2\"},\"xhttpSettings\":{\"path\":\"/$(gen_hex 6)\",\"host\":\"$sn\",\"mode\":\"auto\"}}"
+        fi
       else
         stream_json="{\"network\":\"xhttp\",\"security\":\"none\",\"xhttpSettings\":{\"path\":\"/$(gen_hex 6)\",\"host\":\"\",\"mode\":\"auto\"}}"
       fi
@@ -2574,6 +2700,9 @@ EOF
   if [[ -z "$new_id" ]]; then
     err "  Инбаунд не найден после INSERT"
     echo ""; return 1
+  fi
+  if [[ "$proto" == "vless" && "$transport" == "xhttp" && "$security" == "tls" ]]; then
+    XHTTP_TLS_CREATED_IDS="${XHTTP_TLS_CREATED_IDS:-} $new_id"
   fi
 
   # --- пост-действия по рецептам lucx-ui-pro ---
@@ -2718,7 +2847,8 @@ create_inbounds_menu() {
       csqtt)  port=46000; while port_in_use "$port"; do port=$((port+100)); done ;;
       *)      port=$(make_port) ;;
     esac
-    local remark="${proto}-${transport}"
+    local remark
+    remark=$(inbound_remark_next "$proto" "$transport" "$security")
 
     # Домен панели для hosts-записи — резолвим ДО создания для ЛЮБОГО типа
     # (иначе reality/tproxy уходят с адресом-фолбэком, вплоть до IP сервера).
@@ -2788,14 +2918,9 @@ create_inbounds_menu() {
         break
       done
       sni_domain="$d_new"
-      if [[ "$security" == "tls" && "$proto" == "vless" ]]; then
-        decoy_template_choose_impl rdtpl "Decoy-заглушка для ${sni_domain:-${dom:-$name}} (страница на этом домене)" "$(decoy_tpl_current "${sni_domain:-${dom:-}}")"
-        decoy_tpl_store_set "${sni_domain:-${dom:-}}" "${rdtpl:-$(decoy_tpl_for "${sni_domain:-${dom:-}}")}" >/dev/null 2>&1 || true
-      elif [[ "$security" == "reality" && "$rmode" != "1" ]]; then
-        # Свой SNI у любого Reality-инбаунда (включая Trojan):
-        # браузерная TCP-заглушка выбирается отдельно от протокола.
-        decoy_template_choose_impl rdtpl "Decoy-заглушка для ${sni_domain:-${dom:-$name}} (страница на этом домене)" "$(decoy_tpl_current "${sni_domain:-${dom:-}}")"
-        decoy_tpl_store_set "${sni_domain:-${dom:-}}" "${rdtpl:-$(decoy_tpl_for "${sni_domain:-${dom:-}}")}" >/dev/null 2>&1 || true
+      if [[ "$security" == "reality" && "$rmode" != "1" ]]; then
+        # Свой SNI у Reality использует только настройки Reality.
+        :
       elif ! cert_issue "$sni_domain"; then
         local keep=""
         askyn keep "Серт $sni_domain НЕ выпущен (DNS/ACME). Создать инбаунд всё равно? Серт можно дозапустить позже (Сертификаты → обновить)." "n"
@@ -3727,7 +3852,7 @@ sync_inbound_certs() {
       continue
     fi
 
-    # --- TLS-инбаунды (naive/anytls/trusttunnel/hysteria и vless+tls) ---
+    # --- TLS-инбаунды (naive/anytls/trusttunnel/hysteria) ---
     line=$(cert_lineage_for "$dom")
     if [[ -z "$line" ]]; then
       local ci_out=""
@@ -4517,12 +4642,20 @@ cert_line_for() {   # <domain> → печатает имя линии
     printf '%s' "$pd"
     return 0
   fi
-  # Режим B
+  # Режим B. Если включён wildcard, все домены его зоны должны жить
+  # в одной линии wildcard, а не в отдельных линиях поддоменов.
+  if [[ -z "${WILDCARD_DOMAIN:-}" && -f "$WILDCARD_STATE" ]]; then
+    WILDCARD_DOMAIN=$(head -n 1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]' || true)
+  fi
+  if [[ -n "${WILDCARD_DOMAIN:-}" && ( "$d" == "$WILDCARD_DOMAIN" || "$d" == *."$WILDCARD_DOMAIN" ) ]]; then
+    printf '%s' "$WILDCARD_DOMAIN"
+    return 0
+  fi
   local pbase="${pd#*.}"
   [[ "$pbase" != *.* ]] && pbase="$pd"
   # домен панели сам (panel.exemple.xyz) → база exemple.xyz
   # домен в базе панели?
-  if [[ "$d" == "$pd" || "$d" == *."$pbase" ]]; then
+  if [[ "$d" == "$pd" || "$d" == "$pbase" || "$d" == *."$pbase" ]]; then
     printf '%s' "$pd"
     return 0
   fi
@@ -4599,13 +4732,18 @@ cert_lines_migrate_to_mode() {
     done < "$CERT_DOMAINS_FILE"
   fi
   [[ ${#domains[@]} -eq 0 ]] && return 0
-  # Разложить по базам
+  # Разложить по базам. Всю wildcard-зону собираем в одну линию wildcard.
+  if [[ -z "${WILDCARD_DOMAIN:-}" && -f "$WILDCARD_STATE" ]]; then
+    WILDCARD_DOMAIN=$(head -n 1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]' || true)
+  fi
   local pbase="${pd#*.}"
   [[ "$pbase" != *.* ]] && pbase="$pd"
   : > "$CERT_LINES_FILE"
   local d line
   for d in "${domains[@]}"; do
-    if [[ "$d" == "$pd" || "$d" == *."$pbase" ]]; then
+    if [[ -n "${WILDCARD_DOMAIN:-}" && ( "$d" == "$WILDCARD_DOMAIN" || "$d" == *."$WILDCARD_DOMAIN" ) ]]; then
+      line="$WILDCARD_DOMAIN"
+    elif [[ "$d" == "$pd" || "$d" == "$pbase" || "$d" == *."$pbase" ]]; then
       line="$pd"
     else
       line=$(cert_mode_line_base "$d")
@@ -5326,22 +5464,6 @@ cert_issue() {
     return 0
   fi
 
-  # --- авто-поиск установленного сертификата по SAN (старый блок оставлен ниже для совместимости) ---
-  local hit wcdir wcbase
-  hit=$(find_covering_cert "$d") || hit=""
-  if [[ -n "$hit" ]]; then
-    wcdir="${hit%%|*}"; wcbase="${hit#*|}"
-    log "  cert $d: найден установленный сертификат «$(basename "$wcdir")» — переустановка не нужна"
-    # панель берёт пути из cert_mirror_to_certroot → live/
-    cert_mirror_to_certroot "$wcdir" "$d" >/dev/null 2>&1 || true
-    if [[ -n "$wcbase" ]]; then
-      echo "$wcbase" > "$WILDCARD_STATE" 2>/dev/null || true
-      WILDCARD_DOMAIN="$wcbase"
-      log "  флаг wildcard восстановлен: *.$wcbase"
-    fi
-    return 0
-  fi
-
   # --- восстановление из archive/ (если live-ссылки потеряны) ---
   if [[ -d "$arch" ]]; then
     log "  cert $d: восстановление из archive/"
@@ -5375,8 +5497,9 @@ cert_issue() {
   elif [[ "$name" == "VLESS XHTTP TLS" ]]; then
           # Явный TLS-пункт: CDN не спрашиваем и security сохраняем как tls.
           security="tls"
+          INBOUND_CREATE_MODE="tls"
           _is_cdn=false
-        elif [[ -t 0 ]]; then
+        elif [[ -t 0 && "$security" != "tls" ]]; then
     echo "  Какой сертификат выпустить для $d?"
     echo "   1) Wildcard *.$wbase — Cloudflare DNS-01, покроет $wbase и все поддомены"
     echo "   2) Обычный персональный — только $d (HTTP-01)"
@@ -5395,6 +5518,8 @@ cert_issue() {
       log "  cert $d: используется wildcard *.${WILDCARD_DOMAIN:-$wbase}"
       return 0
     fi
+    err "  ОШИБКА: wildcard для $d не установлен. Нажмите Enter для продолжения."
+    cert_error_pause
     warn "  wildcard НЕ выпущен (токен Cloudflare / DNS-01?) — для $d выпускаю персональный"
     warn "  ВАЖНО: остальные серты этой установки тоже пойдут персональными (фолбэк сессии)."
     warn "  Вернуть wildcard потом: меню сертификатов → Wildcard Cloudflare → включить,"
@@ -5499,6 +5624,7 @@ $(certbot certonly --standalone --non-interactive --agree-tos --keep-until-expir
     rl=$(echo "$out" | grep -oE "retry after [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC" | head -1 || true)
     [[ -n "$rl" ]] && err "  ЛИМИТ LET'S ENCRYPT (5 сертов/168ч): повторить после $rl — это НЕ баг скрипта"
     err "  ИТОГ: серт $d НЕ выпущен — инбаунд с этим доменом не поднимется"
+    cert_error_pause
     return 1
   }
 
@@ -6216,7 +6342,10 @@ HOOK
     log "  покрывает: $base и *.$base — персональные сертификаты больше не нужны"
     return 0
   fi
-  err "  certbot отказал:"; echo "$out" | tail -8 | sed 's/^/    /'
+  err "  certbot отказал:"
+  echo "$out" | tail -12 | sed 's/^/    /'
+  err "  ИТОГ: wildcard *.$base НЕ выпущен — дальнейшая настройка остановлена."
+  cert_error_pause
   return 1
 }
 
@@ -6310,6 +6439,18 @@ sni_map_add() {
   [[ "$domain" =~ ^[A-Za-z0-9._-]+$ && "$backend" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   sni_conf_ensure
   sni_conf_repair_map
+  # В map nginx каждый домен должен встречаться ровно один раз. Если старый
+  # запуск оставил дубликаты, удаляем их перед добавлением нового маршрута.
+  awk -v dom="$domain" -v be="$backend" '
+    BEGIN { inmap=0; kept=0 }
+    /^[[:space:]]*map[[:space:]]/ { inmap=1; print; next }
+    inmap && /^[[:space:]]*}/ { inmap=0; print; next }
+    inmap && $1 == dom {
+      if (!kept) { print "    " dom "    " be ";"; kept=1 }
+      next
+    }
+    { print }
+  ' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF"
   if awk -v dom="$domain" '$1 == dom { found=1 } END { exit(found ? 0 : 1) }' "$SNI_CONF" 2>/dev/null; then
     awk -v dom="$domain" -v be="$backend" 'BEGIN{OFS=" "} $1 == dom {$0="    " dom "    " be ";"} {print}' "$SNI_CONF" > "$SNI_CONF.tmp" && mv "$SNI_CONF.tmp" "$SNI_CONF"
     return 0
@@ -6829,7 +6970,13 @@ EOF
     local tpl_src="$DECOY_TPL_DIR/$tpl.html"
     is_login_template "$tpl" && tpl_src="$DECOY_LOGIN_DIR/$tpl.html"
     if [[ -f "$tpl_src" ]]; then
-      cp -f "$tpl_src" "$root/index.html" 2>/dev/null || true
+      # Всегда заменяем старую страницу: иначе при смене шаблона
+      # старый index.html может остаться незатронутым.
+      rm -f "$root/index.html" 2>/dev/null || true
+      if ! cp -f "$tpl_src" "$root/index.html" 2>/dev/null; then
+        warn "Не удалось применить decoy-шаблон $tpl к $root"
+        return 1
+      fi
     elif [[ "$tpl" != redirect && "$tpl" != locked ]]; then
       cp -f "$DECOY_TPL_DIR/default.html" "$root/index.html" 2>/dev/null || true
     fi
@@ -6891,6 +7038,34 @@ EOF
   } >> "$STACK_CONF"
 }
 
+# Для Xray fallback входящий TLS уже расшифрован, поэтому dest должен быть
+# обычным HTTP, а не вторым TLS-соединением. Иначе браузер получает
+# ERR_HTTP2_PROTOCOL_ERROR/400. Создаём отдельный plain listener с тем же root.
+mk_plain_fallback_decoy() {   # <port> <domain> <root>
+  local port="$1" dom="$2" root="$3"
+  [[ "$port" =~ ^[0-9]+$ && "$dom" && "$root" ]] || return 1
+  stack_ensure
+  stack_del_decoy "$dom" "fallback-plain" 2>/dev/null || true
+  {
+    echo "# >>> fallback-plain port=$port root=$root domain=$dom"
+    cat <<EOF
+server {
+    listen 127.0.0.1:$port;
+    server_name $dom;
+    root $root;
+    index index.html;
+    include /etc/nginx/snippets/decoy-headers.conf;
+    access_log $DECOY_LOG_ACCESS decoy_ext;
+    error_log /var/log/nginx/decoy-error.log;
+    location = /robots.txt { return 200 "User-agent: *\\nDisallow: /\\n"; }
+    location / { try_files \\$uri \\$uri/ /index.html; }
+}
+EOF
+    echo "# <<< fallback-plain port=$port domain=$dom"
+  } >> "$STACK_CONF"
+  nginx_reload
+}
+
 # =====================================================================
 # SNI ДЛЯ ИНБАУНДА
 # =====================================================================
@@ -6945,6 +7120,39 @@ reality_set_dest() {
   db_protect_resume
   log "  Reality dest → 127.0.0.1:$decoy_port (decoy nginx)"
   return 0
+}
+
+# VLESS/Trojan TCP+TLS fallback → локальный HTTPS-decoy.
+# XHTTP намеренно не включается: его транспорт обслуживается CDN/frontend.
+tls_fallback_set() {   # <inbound_id> <decoy_port>
+  local id="$1" decoy_port="$2" proto net sec st new_settings stored
+  [[ "$id" =~ ^[0-9]+$ && "$decoy_port" =~ ^[0-9]+$ ]] || return 1
+  proto=$(sqlite3 "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  [[ "$proto" == "vless" || "$proto" == "trojan" ]] || return 1
+  st=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'{}') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  net=$(grep -oE '"network"[[:space:]]*:[[:space:]]*"[^"]+' <<<"$st" | head -1 | sed 's/.*"//')
+  sec=$(grep -oE '"security"[[:space:]]*:[[:space:]]*"[^"]+' <<<"$st" | head -1 | sed 's/.*"//')
+  [[ "$sec" == "tls" && "$net" == "tcp" ]] || {
+    warn "  #$id: fallback не включён (требуется TCP+TLS; получено ${net:-?}/${sec:-?})"
+    return 2
+  }
+  db_protect_suspend
+  new_settings=$(sqlite3 "$XUI_DB" "SELECT json_set(COALESCE(settings,'{}'),'\$.fallbacks',json('[{\"dest\":\"127.0.0.1:$decoy_port\"}]')) FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  [[ -n "$new_settings" && "$new_settings" != "null" ]] || { db_protect_resume; return 1; }
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET settings='$(sql_escape "$new_settings")' WHERE id=$id;" 2>/dev/null || { db_protect_resume; return 1; }
+  stored=$(sqlite3 "$XUI_DB" "SELECT json_extract(settings,'\$.fallbacks[0].dest') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  db_protect_resume
+  [[ "$stored" == "127.0.0.1:$decoy_port" ]] || { warn "  #$id: fallback не удержался в БД"; return 1; }
+  log "  #$id: TLS fallback → 127.0.0.1:$decoy_port"
+  return 0
+}
+
+tls_fallback_clear() {   # <inbound_id>
+  local id="$1"
+  [[ "$id" =~ ^[0-9]+$ ]] || return 1
+  db_protect_suspend
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET settings=json_remove(COALESCE(settings,'{}'),'\$.fallbacks') WHERE id=$id;" 2>/dev/null
+  db_protect_resume
 }
 
 # Вставить/обновить запись hosts в панели для TCP-инбаунда (адрес=домен, порт 443).
@@ -7123,6 +7331,18 @@ hosts_cdn_upsert() {   # <inbound_id> <cdn_domain> [proto]
 # =====================================================================
 # Кандидат на CDN: ЛЮБОЙ протокол с транспортом xhttp, у которого
 # security нет/none (идеальный вход) или tls (существующий, будет переведён).
+inbound_was_created_as_tls_xhttp() {   # <inbound_id>
+  local id="$1" listed=" ${XHTTP_TLS_CREATED_IDS:-} "
+  [[ " $listed " == *" $id "* ]]
+}
+
+# TLS/Reality XHTTP никогда не предлагает CDN. Проверяем сохранённую запись,
+# а не только временный список ID, который теряется при повторном запуске меню.
+inbound_xhttp_has_tls_or_reality() {   # <stream_json>
+  local s="$1"
+  grep -Eqi '"security"[[:space:]]*:[[:space:]]*"(tls|reality)"' <<<"$s"
+}
+
 inbound_is_xhttp_cdn_candidate() {   # <stream_json>
   local s="$1"
   [[ -z "$s" ]] && return 1
@@ -7534,6 +7754,27 @@ cdn_repair() {   # [quiet] [noreload]
   return 0
 }
 
+# Проверить, не занят ли домен ORIGIN существующей настройкой панели:
+# hosts-записями и SNI/host-полями активных инбаундов. skip_id нужен
+# при редактировании текущего CDN-инбаунда, чтобы он не конфликтовал сам с собой.
+cdn_origin_in_panel() {   # <domain> [skip_inbound_id]
+  local domain="${1,,}" skip_id="${2:-0}"
+  [[ -n "$domain" && -f "$XUI_DB" ]] || return 1
+  sqlite3 "$XUI_DB" "
+    SELECT 1 FROM hosts
+      WHERE lower(COALESCE(address,''))='$domain'
+         OR lower(COALESCE(sni,''))='$domain'
+         OR lower(COALESCE(host_header,''))='$domain'
+    UNION ALL
+    SELECT 1 FROM inbounds
+      WHERE enable=1 AND id!=$skip_id AND (
+        lower(COALESCE(json_extract(stream_settings,'$.tlsSettings.serverName'),''))='$domain'
+        OR lower(COALESCE(json_extract(stream_settings,'$.xhttpSettings.host'),''))='$domain'
+        OR EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(stream_settings,'$.realitySettings.serverNames'),'[]'))
+                   WHERE lower(value)='$domain')
+      ) LIMIT 1;" 2>/dev/null | grep -q 1
+}
+
 # Вопросы CDN-профиля: домены + путь + шаблон decoy. Заполняет глобальные
 # CDN_ORIGIN/CDN_DOM/CDN_PATH/CDN_TPL. Не-TTY → детерминированные дефолты.
 cdn_ask_profile() {   # <id> <proto>
@@ -7546,6 +7787,11 @@ cdn_ask_profile() {   # <id> <proto>
     echo -e "${B}CDN-профиль #$id ($proto, transport=xhttp):${N}"
     ask CDN_DOM   "Домен, привязанный к CDN (например cdn.$base)"  "cdn.$base"  '^[a-zA-Z0-9.-]+$'
     ask CDN_ORIGIN "ORIGIN-домен (A-запись → этот сервер)"          "$base"   '^[a-zA-Z0-9.-]+$'
+  fi
+  # ORIGIN не должен совпадать ни с одним доменом, уже занятым панелью.
+  if cdn_origin_in_panel "$CDN_ORIGIN"; then
+    warn "ORIGIN $CDN_ORIGIN уже используется в настройках панели/инбаундов. Выбери отдельный свободный домен, иначе существующий SNI/маршрут может сломаться."
+    return 1
   fi
   local def_path; def_path=$(cdn_default_path "$CDN_ORIGIN")
   if [[ -n "${CDN_PRE_PATH:-}" ]]; then
@@ -7578,16 +7824,27 @@ cdn_ask_profile() {   # <id> <proto>
 # Вопрос про CDN + настройка CDN-профиля. Возвращает:
 #   0 — инбаунд настроен как CDN (вызвавшему пункту дальше ничего делать не надо)
 #   1 — не xhttp-кандидат или пользователь ответил «нет» (продолжить обычную логику)
-# Кандидат: ЛЮБОЙ протокол с transport=xhttp и security none/нет (новая логика:
-# TLS терминирует nginx, инбаунд голый на 127.0.0.1) или tls (старая, переводится).
+# CDN-вариант создаётся как VLESS+XHTTP с security=none (HTTP к Xray за nginx).
+# XHTTP+TLS и XHTTP+Reality остаются отдельными режимами.
 xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
   local id="$1" proto="$2" port="$3"
+  [[ "$proto" != "vless" ]] && return 1
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" ]] && return 1
   local stream=""
   stream=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
   inbound_is_xhttp_cdn_candidate "$stream" || return 1
+  # Защитная проверка ДО меню: TLS/Reality не переводим в CDN/plain.
+  inbound_xhttp_has_tls_or_reality "$stream" && return 1
+  inbound_was_created_as_tls_xhttp "$id" && return 1
+  # Любой реальный TLS/Reality в stream_settings исключает CDN-вопрос.
+  # Исключение по временному ID нужно для TLS-конфигураций LucX, где security
+  # может не сериализоваться как ожидается сразу после создания.
+  inbound_xhttp_has_tls_or_reality "$stream" && return 1
+  inbound_was_created_as_tls_xhttp "$id" && return 1
   local _was_tls=false
-  grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$stream" && _was_tls=true
+  # XHTTP TLS — отдельный режим. CDN для него не предлагаем и не переводим
+  # security=tls в security=none: TLS должен оставаться на Xray.
+  [[ "$_was_tls" == true ]] && return 1
   echo
   echo -e "${B}Инбаунд #$id ($proto): transport=xhttp${N}"
   local use_cdn=""
@@ -7836,6 +8093,12 @@ cdn_change_profile() {   # <id>
       n_cdn="$CDN_DOM"; n_origin="$CDN_ORIGIN"; n_path="$CDN_PATH"; n_tpl="$CDN_TPL"
       ;;
   esac
+  # При редактировании разрешаем сохранить текущий ORIGIN этого профиля,
+  # но блокируем домены, используемые любыми другими panel/inbound-настройками.
+  if cdn_origin_in_panel "$n_origin" "$id"; then
+    err "ORIGIN $n_origin уже используется настройками панели/другого инбаунда. Укажи свободный отдельный домен, чтобы не нарушить существующий SNI/маршрут."
+    return 1
+  fi
   [[ "$n_origin" == "$origin" && "$n_cdn" == "$cdn" && "$n_path" == "$path" && "$n_tpl" == "$tpl" ]] && {
     warn "Ничего не изменилось"; return 0; }
 
@@ -7897,7 +8160,7 @@ configure_sni_for_inbound() {
   sni_used_load
   [[ -n "$panel_domain" ]] && SNI_USED["$panel_domain"]="${SNI_USED[$panel_domain]:-panel_backend}"
 
-  # === XHTTP (любой протокол): вопрос «через CDN?».
+  # === VLESS XHTTP без security: единственный режим с предложением CDN.
   # Если пользователь ответил «да» — инбаунд полностью настроен как CDN-профиль
   # (nginx TLS-фронтенд, hosts с доменом CDN) и обычная логика не нужна.
   # Уже настроенный CDN-профиль повторно не спрашиваем и не ломаем,
@@ -7906,12 +8169,19 @@ configure_sni_for_inbound() {
     cdn_existing_menu "$id"
     return 0
   fi
+  # Только VLESS+XHTTP без TLS/Reality может получить предложение CDN.
+  # Выбранный вариант «VLESS XHTTP TLS» всегда сохраняет TLS на Xray.
+  # Этот флажок нужен, потому что после вставки записи в SQLite исходная
+  # переменная security больше не передаётся в configure_sni_for_inbound.
+  local _skip_xhttp_cdn_prompt=false
+  inbound_was_created_as_tls_xhttp "$id" && _skip_xhttp_cdn_prompt=true
   # CDN спрашиваем только у XHTTP без TLS: это отдельный CDN-режим.
   # XHTTP+TLS из меню — обычный TLS-инбаунд и не должен неожиданно
   # предлагать CDN; CDN-вариант выбирается отдельным пунктом.
   local _xhttp_stream=""
   _xhttp_stream=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-  if grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$_xhttp_stream" && \
+  if [[ "$proto" == "vless" && "$_skip_xhttp_cdn_prompt" != true ]] && \
+     grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$_xhttp_stream" && \
      grep -Eqi '"security"[[:space:]]*:[[:space:]]*"none"' <<<"$_xhttp_stream"; then
     if xhttp_cdn_setup "$id" "$proto" "$port"; then
       return 0
@@ -7963,6 +8233,8 @@ configure_sni_for_inbound() {
         warn "  cert для $existing_domain недоступен — Reality dest не обновлён"
       fi
     fi
+    # Уже существующий SNI полностью настроен; TLS-протоколы не используют
+    # браузерные HTTPS-заглушки и не требуют повторного предложения шаблона.
     return 0
   fi
 
@@ -7972,7 +8244,7 @@ configure_sni_for_inbound() {
     anytls) def="at.example.com";;
     mtproto) def="tg.example.com";;
   esac
-  local domain="" HIDE_EXT_443=false
+  local domain="$existing_domain" HIDE_EXT_443=false
   if [[ -n "$pre_domain" ]]; then
     # домен выбран до создания инбаунда — проверяем и используем без повторного вопроса
     local pre_owner=""
@@ -8051,39 +8323,31 @@ configure_sni_for_inbound() {
     fi
     local tls_port=$(( 4444 + id ))
     while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
-    # шаблон заглушки: мастер создания передаёт его явно (pre_tpl); при ручной
-    # настройке п.2 — спрашиваем здесь
     if [[ -z "$pre_tpl" && -t 0 ]]; then
       decoy_template_choose_impl pre_tpl "Decoy-заглушка для $domain (страница на этом домене)" "$(decoy_tpl_current "$domain")"
     fi
-    pre_tpl="${pre_tpl:-$(decoy_tpl_for "$domain")}"
-    decoy_tpl_store_set "$domain" "$pre_tpl" >/dev/null 2>&1 || true
+    pre_tpl="${pre_tpl:-$(decoy_tpl_for "$domain")}"; decoy_tpl_store_set "$domain" "$pre_tpl" >/dev/null 2>&1 || true
     mk_decoy "$tls_port" "$domain" "$cert" "$key" "/var/www/decoy-$id" "$pre_tpl"
-    reality_set_dest "$id" "$tls_port" "$domain"   # dest = внутренний IP decoy nginx + serverNames = домен
-    systemctl restart x-ui >/dev/null 2>&1 || true   # панель сразу подхватит новый dest
+    reality_set_dest "$id" "$tls_port" "$domain"
+    systemctl restart x-ui >/dev/null 2>&1 || true
     log "  + decoy (Reality) на порту $tls_port ($pre_tpl)"
-  fi
-
-  # vless/trojan + TLS (не Reality): браузерный fallback ведёт в HTTPS-decoy
-  # из выбранного списка, а не на произвольный сайт :80.
-  if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$stream"; then
-    local tls_tpl="${pre_tpl:-default}" tls_cp tls_cert tls_key tls_port
-    tls_cp=$(cert_paths "$domain" 2>/dev/null || true)
-    [[ -z "$tls_cp" ]] && tls_cp="$(xui_get webCertFile 2>/dev/null || true) $(xui_get webKeyFile 2>/dev/null || true)"
-    tls_cert="${tls_cp%% *}"; tls_key="${tls_cp##* }"
-    if [[ -f "$tls_cert" && -f "$tls_key" ]]; then
-      tls_port=$((47000 + id))
-      while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
-      mk_decoy "$tls_port" "$domain" "$tls_cert" "$tls_key" "/var/www/decoy-tls-$id" "$tls_tpl"
-      systemctl stop x-ui >/dev/null 2>&1 || true
-      # LucX сериализует settings.fallbacks строкой в config.json, из-за чего
-      # Xray падает с «cannot unmarshal string». Для LucX оставляем инбаунд
-      # рабочим; HTTPS-decoy создаём отдельно, без несовместимого fallback.
-      sqlite3 "$XUI_DB" "UPDATE inbounds SET settings=json_remove(settings,'\$.fallbacks') WHERE id=$id;" 2>/dev/null || true
-      systemctl start x-ui >/dev/null 2>&1 || true
-      log "  + HTTPS-decoy: $tls_tpl → 127.0.0.1:$tls_port (без fallback LucX)"
-    else
-      warn "Серт $domain не найден — HTTPS-decoy не создан"
+  elif [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$stream"; then
+    # XHTTP+TLS не имеет fallback-decoy. Он не попадает в эту ветку:
+    # decoy для него не создаётся и не предлагается в меню.
+    if grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$stream"; then
+      warn "$proto XHTTP+TLS (#$id): decoy отсутствует по проектной схеме."
+      pause; return 0
+    fi
+    # Для VLESS/Trojan TCP+TLS заглушка обязательна, но шаблон вручную не спрашиваем.
+    local cp_line="" cert="" key="" tls_port tpl
+    cp_line=$(cert_paths "$domain" 2>/dev/null || true)
+    [[ -z "$cp_line" ]] && cert_issue "$domain" >/dev/null 2>&1 || true
+    cp_line=$(cert_paths "$domain" 2>/dev/null || true)
+    cert="${cp_line%% *}"; key="${cp_line##* }"; tpl="$(decoy_tpl_for "$domain")"
+    if [[ -f "$cert" && -f "$key" ]]; then
+      tls_port=$((47000 + id)); while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
+      mk_decoy "$tls_port" "$domain" "$cert" "$key" "/var/www/decoy-tls-$id" "$tpl" >/dev/null 2>&1 || true
+      log "  + HTTPS-decoy для TLS создан автоматически"
     fi
   fi
 
@@ -8331,18 +8595,17 @@ initial_setup() {
       HIDE[$id]=false; continue
     fi
 
-    # Для XHTTP (ЛЮБОЙ протокол с transport=xhttp) вопрос CDN задаём прямо
-    # в пункте 1, даже если инбаунд уже имеет старый SNI-map. При ответе «да»
-    # xhttp_cdn_setup полностью переводит профиль в CDN (nginx TLS, инбаунд
-    # без security) и дальнейшая обычная SNI-ветка не нужна.
-    if [[ -n "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
-      log "#$id ($proto) уже в CDN-режиме ($(cdn_profile_field "$id" 3)) — сверяю CDN-настройку"
-      cdn_repair 1
-    fi
-    if inbound_is_xhttp_cdn_candidate "${INB_STREAM[$id]}"; then
-      if xhttp_cdn_setup "$id" "$proto" "$port"; then
-        HIDE[$id]=true
-        continue
+    # CDN-профили обслуживаются только для VLESS+XHTTP без безопасности.
+    if [[ "$proto" == "vless" ]] && grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"${INB_STREAM[$id]}"; then
+      if [[ -n "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
+        log "#$id ($proto) уже в CDN-режиме ($(cdn_profile_field "$id" 3)) — сверяю CDN-настройку"
+        cdn_repair 1
+      fi
+      if inbound_is_xhttp_cdn_candidate "${INB_STREAM[$id]}"; then
+        if xhttp_cdn_setup "$id" "$proto" "$port"; then
+          HIDE[$id]=true
+          continue
+        fi
       fi
     fi
 
@@ -8531,12 +8794,25 @@ initial_setup() {
   {
     echo "map \$ssl_preread_server_name \$backend {"
     echo "    default                       panel_backend;"
-    echo "    $PANEL_DOMAIN                 panel_backend;"
+    # Один SNI в nginx stream map может иметь только одно значение. Сначала
+    # резервируем домен панели: если старый/повторный запуск случайно выдал
+    # его инбаунду, панельный маршрут сохраняется, а дубликат не печатается.
+    local -A _sni_emitted=()
+    if [[ -n "${PANEL_DOMAIN:-}" ]]; then
+      echo "    $PANEL_DOMAIN                 panel_backend;"
+      _sni_emitted["$PANEL_DOMAIN"]="panel_backend"
+    fi
     for id in "${INB_IDS[@]}"; do
       # Не выводим пустой SNI: иначе получается строка только с backend,
       # и nginx сообщает «invalid number of the map parameters».
-      [[ "${HIDE[$id]}" == true && -n "${DOMAIN[$id]:-}" ]] && \
-        echo "    ${DOMAIN[$id]}    inb_${id}_backend;"
+      local _sni_dom="${DOMAIN[$id]:-}"
+      [[ "${HIDE[$id]}" == true && -n "$_sni_dom" ]] || continue
+      if [[ -n "${_sni_emitted[$_sni_dom]+x}" ]]; then
+        warn "SNI $_sni_dom уже занят (${_sni_emitted[$_sni_dom]}) — маршрут inb_${id}_backend не добавлен"
+        continue
+      fi
+      echo "    $_sni_dom    inb_${id}_backend;"
+      _sni_emitted["$_sni_dom"]="inb_${id}_backend"
     done
     # CDN-профили: SNI origin/cdn → локальный TLS-фронтенд (xhttp-инбаунды
     # без security входят через nginx). Карта перегенерируется — маршруты держим здесь.
@@ -8545,8 +8821,22 @@ initial_setup() {
     while IFS= read -r _cp_row; do
       _cp_origin=$(printf '%s' "$_cp_row" | cut -d'|' -f3)
       _cp_cdn=$(printf '%s' "$_cp_row" | cut -d'|' -f4)
-      [[ -n "$_cp_origin" ]] && echo "    $_cp_origin    cdn_frontend;"
-      [[ -n "$_cp_cdn" ]] && echo "    $_cp_cdn    cdn_frontend;"
+      if [[ -n "$_cp_origin" ]]; then
+        if [[ -z "${_sni_emitted[$_cp_origin]+x}" ]]; then
+          echo "    $_cp_origin    cdn_frontend;"
+          _sni_emitted["$_cp_origin"]="cdn_frontend"
+        else
+          warn "SNI $_cp_origin уже занят (${_sni_emitted[$_cp_origin]}) — CDN origin не добавлен"
+        fi
+      fi
+      if [[ -n "$_cp_cdn" ]]; then
+        if [[ -z "${_sni_emitted[$_cp_cdn]+x}" ]]; then
+          echo "    $_cp_cdn    cdn_frontend;"
+          _sni_emitted["$_cp_cdn"]="cdn_frontend"
+        else
+          warn "SNI $_cp_cdn уже занят (${_sni_emitted[$_cp_cdn]}) — CDN domain не добавлен"
+        fi
+      fi
     done < "$CDN_PROFILES" 2>/dev/null || true
     echo "}"
     echo
@@ -9127,9 +9417,9 @@ fix_inbound() {
     warn "#$id tproxy — это tg web proxy: за 443 ведёт свой маршрут (setup_tproxy_web), отдельная настройка не нужна."
     return 0
   fi
-  # XHTTP-инбаунд (любой протокол, security нет/none/tls) — кандидат на CDN:
+  # VLESS XHTTP без security — кандидат на CDN:
   # вопрос задаётся ниже, отказ от CDN с голым xhttp всё равно не спрятать за SNI
-  if ! grep -Eqi '"security": ?"tls"|"security":"tls"|reality' <<<"$stream" \
+  if [[ "$proto" != "vless" ]] && ! grep -Eqi '"security": ?"tls"|"security":"tls"|reality' <<<"$stream" \
      && [[ "$proto" != naive* && "$proto" != "anytls" && "$proto" != trust* ]]; then
     if ! grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$stream"; then
       warn "С данным типом подключения скрипт не работает: #$id ($proto, TLS/Reality не найдены в stream_settings)."
@@ -9138,12 +9428,14 @@ fix_inbound() {
     warn "#$id ($proto) — xhttp без security: за SNI-роутер напрямую не прячется, только CDN-режим (nginx TLS)."
   fi
 
-  # === XHTTP (любой протокол): вопрос «через CDN?».
+  # === VLESS XHTTP без security: единственный режим с предложением CDN.
   # Важно: без этого хука ветка TLS ниже переписала бы xhttp-инбаунд в голый tcp.
-  if [[ -n "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
-    cdn_existing_menu "$id"
-    pause
-    return 0
+  if [[ "$proto" == "vless" ]] && grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$stream"; then
+    if [[ -n "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
+      cdn_existing_menu "$id"
+      pause
+      return 0
+    fi
   fi
   if xhttp_cdn_setup "$id" "$proto" "$port"; then
     pause
@@ -9214,17 +9506,25 @@ fix_inbound() {
   [[ -z "$cp_line" ]] && { err "cert для $domain не найден"; return 1; }
   cert="${cp_line%% *}"; key="${cp_line##* }"
 
-  # Reality и XHTTP+TLS получают браузерную decoy-страницу. Для XHTTP+TLS
-  # вопрос CDN уже был задан выше; если CDN не выбран, нужен обычный decoy.
+  # Reality и VLESS/Trojan TCP+TLS получают браузерную decoy-страницу.
+  # XHTTP TLS обслуживается CDN/frontend и не использует Xray fallback; для
+  # него локальный TLS-decoy здесь не создаём.
   local tls_port="" rdtpl="default"
-  if grep -qi reality <<<"$stream" || inbound_is_xhttp_tls "$stream"; then
+  if grep -qi reality <<<"$stream" || \
+     { [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -Eqi '"network"[[:space:]]*:[[:space:]]*"tcp"' <<<"$stream" && grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$stream"; }; then
     decoy_template_choose_impl rdtpl "Decoy-заглушка для $domain (страница на этом домене)" "$(decoy_tpl_current "$domain")"
     rdtpl="${rdtpl:-$(decoy_tpl_for "$domain")}"
     decoy_tpl_store_set "$domain" "$rdtpl" >/dev/null 2>&1 || true
     tls_port=$(( 4444 + id ))
     while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
     mk_decoy "$tls_port" "$domain" "$cert" "$key" "/var/www/decoy-$id" "$rdtpl"
-    log "  + decoy (Reality) на порту $tls_port ($rdtpl)"
+     if grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$stream" && grep -Eqi '"network"[[:space:]]*:[[:space:]]*"tcp"' <<<"$stream"; then
+       local plain_port=$((tls_port + 1))
+        while ss -tlnH "sport = :$plain_port" 2>/dev/null | grep -q .; do plain_port=$((plain_port+1)); done
+        mk_plain_fallback_decoy "$plain_port" "$domain" "/var/www/decoy-$id" || warn "  #$id: plain fallback-decoy не создан"
+        tls_fallback_set "$id" "$plain_port" || warn "  #$id: fallback не включён"
+     fi
+     log "  + decoy (TLS fallback/Reality) на порту $tls_port ($rdtpl)"
   else
     log "  decoy не нужен ($proto — не Reality)"
   fi
@@ -9379,7 +9679,7 @@ add_inbound() {
       existing=$(grep -E "^\s+\S+\s+inb_${id}_backend" "$SNI_CONF" 2>/dev/null | awk '{print $1}' || true)
       if [[ -n "$existing" ]]; then
          # Для любого XHTTP без TLS предложить CDN так же, как при создании VLESS XHTTP.
-         if inbound_is_xhttp_cdn_candidate "$stream" && [[ -z "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
+         if [[ "$proto" == "vless" ]] && inbound_is_xhttp_cdn_candidate "$stream" && [[ -z "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
            xhttp_cdn_setup "$id" "$proto" "$port" || true
          fi
         log "#$id ($proto/$port) → SNI: $existing ✓"
@@ -9564,7 +9864,12 @@ remove_inbound() {
   fi
 
   nginx_reload || true
-  systemctl restart x-ui >/dev/null 2>&1 || true
+  # При удалении inbound x-ui уже был остановлен и запущен выше.
+  # Повторный немедленный restart создаёт гонку с его дочерними tunnel-процессами
+  # и может привести к failed/start-limit-hit. Для остальных действий restart нужен.
+  if [[ "${do_inb:-false}" != true ]]; then
+    systemctl restart x-ui >/dev/null 2>&1 || true
+  fi
   log "Готово."
 }
 
@@ -9826,10 +10131,30 @@ decoy_ensure_all() {
       line_ok=1
       continue
     fi
-    # Штатная схема: decoy только у собственного Reality и панели.
-    # Обычный TLS/VLESS fallback больше не включаем — он не является decoy
-    # для этой схемы и раньше приводил к лишним «декоям» у инбаундов.
-    echo "  #$id $dom ($proto) — decoy не назначается (штатно только Reality)"
+    # VLESS/Trojan TCP+TLS получают тот же HTTPS-decoy через Xray fallback.
+    if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$st" && grep -Eqi '"network"[[:space:]]*:[[:space:]]*"tcp"' <<<"$st"; then
+      local tmeta tcp cpk tc tk trt
+      tmeta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
+      if [[ -n "$tmeta" ]]; then
+        tcp="${tmeta%% *}"
+        local plain_tcp=$((tcp + 1))
+        while ss -tlnH "sport = :$plain_tcp" 2>/dev/null | grep -q .; do plain_tcp=$((plain_tcp+1)); done
+        mk_plain_fallback_decoy "$plain_tcp" "$dom" "/var/www/decoy-$id" || true
+        tls_fallback_set "$id" "$plain_tcp" && line_ok=1
+        echo "  #$id $dom — TLS fallback → 127.0.0.1:$tcp"
+      else
+        cpk=$(cert_paths "$dom" 2>/dev/null || true)
+        if [[ -n "$cpk" ]]; then
+          tc="${cpk%% *}"; tk="${cpk##* }"; tcp=$(decoy_port_for_id "$id"); trt=$(decoy_tpl_for "$dom")
+          mk_decoy "$tcp" "$dom" "$tc" "$tk" "/var/www/decoy-$id" "$trt" && mk_plain_fallback_decoy "$((tcp + 1))" "$dom" "/var/www/decoy-$id" && tls_fallback_set "$id" "$((tcp + 1))" && line_ok=1
+          echo "  #$id $dom — HTTPS-decoy + TLS fallback на $tcp"
+        else
+          warn "  #$id $dom — сертификат не найден, TLS fallback отложен"
+        fi
+      fi
+    else
+      echo "  #$id $dom ($proto) — decoy не назначается"
+    fi
   done < <(awk '
     /^map / { inmap=1; next }
     inmap && /^}/ { inmap=0 }
@@ -9980,7 +10305,8 @@ decoy_pick_inbound() {
     log "Hysteria #$id: TCP-decoy обновлён, UDP-инбаунд не изменён"
     pause; return 0
   fi
-  if grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$st" || inbound_is_xhttp_tls "$st"; then
+  if grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$st" || \
+     { [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$st"; }; then
     local tpl="" meta dport="" c="" k="" root=""
     decoy_template_choose_impl tpl "Decoy для #$id ($dom)" "$(decoy_tpl_current "$dom")"
     tpl="${tpl:-$(decoy_tpl_for "$dom")}"
@@ -9999,13 +10325,15 @@ decoy_pick_inbound() {
       while ss -tlnH "sport = :$dport" 2>/dev/null | grep -q .; do dport=$((dport+1)); done
       mk_decoy "$dport" "$dom" "$c" "$k" "/var/www/decoy-$id" "$tpl"
     fi
-    db_protect_suspend
-    reality_set_dest "$id" "$dport" "$dom" || { err "Не удалось записать Reality dest для #$id"; pause; return 1; }
+    if grep -Eqi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$st"; then
+      db_protect_suspend
+      reality_set_dest "$id" "$dport" "$dom" || { err "Не удалось записать Reality dest для #$id"; pause; return 1; }
+    fi
     nginx_reload || { err "Decoy создан, но nginx не перезагрузился"; pause; return 1; }
     log "Decoy #$id ($dom): «$tpl» на 127.0.0.1:$dport"
     pause; return 0
   fi
-  # Обычный TLS/тunnel-инбаунд не является доступным decoy-объектом.
+  # Обычный TLS/туннельный инбаунд без поддерживаемого decoy не попадает в список.
   # Штатная схема меню — только собственный Reality и панель.
   case "$proto" in
     naive|anytls|trusttunnel|trust-tunnel|hy2|hysteria)
@@ -10065,7 +10393,9 @@ decoy_reset_all() {
         ds=$(grep -oE '"dest"[[:space:]]*:[[:space:]]*[^,}]+' <<<"$fb" | sed -E 's/.*:[[:space:]]*//; s/^"//; s/"$//')
         if [[ -n "$ds" ]]; then
           ok=1
-          for d in $ds; do [[ "$d" == "80" || "$d" == "127.0.0.1:80" ]] || ok=0; done
+          for d in $ds; do
+             [[ "$d" == "80" || "$d" == "127.0.0.1:80" || "$d" =~ ^127\.0\.0\.1:4[0-9]{3,5}$ ]] || ok=0
+           done
           if (( ok )); then
             db_protect_suspend
             if ! sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET settings=json_remove(settings,'\$.fallbacks') WHERE id=$id;"; then
@@ -10098,6 +10428,12 @@ decoy_reset_all() {
 decoy_domain_apply_tpl() {   # <domain> <tpl>
   local dom="${1:-}" tpl="${2:-}" meta="" port="" root="" cert="" key=""
   [[ -n "$dom" && -n "$tpl" ]] || return 1
+  # XHTTP+TLS не имеет Xray fallback: его локальный decoy не виден
+  # через внешний SNI и не должен ошибочно считаться применимым объектом.
+  if [[ -f "$XUI_DB" ]] && sqlite3 "$XUI_DB" "SELECT 1 FROM inbounds WHERE enable=1 AND (protocol='vless' OR protocol='trojan') AND json_extract(stream_settings,'\$.xhttpSettings') IS NOT NULL AND json_extract(stream_settings,'\$.security')='tls' AND (json_extract(stream_settings,'\$.tlsSettings.serverName')='$dom' OR json_extract(stream_settings,'\$.xhttpSettings.host')='$dom') LIMIT 1;" 2>/dev/null | grep -q 1; then
+    warn "  $dom: XHTTP+TLS не поддерживает decoy через fallback — шаблон не применён"
+    return 2
+  fi
   meta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
   if [[ -z "$meta" ]]; then
     warn "  $dom: decoy-блока нет — выбор сохранён, применится при создании decoy (п.1 / «раздать всем»)"
@@ -10229,7 +10565,10 @@ change_decoy() {
   [[ -z "$panel_dom" || "$panel_dom" == "null" ]] && panel_dom=$(xui_get webDomain 2>/dev/null || true)
   [[ -z "$panel_dom" || "$panel_dom" == "null" ]] && { err "Домен панели не найден — сначала п.1"; pause; return 1; }
   echo "  Доступные объекты:"
-  echo "   1) Панель — $panel_dom"
+  local _panel_tpl=""
+  _panel_tpl=$(decoy_tpl_current "$panel_dom" 2>/dev/null || true)
+  [[ -z "$_panel_tpl" ]] && _panel_tpl="default"
+  printf "   1) Панель — %-30s (decoy=%s)\n" "$panel_dom" "$_panel_tpl"
   local -a _decoy_rows=() _decoy_row
   # Hysteria выводится напрямую из БД независимо от наличия SNI-map.
   # Это важно после восстановления старого бэкапа: nginx-конфигов может не быть.
@@ -10240,7 +10579,8 @@ change_decoy() {
     [[ -z "$_hdom" ]] && _hdom="__missing_sni__"
     _decoy_rows+=("$_hdom|$_hid|$_hport")
     _decoy_row="${#_decoy_rows[@]}"
-    printf "   %s) Hysteria #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_hid" "$_hdom" "$_hport"
+    local _h_tpl="$(decoy_tpl_current "$_hdom" 2>/dev/null || true)"; [[ -z "$_h_tpl" ]] && _h_tpl="default"
+    printf "   %s) Hysteria #%-3s — %-30s :%s (decoy=%s)\n" "$((_decoy_row+1))" "$_hid" "$_hdom" "$_hport" "$_h_tpl"
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port,COALESCE(stream_settings,'') FROM inbounds WHERE port>0 AND lower(protocol) LIKE '%hysteria%' ORDER BY id;" 2>/dev/null || true)
   local _d_dom _d_be _d_id _d_proto _d_st _d_port
   while IFS='|' read -r _d_dom _d_be; do
@@ -10248,21 +10588,34 @@ change_decoy() {
     _d_id="${BASH_REMATCH[1]}"
     _d_proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$_d_id AND enable=1;" 2>/dev/null || true)
     _d_st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
-    # В список decoy попадают только VLESS/Trojan с собственным Reality
-    # или обычным TLS. LucX sidecar (naive/trusttunnel/anytls) сюда не входит,
-    # а CDN XHTTP не имеет inb_N_backend и показывается отдельным ORIGIN ниже.
+    # Только XHTTP+TLS не имеет decoy. XHTTP+Reality, напротив, оставляем:
+    # для Reality decoy является dest и его можно менять.
+    if grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$_d_st" && \
+       grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_d_st"; then
+      continue
+    fi
+    # В список попадают только реально поддерживаемые объекты:
+    # собственный Reality, VLESS/Trojan TCP+TLS и Hysteria TCP-decoy.
+    # Чужой Reality (внешний dest) исключаем: у него decoy не применяется.
     [[ "$_d_proto" == "vless" || "$_d_proto" == "trojan" ]] || continue
-    if ! grep -Eqi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$_d_st" && \
-       ! grep -Eqi '"network"[[:space:]]*:[[:space:]]*"tcp".*"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_d_st"; then
+    local _d_is_reality=false _d_is_tls=false _d_dest=""
+    grep -Eqi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$_d_st" && _d_is_reality=true
+    grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_d_st" && _d_is_tls=true
+    if [[ "$_d_is_reality" == true ]]; then
+      _d_dest=$(sqlite3 -noheader "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),json_extract(stream_settings,'\$.realitySettings.target'),'') FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
+      _d_dest="${_d_dest%%:*}"
+      [[ -n "$_d_dest" && "$_d_dest" != "127.0.0.1" ]] && continue
+    elif [[ "$_d_is_tls" != true ]]; then
       continue
     fi
     _d_port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$_d_id;" 2>/dev/null || true)
     _decoy_rows+=("$_d_dom|$_d_id|$_d_port")
     _decoy_row="${#_decoy_rows[@]}"
-    if grep -qi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_d_st"; then
-      printf "   %s) VLESS TLS #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port"
+    local _d_tpl="$(decoy_tpl_current "$_d_dom" 2>/dev/null || true)"; [[ -z "$_d_tpl" ]] && _d_tpl="default"
+    if [[ "$_d_is_tls" == true ]]; then
+      printf "   %s) %s TLS #%-3s — %-30s :%s (decoy=%s)\n" "$((_decoy_row+1))" "${_d_proto^^}" "$_d_id" "$_d_dom" "$_d_port" "$_d_tpl"
     else
-      printf "   %s) Reality #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port"
+      printf "   %s) Reality #%-3s — %-30s :%s (decoy=%s)\n" "$((_decoy_row+1))" "$_d_id" "$_d_dom" "$_d_port" "$_d_tpl"
     fi
   done < <(awk '
     /^map / { inmap=1; next }
@@ -10271,6 +10624,28 @@ change_decoy() {
       dom=$1; sub(/;$/, "", dom); be=$2; sub(/;$/, "", be)
       if (dom != "" && dom != "default" && (be ~ /^inb_[0-9]+_backend$/ || be ~ /^hysteria_[0-9]+_web$/)) print dom "|" be
     }' "$SNI_CONF" 2>/dev/null)
+  # Восстановление из БД для TCP/TLS может понадобиться после старого backup;
+  # XHTTP+TLS здесь намеренно не показывается — у него нет decoy.
+  while IFS='|' read -r _tid _tproto _tport _tst; do
+    [[ "$_tproto" == "vless" || "$_tproto" == "trojan" ]] || continue
+    grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_tst" || continue
+    # Исключаем только XHTTP+TLS; XHTTP+Reality имеет decoy через Reality dest.
+    if grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$_tst" && \
+       grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$_tst"; then
+      continue
+    fi
+    _tdom=$(sqlite3 -noheader "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.tlsSettings.serverName'),json_extract(settings,'\$.tlsSettings.serverName'),'') FROM inbounds WHERE id=$_tid;" 2>/dev/null | head -1 || true)
+    [[ -z "$_tdom" || "$_tdom" == "null" ]] && continue
+    local _tid_seen=false _trow
+    for _trow in "${_decoy_rows[@]}"; do
+      [[ "${_trow#*|}" == "$_tid|"* ]] && _tid_seen=true
+    done
+    [[ "$_tid_seen" == true ]] && continue
+    _decoy_rows+=("$_tdom|$_tid|$_tport")
+    _decoy_row="${#_decoy_rows[@]}"
+    local _t_tpl="$(decoy_tpl_current "$_tdom" 2>/dev/null || true)"; [[ -z "$_t_tpl" ]] && _t_tpl="default"
+    printf "   %s) %s TLS #%-3s — %-30s :%s (decoy=%s)\\n" "$((_decoy_row+1))" "${_tproto^^}" "$_tid" "$_tdom" "$_tport" "$_t_tpl"
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port,COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0 AND (protocol='vless' OR protocol='trojan') ORDER BY id;" 2>/dev/null || true)
   # Hysteria может быть в БД, но ещё не иметь SNI-map (например, после
   # восстановления старого бэкапа). Добавляем её напрямую из stream_settings.
   while IFS='|' read -r _hid _hproto _hport; do
@@ -10285,7 +10660,8 @@ change_decoy() {
     [[ "$_seen" == true ]] && continue
     _decoy_rows+=("$_d_dom|$_hid|$_hport")
     _decoy_row="${#_decoy_rows[@]}"
-    printf "   %s) Hysteria #%-3s — %-30s :%s\n" "$((_decoy_row+1))" "$_hid" "$_d_dom" "$_hport"
+    local _hm_tpl="$(decoy_tpl_current "$_d_dom" 2>/dev/null || true)"; [[ -z "$_hm_tpl" ]] && _hm_tpl="default"
+    printf "   %s) Hysteria #%-3s — %-30s :%s (decoy=%s)\n" "$((_decoy_row+1))" "$_hid" "$_d_dom" "$_hport" "$_hm_tpl"
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE port>0 AND lower(protocol) LIKE '%hysteria%' ORDER BY id;" 2>/dev/null || true)
   # CDN-инбаунд не попадает в SNI-map: его decoy обслуживается ORIGIN-доменом
   # через nginx CDN-фронтенд. Показываем ORIGIN в этом меню отдельно.
@@ -10297,7 +10673,8 @@ change_decoy() {
     _decoy_rows+=("$_corigin|$_cid|${_cdport:-0}")
     _cdn_decoy_ids+=("$_cid")
     _decoy_row="${#_decoy_rows[@]}"
-    printf "   %s) CDN ORIGIN #%-3s — %-30s :%s (decoy=%s)\n" "$((_decoy_row+1))" "$_cid" "$_corigin" "${_cdport:-0}" "${_ctpl:-default}"
+    local _cdn_tpl="${_ctpl:-$(decoy_tpl_current "$_corigin" 2>/dev/null || true)}"; [[ -z "$_cdn_tpl" ]] && _cdn_tpl="default"
+    printf "   %s) CDN ORIGIN #%-3s — %-30s :%s (decoy=%s)\n" "$((_decoy_row+1))" "$_cid" "$_corigin" "${_cdport:-0}" "$_cdn_tpl"
   done < <(cat "$CDN_PROFILES" 2>/dev/null)
   echo "   0) Назад"
   local m=""
@@ -12076,14 +12453,24 @@ uninstall_panel_lucx() {
 }
 
 # --- Обновление скрипта с GitHub ---------------------------------------------
+# Версия хранится в STACK_MANAGER_VERSION и показывается в шапке.
 # URL берётся из /root/.stack-src (сохраняется после первого обновления).
+version_is_newer() {
+  local old="$1" new="$2" oa ob oc na nb nc
+  IFS=. read -r oa ob oc <<<"${old#v}"
+  IFS=. read -r na nb nc <<<"${new#v}"
+  oa=${oa:-0}; ob=${ob:-0}; oc=${oc:-0}; na=${na:-0}; nb=${nb:-0}; nc=${nc:-0}
+  (( 10#$na > 10#$oa ||
+     (10#$na == 10#$oa && 10#$nb > 10#$ob) ||
+     (10#$na == 10#$oa && 10#$nb == 10#$ob && 10#$nc > 10#$oc) ))
+}
 STACK_SRC_URL="$(cat /root/.stack-src 2>/dev/null || echo 'https://raw.githubusercontent.com/vladufqaa/stack-manager/main/stack-manager.sh')"
 
 update_self() {
   line; echo -e "${B}   ОБНОВЛЕНИЕ СКРИПТА С GITHUB${N}"; line
   # Сравниваем именно запущенный файл, а не безусловно /root/stack-manager.sh:
   # при запуске копии из другого пути старый код ошибочно сообщал «идентичен».
-  local cur="${BASH_SOURCE[0]}" src_url="$STACK_SRC_URL" tmp="" lock="" bakdir="" old_sha="" new_sha="" mode=""
+  local cur="${BASH_SOURCE[0]}" src_url="$STACK_SRC_URL" tmp="" lock="" bakdir="" old_sha="" new_sha="" mode="" remote_version=""
   cur=$(readlink -f "$cur" 2>/dev/null || printf '%s' "$cur")
   [[ -f "$cur" && ! -L "$cur" ]] || cur="/root/stack-manager.sh"
   lock="${cur}.update.lock"
@@ -12126,6 +12513,11 @@ update_self() {
   # Если сеть/прокси вернули старую копию GitHub, не объявляем её актуальной:
   # сравниваем содержимое также с коротким commit API (если доступен).
   local remote_sha=""
+  remote_version=$(grep -m1 -E '^STACK_MANAGER_VERSION="[^"]+"' "$tmp" | sed -E 's/^STACK_MANAGER_VERSION="([^"]+)"/\1/' || true)
+  if [[ -z "$remote_version" ]]; then
+    warn "В загруженном файле не найдена STACK_MANAGER_VERSION — обновление отменено"
+    rm -f "$tmp"; return 1
+  fi
   if [[ "$src_url" == https://raw.githubusercontent.com/*/*/main/* ]]; then
     local api_repo api_file
     api_repo=$(printf '%s' "$src_url" | sed -E 's#https://raw.githubusercontent.com/([^/]+/[^/]+)/main/.*#\1#')
@@ -12134,11 +12526,16 @@ update_self() {
       "https://api.github.com/repos/$api_repo/commits?path=$api_file&per_page=1" 2>/dev/null \
       | grep -m1 '"sha"' | sed -E 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]+)".*/\1/' || true)
   fi
-  if [[ "$old_sha" == "$new_sha" ]]; then
-    log "Обновление не требуется — sha256: $new_sha"; rm -f "$tmp"; return 0
+  if [[ "$remote_version" == "$STACK_MANAGER_VERSION" ]]; then
+    log "Обновление не требуется — версия v$STACK_MANAGER_VERSION уже актуальна (sha256: $new_sha)"
+    rm -f "$tmp"; return 0
   fi
-  echo "  было:  $old_sha"
-  echo "  стало: $new_sha"
+  if ! version_is_newer "$STACK_MANAGER_VERSION" "$remote_version"; then
+    warn "Обновление отменено: удалённая версия v$remote_version не новее локальной v$STACK_MANAGER_VERSION"
+    rm -f "$tmp"; return 1
+  fi
+  echo "  версия: v$STACK_MANAGER_VERSION → v$remote_version"
+  echo "  sha256: $old_sha → $new_sha"
   local yn=false
   askyn yn "Сохранить резервную копию и заменить $cur?" "y"
   [[ "$yn" == true ]] || { rm -f "$tmp"; log "Отменено"; return 0; }
@@ -12916,7 +13313,10 @@ inbounds_live() {
 import sqlite3, json, sys
 try:
     con=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True,timeout=5)
-    rows=con.execute("SELECT id,protocol,port,COALESCE(listen,''),settings,stream_settings FROM inbounds ORDER BY id").fetchall()
+    # LIVE показывает только включённые инбаунды. Отключённые записи остаются
+    # в БД для истории, но не являются работающими сервисами и не должны
+    # попадать в таблицу как будто их порт обязан слушаться.
+    rows=con.execute("SELECT id,protocol,port,COALESCE(listen,''),settings,stream_settings FROM inbounds WHERE enable=1 ORDER BY id").fetchall()
 except Exception:
     sys.exit(0)
 for iid,proto,port,listen,setts_s,stream_s in rows:
@@ -14572,7 +14972,34 @@ print_menu_actions() {
 }
 
 fast_menu_header() {
-  local nb=0 ufw_state="down" ngx xui adg f2b panel="—"
+  local nb=0 ufw_state="down" ngx xui adg f2b panel="—" panel_url="" adg_url=""
+  local _pd="" _pp="" _pb="" _adg_dom="" _panel_port="" _public_port=""
+  _pd="${PANEL_DOMAIN:-$(xui_get webDomain 2>/dev/null || true)}"
+  _pp="$(xui_get webBasePath 2>/dev/null || true)"
+  _panel_port="$(xui_get webPort 2>/dev/null || true)"
+  # После отката nginx/SNI-фронтенд отсутствует, поэтому панель доступна
+  # напрямую на webPort. В шапке показываем тот же фактический URL, что и
+  # в итоговом сообщении отката; при работающем фронтенде используем 443.
+  if [[ -f "$STACK_CONF" ]] && nginx_ready; then
+    _public_port=""
+  else
+    [[ "$_panel_port" =~ ^[0-9]+$ ]] && _public_port="$_panel_port"
+  fi
+  if [[ -n "$_pd" && "$_pd" != "panel.example.com" ]]; then
+    _pp="${_pp#/}"
+    if [[ -n "$_public_port" ]]; then
+      panel_url="https://$_pd:${_public_port}/"
+    else
+      panel_url="https://$_pd/"
+    fi
+    [[ -n "$_pp" ]] && panel_url="${panel_url}${_pp}/"
+    [[ "$panel_url" != */ ]] && panel_url="${panel_url}/"
+  fi
+  if [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && systemctl is-active --quiet "$ADG_SERVICE" 2>/dev/null; then
+    _adg_dom="$(xui_get webDomain 2>/dev/null || true)"
+    if [[ "${ADG_PLACEMENT:-}" == separate && -n "${ADG_MODE_SNI_DOM:-}" ]]; then _adg_dom="$ADG_MODE_SNI_DOM"; fi
+    [[ -n "$_adg_dom" ]] && adg_url="https://$_adg_dom/"
+  fi
   [[ -f "$XUI_DB" ]] && nb=$(sqlite3 -cmd ".timeout 1000" "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || echo 0)
   ufw_is_active && ufw_state="active"
   ngx=$(systemctl is-active nginx 2>/dev/null || echo unknown)
@@ -14583,8 +15010,22 @@ fast_menu_header() {
     lucx) panel="LucX UI" ;; 3x-ui) panel="3x-ui" ;; *) panel="не установлена" ;;
   esac
   line
-  printf "  ${B}%-56s${N}\n" "STACK-MANAGER / SNI-STACK"
-  printf "  ${D}%-56s${N}\n" "Панель: $panel | nginx: 443 | SNI | CDN | AdGuard"
+  local panel_line="" adg_line=""
+  [[ -n "$panel_url" ]] && panel_line="🔗 Панель: $panel_url"
+  [[ -n "$adg_url" ]] && adg_line="🛡 AdGuard: $adg_url"
+  printf "  ${B}%-56s${N}\n" "╔═ STACK MANAGER · ПРОКСИ-ОРКЕСТРАТОР ═╗"
+  printf "  ${D}%-56s${N}\n" "Версия: v${STACK_MANAGER_VERSION} | Панель: $panel | nginx: 443 | SNI | CDN | decoy"
+  # URL нельзя обрезать: длинная ссылка выводится целиком, при необходимости — в несколько строк.
+  if [[ -n "$panel_line" ]]; then
+    printf '%s\n' "$panel_line" | fold -w 54 | while IFS= read -r _url_line; do
+      [[ -n "$_url_line" ]] && printf "  ${G}%s${N}\n" "$_url_line"
+    done
+  fi
+  if [[ -n "$adg_line" ]]; then
+    printf '%s\n' "$adg_line" | fold -w 54 | while IFS= read -r _url_line; do
+      [[ -n "$_url_line" ]] && printf "  ${G}%s${N}\n" "$_url_line"
+    done
+  fi
   line
   printf "  %-18s %-12s | %-18s %-12s\n" "nginx" "$ngx" "x-ui" "$xui"
   printf "  %-18s %-12s | %-18s %-12s\n" "AdGuard" "$adg" "fail2ban" "$f2b"
@@ -14696,20 +15137,22 @@ auto_full_setup() {
   # (пароль панели и порты/пути спрашиваются в начале — шаг 1)
   # (отдельный цикл доменов убран: домен спрашивается в цикле создания
   #  перед портом — «SNI → порт → следующий инбаунд»)
-  # (decoy-шаблон для reality спрашивается ПО КАЖДОМУ инбаунду в цикле создания)
+  # (decoy-шаблон спрашивается ПО КАЖДОМУ инбаунду, если нужен свой SNI:
+  #  Reality и VLESS TCP/XHTTP TLS)
 
   # --- 5) Создание выбранных инбаундов. Порядок вопросов на КАЖДЫЙ инбаунд:
   #        reality: свой/чужой → (цель | SNI-домен) → порт → заглушка (свой SNI)
-  #        TLS:     SNI-домен → серт (есть/выпуск) → порт
+  #        VLESS TLS: SNI-домен → серт → порт → выбор decoy-заглушки
   log "Создание инбаундов…"
   local -A A_DOM=()
   local -a used_ports=()
   local new_id=""
   for entry in "${SEL[@]}"; do
     IFS='|' read -r name proto transport security flow net <<<"$entry"
+    INBOUND_CREATE_MODE="$security"
     local pfx="${PREFIX[$proto-$transport]:-}"
     local port sn="" dom="${SELDOM[$proto-$transport]:-}"
-    # ── CDN-режим для xhttp-инбаундов (любой протокол с transport=xhttp):
+    # ── CDN-профиль только для явно выбранного пункта VLESS XHTTP (через CDN):
     # создаём сразу без security, nginx терминирует TLS. Ответы — в CDN_PRE_*,
     # их подхватит xhttp_cdn_setup при configure_sni_for_inbound (в initial_setup).
     CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""
@@ -14722,7 +15165,7 @@ auto_full_setup() {
          # Явный TLS-пункт: CDN не спрашиваем.
          security="tls"
          _is_cdn=false
-       elif [[ -t 0 ]]; then
+       elif [[ "$name" == "VLESS XHTTP" && "$proto" == "vless" && "$security" == "none" && -t 0 ]]; then
          local _cdn_ans=""
          echo
          askyn _cdn_ans "Это соединение будет работать через CDN (nginx TLS, инбаунд без security)?" "n"
@@ -14816,23 +15259,23 @@ auto_full_setup() {
       done
     fi
     used_ports+=("$port")
-    # ── Шаблон страницы для всех TLS-инбаундов с собственным SNI.
-    # Шаблон задаётся ПО ДОМЕНУ (store домена), по умолчанию — уже действующий.
+    # Для собственного Reality и VLESS TLS/XHTTP TLS спрашиваем конкретный
+    # decoy-шаблон. Чужой Reality за SNI цели и CDN-XHTTP сюда не попадают.
     local rdtpl=""
     local _tpl_dom="${sni_domain:-${dom:-}}"
-    if [[ "$security" == "tls" && ( "$proto" == "trojan" || "$proto" == "vless" && "$transport" == "xhttp" ) ]]; then
-      rdtpl="corporate"
+    local _needs_decoy_choice=false
+    if [[ "$security" == "reality" && -n "$dom" ]]; then
+      _needs_decoy_choice=true
+    elif [[ "$proto" == "vless" && "$security" == "tls" && -n "$_tpl_dom" ]]; then
+      _needs_decoy_choice=true
+    fi
+    if [[ "$_needs_decoy_choice" == true ]]; then
+      rdtpl="$(decoy_tpl_current "$_tpl_dom")"
       if [[ -t 0 ]]; then
-        decoy_template_choose_impl rdtpl "Decoy-заглушка для ${_tpl_dom:-$name} (страница на этом домене)" "$(decoy_tpl_current "$_tpl_dom")"
-      fi
-    elif [[ "$security" == "reality" && "${REALITY_MODE[$proto-$transport]:-}" == "2" ]]; then
-      rdtpl="corporate"
-      if [[ -t 0 ]]; then
-        decoy_template_choose_impl rdtpl "Decoy-заглушка для ${_tpl_dom:-$name} (страница на этом домене)" "$(decoy_tpl_current "$_tpl_dom")"
+        decoy_template_choose_impl rdtpl "Decoy-заглушка для ${_tpl_dom:-$name} (страница на этом домене)" "$rdtpl"
       fi
     fi
-    if [[ -n "$_tpl_dom" ]]; then
-      rdtpl="${rdtpl:-$(decoy_tpl_for "$_tpl_dom")}"
+    if [[ -n "$_tpl_dom" && -n "$rdtpl" ]]; then
       decoy_tpl_store_set "$_tpl_dom" "$rdtpl" >/dev/null 2>&1 || true
     fi
     # sn: TCP-класс TLS-инбаунды И hysteria (UDP, но TLS обязателен)
@@ -14854,9 +15297,8 @@ auto_full_setup() {
       log "  Сертификат для $dom: проверка/выпуск перед настройкой $name"
       cert_issue "$dom" || warn "  ИТОГ: серт $dom НЕ выпущен — $name (${proto}) не поднимется; докати позже: Сертификаты → обновить (причина выше)"
     fi
-    local remark="${proto}-${transport}"
-    [[ "$proto" == "vless" && "$transport" == "tcp"  && "$security" == "reality" ]] && remark="vless-reality"
-    [[ "$proto" == "vless" && "$transport" == "xhttp" ]] && remark="vless-xhttp"
+    local remark
+    remark=$(inbound_remark_next "$proto" "$transport" "$security")
     # цель «чужого реалити» уже в REALITY_EXT_TARGET (шаг выше)
     new_id=$(create_inbound_db "$proto" "$transport" "$security" "$flow" "$port" "$remark" "$net" "$sn" "$vkn") || true
     if [[ -n "$new_id" ]]; then
@@ -14912,6 +15354,7 @@ auto_full_setup() {
         fi
       fi
     done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null)
+    INBOUND_CREATE_MODE=""
     echo "n"                                    # файрвол: настроим сами ниже
     # Завершающий Enter не даёт EOF превратить последний вопрос в цикл.
     echo ""
@@ -14984,6 +15427,8 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   check_os
   ensure_deps || { err "Невозможно продолжить без обязательных зависимостей"; exit 1; }
   detect_env
+  # Обновляем имена существующих инбаундов, если страна стала доступна.
+  backfill_country_remarks
   # 443/SNI: модуль stream + включение SNI-карты. Если снаружи 443 не слушается
   # (частый случай после отката: потерян modules-enabled или stream-блок) —
   # поднимаем сразу, без повторного прогона п.1.
