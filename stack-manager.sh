@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.5"
+STACK_MANAGER_VERSION="1.0.6"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -1354,12 +1354,17 @@ server_country_code() {
   printf '%s' "$cc"
 }
 country_flag() {
-  # Не используем emoji-флаг: LucX UI в некоторых ответах/локалях
-  # декодирует UTF-8 как ANSI и показывает «����». ASCII-код страны
-  # безопасно проходит через SQLite, API панели и браузер.
+  # Флаг хранится в remark как настоящий Unicode emoji (две regional
+  # indicator-буквы), а не как текстовая замена [SE]. Печатаем его через
+  # Python, чтобы не зависеть от особенностей printf/локали Bash.
   local cc="${1^^}"
   [[ "$cc" =~ ^[A-Z]{2}$ ]] || return 0
-  printf '[%s]' "$cc"
+  python3 - "$cc" <<'PYFLAG'
+import sys
+cc = sys.argv[1].upper()
+if len(cc) == 2 and cc.isascii() and cc.isalpha():
+    print(''.join(chr(127397 + ord(c)) for c in cc), end='')
+PYFLAG
 }
 inbound_remark_base() {
   local proto="$1" transport="$2" security="$3" label=""
