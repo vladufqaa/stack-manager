@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.3"
+STACK_MANAGER_VERSION="1.0.4"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -1354,11 +1354,12 @@ server_country_code() {
   printf '%s' "$cc"
 }
 country_flag() {
-  local cc="${1^^}" a b
+  # Не используем emoji-флаг: LucX UI в некоторых ответах/локалях
+  # декодирует UTF-8 как ANSI и показывает «����». ASCII-код страны
+  # безопасно проходит через SQLite, API панели и браузер.
+  local cc="${1^^}"
   [[ "$cc" =~ ^[A-Z]{2}$ ]] || return 0
-  a=$(printf '%d' "'${cc:0:1}" 2>/dev/null) || return 0
-  b=$(printf '%d' "'${cc:1:1}" 2>/dev/null) || return 0
-  printf '%b' "\\U$((a+127397))\\U$((b+127397))"
+  printf '[%s]' "$cc"
 }
 inbound_remark_base() {
   local proto="$1" transport="$2" security="$3" label=""
