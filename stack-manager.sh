@@ -79,7 +79,25 @@ STACK_CONFIGURED_FILE="/root/stack-backups/.stack-configured"
 FW_STATE_DIR="/root/stack-backups/firewall-state"
 ACTION_LOG="/root/stack-actions.log"
 
-stack_is_configured() { [[ -f "$STACK_CONFIGURED_FILE" ]]; }
+# Старые версии не всегда создавали .stack-configured. Если стек уже был
+# установлен/поднят самим stack-manager, распознаём его по legacy-маркеру
+# запуска и реально созданным артефактам. Это важно после обновления старой
+# версии: существующую рабочую установку нельзя ошибочно считать «первым
+# запуском» и закрывать пользователю разделы меню.
+stack_legacy_installed() {
+  [[ -f "$BACKUP_DIR/.stack-ever-ran" ]] || return 1
+  [[ -n "${XUI_DB:-}" && -f "$XUI_DB" ]] || return 1
+  [[ -f "$STACK_CONF" ]] || return 1
+  [[ -f /etc/nginx/streams-available/sni-router.conf || -f "$SNI_CONF" ]] || return 1
+  return 0
+}
+stack_is_configured() {
+  [[ -f "$STACK_CONFIGURED_FILE" ]] && return 0
+  # Миграция legacy-установки: маркер создаётся только при наличии всех
+  # основных артефактов, а не просто из-за установленной панели.
+  stack_legacy_installed || return 1
+  stack_mark_configured
+}
 stack_mark_configured() {
   mkdir -p "$BACKUP_DIR" 2>/dev/null || return 1
   printf '%s\n' "configured=$(date '+%F %T')" > "$STACK_CONFIGURED_FILE" 2>/dev/null
