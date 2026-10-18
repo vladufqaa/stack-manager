@@ -7607,9 +7607,16 @@ stack_full_audit() {
     [[ -n "$id" ]] || continue
     if [[ "$en" != 1 ]]; then warn "#${id} $proto:$port — disabled"; continue; fi
     [[ "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || { err "#${id}: некорректный порт $port"; issues=$((issues+1)); continue; }
-    if [[ "$port" != 443 && "$listen" != 127.0.0.1 && "$proto" != qwdtt && "$proto" != csqtt ]]; then
-      warn "#${id} $proto:$port — слушает не loopback"; issues=$((issues+1))
-    fi
+    # Публичные UDP-туннели (Hysteria и встроенные qwdtt/csqtt) должны
+    # принимать трафик не только с loopback. Для них внешний listen — норма.
+    case "$proto" in
+      hysteria|hysteria2|qwdtt|csqtt) ;;
+      *)
+        if [[ "$port" != 443 && "$listen" != 127.0.0.1 ]]; then
+          warn "#${id} $proto:$port — слушает не loopback"; issues=$((issues+1))
+        fi
+        ;;
+    esac
     if grep -Eqi '"security"[[:space:]]*:[[:space:]]*"(tls|reality)"' <<<"$st"; then
       cert=$(grep -oE '"certificateFile"[[:space:]]*:[[:space:]]*"[^"]+"' <<<"$st" | head -1 | sed -E 's/.*"([^"]+)"/\1/')
       key=$(grep -oE '"keyFile"[[:space:]]*:[[:space:]]*"[^"]+"' <<<"$st" | head -1 | sed -E 's/.*"([^"]+)"/\1/')
