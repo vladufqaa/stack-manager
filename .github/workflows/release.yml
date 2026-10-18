@@ -22,6 +22,7 @@ jobs:
           test "v$version" = "${GITHUB_REF_NAME}"
           bash -n stack-manager.sh
           bash -n stack-manager-update.sh
+          test -f CHANGELOG.md
       - name: Build package
         shell: bash
         run: |
@@ -29,14 +30,26 @@ jobs:
           version="$(tr -d '[:space:]' < VERSION)"
           pkg="stack-manager-$version"
           mkdir -p "dist/$pkg"
-          cp stack-manager.sh VERSION README.md stack-manager-update.sh "dist/$pkg/"
+          cp stack-manager.sh VERSION README.md CHANGELOG.md stack-manager-update.sh "dist/$pkg/"
           cp -r assets "dist/$pkg/"
           tar -czf "dist/$pkg.tar.gz" -C dist "$pkg"
           sha256sum "dist/$pkg.tar.gz" > "dist/$pkg.tar.gz.sha256"
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            $0 ~ "^## \\[" version "\\]" { found=1; print; next }
+            found && $0 ~ "^## \\[" { exit }
+            found { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false
           files: |
             dist/stack-manager-*.tar.gz
             dist/stack-manager-*.tar.gz.sha256
