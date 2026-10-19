@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.14"
+STACK_MANAGER_VERSION="1.0.15"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -868,11 +868,9 @@ udp_inbound_ports() {
 # Заморозка: строка вида «cert:<domain>», «inbound:<id>» или «ALL-CERTS»
 # в FROZEN_FILE запрещает АВТОМАТИКЕ (heal-таймер, авто-выпуск сертов)
 # трогать объект. Ручные действия через меню не блокируются.
-frozen() {
-  [[ -s "$FROZEN_FILE" ]] || return 1
-  grep -qxF -- "$1" "$FROZEN_FILE" 2>/dev/null
-}
+frozen() { return 1; }
 
+# Защита БД и заморозка отключены.
 # =====================================================================
 # ЗАЩИТА БД ОТ ПЕРЕЗАПИСИ ПАНЕЛЬЮ (SQL-триггеры, раздела защиты БД)
 #   Панель при правке инбаунда сохраняет свою копию JSON целиком и может
@@ -887,146 +885,10 @@ frozen() {
 #   тень сохраняется; RETURN-ловушка возвращает всё на место).
 #   SQL валидирован тестами на мок-БД и на реальной копии x-ui.db.
 # =====================================================================
-db_protect_on() {
-  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
-  python3 - "$XUI_DB" <<'PYPROT' 2>/dev/null || return 0
-import sqlite3, sys
-try:
-    con = sqlite3.connect(sys.argv[1], timeout=10)
-    cur = con.cursor()
-    # таблица «аренды» снятия защиты (см. db_protect_suspend): должна
-    # существовать ДО создания триггера, который на неё ссылается
-    cur.execute("CREATE TABLE IF NOT EXISTS sm_protect_off (id INTEGER PRIMARY KEY, ts INTEGER)")
-    cur.executescript("""
-DROP TRIGGER IF EXISTS sm_prot_inb;
-CREATE TRIGGER sm_prot_inb
-AFTER UPDATE ON inbounds
-WHEN (
- ( (OLD.settings IS NULL OR json_valid(OLD.settings)) AND (NEW.settings IS NULL OR json_valid(NEW.settings))
-   AND (
-   ( COALESCE(json_extract(OLD.settings,'$.certFile'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.certFile'),'') != COALESCE(json_extract(OLD.settings,'$.certFile'),'') )
-OR ( COALESCE(json_extract(OLD.settings,'$.keyFile'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.keyFile'),'') != COALESCE(json_extract(OLD.settings,'$.keyFile'),'') )
-OR ( COALESCE(json_extract(OLD.settings,'$.hostname'),'') != '' AND COALESCE(json_extract(NEW.settings,'$.hostname'),'') != COALESCE(json_extract(OLD.settings,'$.hostname'),'') )
-   ) )
-OR
- ( (OLD.stream_settings IS NULL OR json_valid(OLD.stream_settings)) AND (NEW.stream_settings IS NULL OR json_valid(NEW.stream_settings))
-   AND (
-   ( COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.realitySettings.dest'),'') != COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') )
-OR ( COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.realitySettings.target'),'') != COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') )
-OR ( COALESCE(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'),'') != '' AND COALESCE(json_extract(NEW.stream_settings,'$.tlsSettings.certificates'),'') != COALESCE(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'),'') )
-   ) )
-) AND NOT EXISTS (
-  -- «аренда» снятия защиты (db_protect_suspend): пока запись свежая (15 мин),
-  -- триггер не вмешивается. Так правки скрипта (dest/серты) не откатываются, а
-  -- защита в любом случае возвращается сама, даже если resume не вызвали.
-  SELECT 1 FROM sm_protect_off WHERE ts >= strftime('%s','now') - 900
-)
-BEGIN
-  UPDATE inbounds SET
-    settings =
-      json_patch(json_patch(json_patch(NEW.settings,
-        CASE WHEN COALESCE(json_extract(OLD.settings,'$.certFile'),'') != ''
-             THEN json_object('certFile', json_extract(OLD.settings,'$.certFile')) ELSE '{}' END),
-        CASE WHEN COALESCE(json_extract(OLD.settings,'$.keyFile'),'') != ''
-             THEN json_object('keyFile', json_extract(OLD.settings,'$.keyFile')) ELSE '{}' END),
-        CASE WHEN COALESCE(json_extract(OLD.settings,'$.hostname'),'') != ''
-             THEN json_object('hostname', json_extract(OLD.settings,'$.hostname')) ELSE '{}' END)
-  WHERE id = NEW.id
-    AND (OLD.settings IS NULL OR json_valid(OLD.settings))
-    AND (NEW.settings IS NULL OR json_valid(NEW.settings));
-  UPDATE inbounds SET
-    stream_settings =
-      json_patch(json_patch(NEW.stream_settings,
-        CASE WHEN COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') != ''
-               OR COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') != ''
-             THEN json_object('realitySettings',
-                  json_patch(
-                    CASE WHEN COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.dest'),'') != ''
-                         THEN json_object('dest', json_extract(OLD.stream_settings,'$.realitySettings.dest')) ELSE '{}' END,
-                    CASE WHEN COALESCE(json_extract(OLD.stream_settings,'$.realitySettings.target'),'') != ''
-                         THEN json_object('target', json_extract(OLD.stream_settings,'$.realitySettings.target')) ELSE '{}' END))
-             ELSE '{}' END),
-        CASE WHEN COALESCE(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'),'') != ''
-             THEN json_object('tlsSettings',
-                  json_object('certificates', json(json_extract(OLD.stream_settings,'$.tlsSettings.certificates'))))
-             ELSE '{}' END)
-  WHERE id = NEW.id
-    AND (OLD.stream_settings IS NULL OR json_valid(OLD.stream_settings))
-    AND (NEW.stream_settings IS NULL OR json_valid(NEW.stream_settings));
-END;
-DELETE FROM sm_protect_off;
-""")
-    if cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts'").fetchone():
-        cols = [r[1] for r in cur.execute("PRAGMA table_info(hosts)")]
-        ins_cols = [c for c in cols if c != "id"]
-        cl = ",".join('"%s"' % c for c in ins_cols)
-        pk = ", PRIMARY KEY(inbound_id,port)" if ("inbound_id" in cols and "port" in cols) else ""
-        # сначала роняем hosts-триггеры (старые ссылаются на тень), затем
-        # пересобираем тень заново из живых hosts (база — актуальные строки)
-        for _t in ("sm_hosts_ins", "sm_hosts_upd", "sm_hosts_del", "sm_hosts_clean"):
-            cur.execute('DROP TRIGGER IF EXISTS %s' % _t)
-        cur.execute('DROP TABLE IF EXISTS hosts_shadow')
-        cur.execute('CREATE TABLE hosts_shadow (%s%s)' % (cl, pk))
-        cur.execute('INSERT INTO hosts_shadow (%s) SELECT %s FROM hosts' % (cl, cl))
-        cur.execute('CREATE TABLE IF NOT EXISTS sm_pending (rid INTEGER PRIMARY KEY, inbound_id INTEGER NOT NULL, port INTEGER NOT NULL)')
-        cur.execute('DELETE FROM sm_pending')
-        cur.executescript("""
-DROP TRIGGER IF EXISTS sm_hosts_ins;
-CREATE TRIGGER sm_hosts_ins AFTER INSERT ON hosts BEGIN
-  -- дедуп: если перед этим мгновенно вернули строку из тени, а теперь панель
-  -- вставляет свою — убираем нашу временную, остаётся только новая
-  DELETE FROM hosts WHERE rowid IN (SELECT rid FROM sm_pending WHERE inbound_id=NEW.inbound_id AND port=NEW.port) AND rowid <> NEW.rowid;
-  DELETE FROM sm_pending WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
-  DELETE FROM hosts_shadow WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
-  INSERT INTO hosts_shadow ({cl}) SELECT {cl} FROM hosts WHERE inbound_id=NEW.inbound_id AND port=NEW.port; END;
-DROP TRIGGER IF EXISTS sm_hosts_upd;
-CREATE TRIGGER sm_hosts_upd AFTER UPDATE ON hosts BEGIN
-  DELETE FROM hosts_shadow WHERE inbound_id=NEW.inbound_id AND port=NEW.port;
-  INSERT INTO hosts_shadow ({cl}) SELECT {cl} FROM hosts WHERE inbound_id=NEW.inbound_id AND port=NEW.port; END;
-DROP TRIGGER IF EXISTS sm_hosts_del;
--- мгновенный возврат: панель снесла строку живого инбаунда, в тени она есть,
-  -- других строк с таким ключом не осталось → вставляем сразу и помечаем rowid;
-  -- если следом панель вставит свою (схема delete-all+insert) — sm_hosts_ins уберёт нашу
-CREATE TRIGGER sm_hosts_del AFTER DELETE ON hosts
-WHEN EXISTS(SELECT 1 FROM inbounds WHERE id=OLD.inbound_id AND enable=1)
-  AND EXISTS(SELECT 1 FROM hosts_shadow WHERE inbound_id=OLD.inbound_id AND port=OLD.port)
-  AND NOT EXISTS(SELECT 1 FROM hosts WHERE inbound_id=OLD.inbound_id AND port=OLD.port)
-BEGIN
-  INSERT INTO hosts ({cl}) SELECT {cl} FROM hosts_shadow WHERE inbound_id=OLD.inbound_id AND port=OLD.port;
-  INSERT INTO sm_pending(rid, inbound_id, port) VALUES (last_insert_rowid(), OLD.inbound_id, OLD.port); END;
-DROP TRIGGER IF EXISTS sm_hosts_clean;
-CREATE TRIGGER sm_hosts_clean AFTER DELETE ON hosts
-WHEN NOT EXISTS(SELECT 1 FROM inbounds WHERE id=OLD.inbound_id AND enable=1)
-BEGIN DELETE FROM hosts_shadow WHERE inbound_id=OLD.inbound_id; DELETE FROM sm_pending WHERE inbound_id=OLD.inbound_id; END;
-""".replace("{cl}", cl))
-    con.commit()
-except Exception:
-    sys.exit(1)
-PYPROT
-}
-
-db_protect_off() {   # мягкое выключение: триггеры роняются, тень живёт
-  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
-  local t
-  for t in sm_prot_inb sm_hosts_ins sm_hosts_upd sm_hosts_del sm_hosts_clean; do
-    sqlite3 "$XUI_DB" "DROP TRIGGER IF EXISTS $t;" 2>/dev/null || true
-  done
-}
-
-db_protect_remove() {   # полное выключение (раздел «Заморозка самолечения»): триггеры + тень + служебная
-  db_protect_off
-  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
-  local t
-  for t in sm_hosts_ins sm_hosts_upd sm_hosts_del sm_hosts_clean; do
-    sqlite3 "$XUI_DB" "DROP TRIGGER IF EXISTS $t;" 2>/dev/null || true
-  done
-  sqlite3 "$XUI_DB" "DROP TABLE IF EXISTS hosts_shadow; DROP TABLE IF EXISTS sm_pending;" 2>/dev/null || true
-}
-
-db_protect_state() {
-  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 1
-  [[ -n "$(sqlite3 "$XUI_DB" "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='sm_prot_inb' LIMIT 1;" 2>/dev/null)" ]]
-}
+db_protect_on() { return 0; }
+db_protect_off() { return 0; }
+db_protect_remove() { return 0; }
+db_protect_state() { return 1; }
 
 # Для функций скрипта, осознанно меняющих защищённые ключи (dest/target,
 # литералы сертов, certFile/keyFile/hostname).
@@ -1043,52 +905,8 @@ db_protect_state() {
 # (db_protect_resume) либо истекает сама через 15 минут — защита не остаётся
 # выключенной навсегда.
 DB_PROTECT_SUSPENDED=0
-db_protect_suspend() {
-  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 0
-  sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-    "CREATE TABLE IF NOT EXISTS sm_protect_off (id INTEGER PRIMARY KEY, ts INTEGER); INSERT OR REPLACE INTO sm_protect_off(id,ts) VALUES(1,strftime('%s','now'));" 2>/dev/null || true
-  DB_PROTECT_SUSPENDED=1
-  return 0
-}
-# Вернуть защиту (идемпотентно): снять «аренду».
-db_protect_resume() {
-  [[ "${DB_PROTECT_SUSPENDED:-0}" == "1" ]] || return 0
-  DB_PROTECT_SUSPENDED=0
-  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 0
-  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM sm_protect_off WHERE id=1;" 2>/dev/null || true
-  return 0
-}
-# =====================================================================
-# ПРАВКА listen ИНБАУНДА (п.2/п.3 отката)
-#   Любая смена listen проходит через эту функцию: она сначала фиксирует
-#   ПРЕЖНЕЕ значение в журнале, и только потом пишет новое. Так откат
-#   возвращает ровно то, что было, и не трогает инбаунды, которых скрипт
-#   не касался. Пустое значение = «по умолчанию 0.0.0.0» (так это хранит
-#   панель) — поэтому «открыть наружу» это '' , а не явный 0.0.0.0.
-# =====================================================================
-db_set_listen() {
-  # $1 = id, $2 = значение ('' | 127.0.0.1 | 0.0.0.0 | что угодно), $3 = journal|direct
-  local id="$1" want="$2" mode="${3:-journal}"
-  [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" ]] && return 1
-  # Значение НЕ ограничиваем списком: в поле может лежать что угодно (в т.ч.
-  # вписанное руками «123.123.12.12»), и откат обязан вернуть именно его.
-  # Единственное требование — отсутствие кавычек и переводов строк, иначе
-  # сломается SQL-литерал (такие значения в listen всё равно нерабочие).
-  if [[ "$want" == *"'"* || "$want" == *$'\n'* ]]; then
-    err "db_set_listen: значение listen содержит кавычку/перевод строки — запись невозможна"
-    return 1
-  fi
-  if [[ "$mode" == "journal" ]]; then
-    panel_journal_note_listen "$id"          # прежнее значение listen
-    panel_journal_capture_row inbounds "$id" # и вся строка целиком
-  fi
-  local sq; sq=$(sql_escape "$want")
-  if ! sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-    "UPDATE inbounds SET listen='$sq' WHERE id=$id AND COALESCE(listen,'') <> '$sq';" 2>/dev/null; then
-    err "Не удалось изменить listen у inbound #$id"; return 1
-  fi
-  return 0
-}
+db_protect_suspend() { return 0; }
+db_protect_resume() { return 0; }
 
 # =====================================================================
 # ПОЛНЫЙ СНИМОК СТРОКИ ПЕРЕД ИЗМЕНЕНИЕМ (для отката «ровно как было»)
@@ -2622,9 +2440,9 @@ EOF
 )
       elif [[ "$security" == "tls" ]]; then
         if [[ -n "$cert" && -n "$key" ]]; then
-          stream_json="{\"network\":\"tcp\",\"security\":\"tls\",\"tlsSettings\":{\"serverName\":\"$sn\",\"minVersion\":\"1.2\",\"certificates\":[{\"certificateFile\":\"$cert\",\"keyFile\":\"$key\"}]},\"tcpSettings\":{\"acceptProxyProtocol\":false,\"header\":{\"type\":\"none\"}}}"
+          stream_json="{\"network\":\"tcp\",\"security\":\"tls\",\"tlsSettings\":{\"serverName\":\"$sn\",\"minVersion\":\"1.2\",\"alpn\":[\"http/1.1\"],\"certificates\":[{\"certificateFile\":\"$cert\",\"keyFile\":\"$key\"}]},\"tcpSettings\":{\"acceptProxyProtocol\":false,\"header\":{\"type\":\"none\"}}}"
         else
-          stream_json="{\"network\":\"tcp\",\"security\":\"tls\",\"tlsSettings\":{\"serverName\":\"$sn\",\"minVersion\":\"1.2\"},\"tcpSettings\":{\"acceptProxyProtocol\":false,\"header\":{\"type\":\"none\"}}}"
+          stream_json="{\"network\":\"tcp\",\"security\":\"tls\",\"tlsSettings\":{\"serverName\":\"$sn\",\"minVersion\":\"1.2\",\"alpn\":[\"http/1.1\"]},\"tcpSettings\":{\"acceptProxyProtocol\":false,\"header\":{\"type\":\"none\"}}}"
         fi
       else
         stream_json='{"network":"tcp","security":"none","tcpSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}}}'
@@ -4141,56 +3959,9 @@ sys.exit(1)
 PYNEEDHEAL
 }
 
-heal_once() {
-  # Таймер оставляем включённым, но до явной настройки пользователя он
-  # полностью бездействует: существующий стек нельзя менять автоматически.
-  stack_is_configured || return 0
-  local hlog="/root/stack-heal.log"
-  # CDN-маршрутизация тоже под самолечением: перегенерации карты/decoy
-  # старыми версиями и правки nginx не должны оставлять cdn-блоки смитыми
-  cdn_repair 1 >> "$hlog" 2>&1 || true
-  inbounds_need_heal || return 0
-  {
-    echo "[$(date '+%F %T')] обнаружены правки панели — автопочинка:"
-    sync_inbound_certs
-    if ! frozen "ALL-CERTS"; then
-      CERT_DEFER=0
-      cert_batch_flush >/dev/null 2>&1 || true
-    fi
-  } >> "$hlog" 2>&1
-}
+heal_once() { return 0; }
 
-install_heal_timer() {
-  [[ "${HEAL_TIMER_DONE:-}" == 1 ]] && return 0
-  # Таймер должен лечиться ТЕМ ЖЕ скриптом, который его поставил: старая версия
-  # не знает CDN-профилей и каждые 2 минуты сносит cdn-блоки/hosts
-  local _self="${BASH_SOURCE[0]}"
-  [[ -z "$_self" || ! -f "$_self" ]] && _self="/root/LLM_GLM_stack-manager.sh"
-  cat > /etc/systemd/system/stack-heal.service <<EOF
-[Unit]
-Description=Stack auto-heal after panel edits (stack-manager)
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'source $_self </dev/null; detect_env; heal_once'
-EOF
-  cat > /etc/systemd/system/stack-heal.timer <<EOF
-[Unit]
-Description=Periodic stack auto-heal check
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
-Unit=stack-heal.service
-[Install]
-WantedBy=timers.target
-EOF
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl enable --now stack-heal.timer 2>/dev/null || true
-  HEAL_TIMER_DONE=1
-  # защита БД ставится вместе с самолечением: панель не затрёт серты/dest/hosts
-  db_protect_on >/dev/null 2>&1 || true
-  db_protect_state && log "Защита БД: триггеры установлены — правки панели не затирают серты/dest/hosts"
-  log "Автопочинка правок панели: stack-heal.timer (каждые 2 мин, лог /root/stack-heal.log)"
-}
+install_heal_timer() { return 0; }
 
 uninstall_heal_timer() {
   systemctl disable --now stack-heal.timer 2>/dev/null || true
@@ -7166,7 +6937,8 @@ reality_set_dest() {
 }
 
 # VLESS/Trojan TCP+TLS fallback → локальный HTTPS-decoy.
-# XHTTP намеренно не включается: его транспорт обслуживается CDN/frontend.
+# XHTTP TLS также обслуживается локальным nginx frontend: путь XHTTP уходит
+# в Xray, обычный браузерный запрос — в HTTPS-decoy.
 tls_fallback_set() {   # <inbound_id> <decoy_port>
   local id="$1" decoy_port="$2" proto net sec st new_settings stored
   [[ "$id" =~ ^[0-9]+$ && "$decoy_port" =~ ^[0-9]+$ ]] || return 1
@@ -7175,8 +6947,8 @@ tls_fallback_set() {   # <inbound_id> <decoy_port>
   st=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'{}') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
   net=$(grep -oE '"network"[[:space:]]*:[[:space:]]*"[^"]+' <<<"$st" | head -1 | sed 's/.*"//')
   sec=$(grep -oE '"security"[[:space:]]*:[[:space:]]*"[^"]+' <<<"$st" | head -1 | sed 's/.*"//')
-  [[ "$sec" == "tls" && "$net" == "tcp" ]] || {
-    warn "  #$id: fallback не включён (требуется TCP+TLS; получено ${net:-?}/${sec:-?})"
+  [[ "$sec" == "tls" && ( "$net" == "tcp" || "$net" == "xhttp" ) ]] || {
+    warn "  #$id: fallback не включён (требуется TCP/XHTTP+TLS; получено ${net:-?}/${sec:-?})"
     return 2
   }
   db_protect_suspend
@@ -7196,6 +6968,48 @@ tls_fallback_clear() {   # <inbound_id>
   db_protect_suspend
   sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET settings=json_remove(COALESCE(settings,'{}'),'\$.fallbacks') WHERE id=$id;" 2>/dev/null
   db_protect_resume
+}
+
+# Восстановить HTTPS-заглушку для уже существующего SNI-маршрута.
+# Важно: configure_sni_for_inbound раньше сразу выходил из existing_domain,
+# поэтому повторный запуск «Починить инбаунд» пропускал TLS decoy.
+tls_decoy_ensure_existing() {   # <id> <domain>
+  local id="$1" dom="$2" st proto net sec port cp cert key tpl dport path
+  [[ "$id" =~ ^[0-9]+$ && -n "$dom" ]] || return 1
+  st=$(sqlite3 "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  proto=$(sqlite3 "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  port=$(sqlite3 "$XUI_DB" "SELECT port FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  net=$(grep -oE '"network"[[:space:]]*:[[:space:]]*"[^" ]+' <<<"$st" | head -1 | sed 's/.*"//')
+  sec=$(grep -oE '"security"[[:space:]]*:[[:space:]]*"[^" ]+' <<<"$st" | head -1 | sed 's/.*"//')
+  [[ "$proto" == vless || "$proto" == trojan ]] || return 0
+  [[ "$sec" == tls ]] || return 0
+  # XHTTP TLS работает напрямую в Xray через SNI passthrough.
+  # Для этого режима decoy не создаём и шаблон не запрашиваем.
+  [[ "$net" == xhttp ]] && return 0
+  cp=$(cert_paths "$dom" 2>/dev/null || true)
+  [[ -n "$cp" ]] || { cert_issue "$dom" >/dev/null 2>&1 || true; cp=$(cert_paths "$dom" 2>/dev/null || true); }
+  [[ -n "$cp" ]] || { warn "  #$id: cert для $dom не найден"; return 1; }
+  cert="${cp%% *}"; key="${cp##* }"; tpl="$(decoy_tpl_current "$dom")"; tpl="${tpl:-$(decoy_tpl_for "$dom")}"; decoy_tpl_store_set "$dom" "$tpl" >/dev/null 2>&1 || true
+  dport=$(decoy_port_for_id "$id")
+  while ss -tlnH "sport = :$dport" 2>/dev/null | grep -q .; do dport=$((dport+1)); done
+  mk_decoy "$dport" "$dom" "$cert" "$key" "/var/www/decoy-tls-$id" "$tpl" || return 1
+  if [[ "$net" == xhttp ]]; then
+    path=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.xhttpSettings.path'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    [[ -n "$path" ]] || return 1
+    db_protect_suspend
+    sqlite3 "$XUI_DB" "UPDATE inbounds SET stream_settings=json_remove(json_set(COALESCE(stream_settings,'{}'),'\$.security','none'),'\$.tlsSettings') WHERE id=$id;" >/dev/null 2>&1 || true
+    db_protect_resume
+    stack_cdn_upsert "$dom" "$dom" "$path" "$port" "$dport" "$cert" "$key"
+    cdn_frontend_ensure "$dom" "$dom"
+    log "  #$id: XHTTP TLS переведён на nginx frontend, decoy → 127.0.0.1:$dport"
+  elif [[ "$net" == tcp ]]; then
+    local pp=$((dport+1)); while ss -tlnH "sport = :$pp" 2>/dev/null | grep -q .; do pp=$((pp+1)); done
+    mk_plain_fallback_decoy "$pp" "$dom" "/var/www/decoy-tls-$id" || return 1
+    tls_fallback_set "$id" "$pp" || return 1
+    log "  #$id: TCP TLS fallback → 127.0.0.1:$pp, decoy → 127.0.0.1:$dport"
+  fi
+  nginx_reload || true
+  return 0
 }
 
 # Вставить/обновить запись hosts в панели для TCP-инбаунда (адрес=домен, порт 443).
@@ -8283,8 +8097,11 @@ configure_sni_for_inbound() {
         warn "  cert для $existing_domain недоступен — Reality dest не обновлён"
       fi
     fi
-    # Уже существующий SNI полностью настроен; TLS-протоколы не используют
-    # браузерные HTTPS-заглушки и не требуют повторного предложения шаблона.
+    # Existing SNI не означает, что decoy/fallback действительно есть.
+    # Повторный запуск должен восстанавливать их идемпотентно.
+    if [[ "$proto" == vless || "$proto" == trojan ]]; then
+      tls_decoy_ensure_existing "$id" "$existing_domain" || warn "  #$id: TLS decoy не удалось восстановить"
+    fi
     return 0
   fi
 
@@ -8382,18 +8199,21 @@ configure_sni_for_inbound() {
     systemctl restart x-ui >/dev/null 2>&1 || true
     log "  + decoy (Reality) на порту $tls_port ($pre_tpl)"
   elif [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$stream"; then
-    # XHTTP+TLS не имеет fallback-decoy. Он не попадает в эту ветку:
-    # decoy для него не создаётся и не предлагается в меню.
-    if grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"$stream"; then
-      warn "$proto XHTTP+TLS (#$id): decoy отсутствует по проектной схеме."
-      pause; return 0
-    fi
-    # Для VLESS/Trojan TCP+TLS заглушка обязательна, но шаблон вручную не спрашиваем.
+    # Для VLESS/Trojan TCP+TLS, включая XHTTP+TLS, HTTPS-заглушка обязательна.
+    # Для VLESS TLS пользователь должен иметь такой же явный выбор шаблона,
+    # как и для собственного Reality. В неинтерактивном режиме используем
+    # сохранённый/безопасный шаблон без остановки автоматической установки.
     local cp_line="" cert="" key="" tls_port tpl
     cp_line=$(cert_paths "$domain" 2>/dev/null || true)
     [[ -z "$cp_line" ]] && cert_issue "$domain" >/dev/null 2>&1 || true
     cp_line=$(cert_paths "$domain" 2>/dev/null || true)
-    cert="${cp_line%% *}"; key="${cp_line##* }"; tpl="$(decoy_tpl_for "$domain")"
+    cert="${cp_line%% *}"; key="${cp_line##* }"
+    tpl="$(decoy_tpl_current "$domain")"
+    if [[ -t 0 ]]; then
+      decoy_template_choose_impl tpl "Decoy-заглушка для $domain (страница на этом домене)" "$tpl"
+      tpl="${tpl:-$(decoy_tpl_for "$domain")}"
+      decoy_tpl_store_set "$domain" "$tpl" >/dev/null 2>&1 || true
+    fi
     if [[ -f "$cert" && -f "$key" ]]; then
       tls_port=$((47000 + id)); while ss -tlnH "sport = :$tls_port" 2>/dev/null | grep -q .; do tls_port=$((tls_port+1)); done
       mk_decoy "$tls_port" "$domain" "$cert" "$key" "/var/www/decoy-tls-$id" "$tpl" >/dev/null 2>&1 || true
@@ -8512,6 +8332,12 @@ initial_setup() {
   askyn go_apply "План верный — применять?" "y"
   [[ "$go_apply" == true ]] || { warn "Отменено — ничего не изменено"; return 0; }
   # === ФАЗА Б: применение (вопросы выше пропускаются по PLAN_*-флагам) ===
+  # Шаблоны должны быть готовы ДО создания первых decoy в этой же первичной
+  # установке. Раньше они инициализировались только поздними пунктами меню,
+  # поэтому п.1 мог выбрать шаблон, но mk_decoy не находил его; после п.2
+  # шаблоны уже существовали и всё внезапно начинало работать.
+  decoy_templates_init || true
+  decoy_login_templates_init || true
   systemctl stop stack-heal.timer 2>/dev/null || true
   systemctl disable stack-heal.timer 2>/dev/null || true
   # Панели нет? НЕ валимся — ставим прямо здесь (первоначальная установка
@@ -8657,7 +8483,6 @@ initial_setup() {
     if [[ "$proto" == "vless" ]] && grep -Eqi '"network"[[:space:]]*:[[:space:]]*"xhttp"' <<<"${INB_STREAM[$id]}"; then
       if [[ -n "$(cdn_profile_get "$id" 2>/dev/null)" ]]; then
         log "#$id ($proto) уже в CDN-режиме ($(cdn_profile_field "$id" 3)) — сверяю CDN-настройку"
-        cdn_repair 1
       fi
       if inbound_is_xhttp_cdn_candidate "${INB_STREAM[$id]}"; then
         if xhttp_cdn_setup "$id" "$proto" "$port"; then
@@ -8841,10 +8666,42 @@ initial_setup() {
     [[ -n "${_cfr// /}" ]] && log "CDN-домены вне SAN (серт выдаёт CDN, не мы): ${_cfr% }"
   fi
   # пути сертификатов → в settings инбаундов (naive/anytls/trusttunnel/tproxy/hysteria)
-  sync_inbound_certs
-
   # режим выпуска сертов (A/B) + мультисерт по всем доменам стека
   cert_mode_ask
+  # До этого места SNI-карта ещё не записана, поэтому одной синхронизации
+  # cert_domains_sync_from_sni недостаточно: при первой установке домены из
+  # анкеты находятся только в массиве DOMAIN[]. Регистрируем их в линиях
+  # заранее, иначе режим B создаёт только панельную линию, а для остальных
+  # позже пытается найти несуществующую all.<база>.
+  local _setup_id _setup_dom _setup_line
+  for _setup_id in "${INB_IDS[@]}"; do
+    [[ "${HIDE[$_setup_id]}" == true ]] || continue
+    _setup_dom="${DOMAIN[$_setup_id]:-}"
+    [[ -n "$_setup_dom" ]] || continue
+    # Внешний Reality использует SNI-цель третьей стороны — сертификат для
+    # неё не выпускаем. Для всех остальных скрытых инбаундов (включая
+    # VLESS TCP/XHTTP TLS без выбранного шаблона) домен должен попасть в линию.
+    [[ "${REALITY_MODE[$_setup_id]:-}" == "1" ]] && continue
+    if [[ "${CERT_MODE:-A}" == "B" ]]; then
+      _setup_line=$(cert_line_for "$_setup_dom" 2>/dev/null || true)
+      [[ -n "$_setup_line" ]] && cert_line_domains_add "$_setup_line" "$_setup_dom"
+    else
+      cert_domains_add "$_setup_dom"
+    fi
+  done
+  # ORIGIN CDN — наш домен, ему тоже нужна запись в SAN-линии.
+  cdn_profiles_load
+  local _setup_cid _setup_origin
+  for _setup_cid in "${CDN_PROFILE_IDS[@]}"; do
+    _setup_origin=$(cdn_profile_field "$_setup_cid" 3 2>/dev/null || true)
+    [[ -n "$_setup_origin" ]] || continue
+    if [[ "${CERT_MODE:-A}" == "B" ]]; then
+      _setup_line=$(cert_line_for "$_setup_origin" 2>/dev/null || true)
+      [[ -n "$_setup_line" ]] && cert_line_domains_add "$_setup_line" "$_setup_origin"
+    else
+      cert_domains_add "$_setup_origin"
+    fi
+  done
   CERT_DEFER=0
   cert_batch_flush || warn "Мультисерт не выпущен — часть доменов может не работать (проверь DNS и п.10)"
 
@@ -9319,7 +9176,6 @@ EOF
   local fw_now=false
   [[ "$PLAN_FW" == true ]] && fw_now=true
   [[ "$fw_now" == true ]] && firewall_apply
-  install_heal_timer
   # Первичная настройка пересоздала SNI-карту и stack.conf с нуля — CDN-маршруты,
   # http-блоки, hosts-записи и путь инбаунда приводим к профилю. Это ТА ЖЕ
   # «Сверить и починить» (п.2 → 4 → 1), но выполненная ВНУТРИ п.1 и с живыми
@@ -9564,9 +9420,8 @@ fix_inbound() {
   [[ -z "$cp_line" ]] && { err "cert для $domain не найден"; return 1; }
   cert="${cp_line%% *}"; key="${cp_line##* }"
 
-  # Reality и VLESS/Trojan TCP+TLS получают браузерную decoy-страницу.
-  # XHTTP TLS обслуживается CDN/frontend и не использует Xray fallback; для
-  # него локальный TLS-decoy здесь не создаём.
+  # Reality и VLESS/Trojan TCP TLS получают браузерную decoy-страницу.
+  # XHTTP TLS намеренно исключён: он работает напрямую в Xray.
   local tls_port="" rdtpl="default"
   if grep -qi reality <<<"$stream" || \
      { [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -Eqi '"network"[[:space:]]*:[[:space:]]*"tcp"' <<<"$stream" && grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$stream"; }; then
@@ -9586,8 +9441,10 @@ fix_inbound() {
   else
     log "  decoy не нужен ($proto — не Reality)"
   fi
+   # XHTTP TLS остаётся TLS passthrough через SNI в Xray.
+   # HTTP-frontend и decoy для этого режима не создаются.
 
-  # hosts (подписки): address=домен панели, sni=домен инбаунда
+   # hosts (подписки): address=домен панели, sni=домен инбаунда
   local has_hosts cols remark fields vals
   has_hosts=$(sqlite3 "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
   if [[ -n "$has_hosts" ]]; then
@@ -10189,8 +10046,8 @@ decoy_ensure_all() {
       line_ok=1
       continue
     fi
-    # VLESS/Trojan TCP+TLS получают тот же HTTPS-decoy через Xray fallback.
-    if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$st" && grep -Eqi '"network"[[:space:]]*:[[:space:]]*"tcp"' <<<"$st"; then
+    # VLESS/Trojan TCP TLS получают тот же HTTPS-decoy через Xray fallback.
+    if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -Eqi '"security"[[:space:]]*:[[:space:]]*"tls"' <<<"$st" && grep -Eqi '"network"[[:space:]]*:[[:space:]]*"(tcp|xhttp)"' <<<"$st"; then
       local tmeta tcp cpk tc tk trt
       tmeta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
       if [[ -n "$tmeta" ]]; then
@@ -10486,11 +10343,10 @@ decoy_reset_all() {
 decoy_domain_apply_tpl() {   # <domain> <tpl>
   local dom="${1:-}" tpl="${2:-}" meta="" port="" root="" cert="" key=""
   [[ -n "$dom" && -n "$tpl" ]] || return 1
-  # XHTTP+TLS не имеет Xray fallback: его локальный decoy не виден
-  # через внешний SNI и не должен ошибочно считаться применимым объектом.
+  # XHTTP+TLS использует тот же TLS fallback, что и TCP+TLS.
+  # Удалять decoy для него нельзя: внешний SNI должен открывать страницу.
   if [[ -f "$XUI_DB" ]] && sqlite3 "$XUI_DB" "SELECT 1 FROM inbounds WHERE enable=1 AND (protocol='vless' OR protocol='trojan') AND json_extract(stream_settings,'\$.xhttpSettings') IS NOT NULL AND json_extract(stream_settings,'\$.security')='tls' AND (json_extract(stream_settings,'\$.tlsSettings.serverName')='$dom' OR json_extract(stream_settings,'\$.xhttpSettings.host')='$dom') LIMIT 1;" 2>/dev/null | grep -q 1; then
-    warn "  $dom: XHTTP+TLS не поддерживает decoy через fallback — шаблон не применён"
-    return 2
+    : # применяем шаблон к существующему HTTPS-decoy ниже
   fi
   meta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
   if [[ -z "$meta" ]]; then
@@ -11559,6 +11415,41 @@ fw_allow() {
   ufw "${args[@]}" "$port/$proto" >/dev/null 2>&1 || true
 }
 
+# Переключение web/sub-портов x-ui между loopback и внешним слушателем.
+# Используется TUI файрвола: изменение привязки и правила UFW выполняются
+# одной операцией, чтобы интерфейс не показывал рассинхронизированное состояние.
+xui_set_listen() {
+  # Совместимость с TUI: xui_set_listen <port> <mode> и старым
+  # внутренним вызовом xui_set_listen <mode>. Настройки web/sub общие.
+  local mode="$1" db=""
+  [[ "$mode" =~ ^[0-9]+$ ]] && mode="${2:-}"
+  [[ "$mode" == "0.0.0.0" || "$mode" == "127.0.0.1" ]] || return 1
+  for db in /etc/x-ui/x-ui.db /usr/local/x-ui/x-ui.db /opt/x-ui/x-ui.db; do
+    [[ -f "$db" ]] && break
+  done
+  [[ -f "$db" ]] || { err "x-ui.db не найден"; return 1; }
+  systemctl stop x-ui >/dev/null 2>&1 || true
+  local ok=1
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db" "UPDATE settings SET value='$mode' WHERE key IN ('webListen','subListen');" >/dev/null 2>&1 || ok=0
+  else
+    ok=0
+  fi
+  if [[ "$ok" == 0 ]] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$db" "$mode" <<'PYX'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("UPDATE settings SET value=? WHERE key IN ('webListen','subListen')", (sys.argv[2],))
+con.commit(); con.close()
+PYX
+    ok=$?
+  fi
+  systemctl start x-ui >/dev/null 2>&1 || true
+  [[ "$ok" == 0 ]] && return 1
+  sleep 2
+  return 0
+}
+
 # Порты, которые НИКОГДА не открываются наружу (служебные/системные/амлификации)
 fw_port_locked() {
   local port="$1"
@@ -11588,7 +11479,9 @@ fw_deny_panel_ports() {
   done
 }
 
-firewall_menu() {
+# Основной интерфейс firewall — сразу компактный TUI обзора сокетов и правил.
+# Полное старое меню доступно клавишей m из основного TUI.
+firewall_menu_legacy() {
   while :; do
     clear
     line; echo -e "${B}   ФАЙРВОЛ (UFW)${N}"; line
@@ -11771,6 +11664,12 @@ firewall_menu() {
   done
 }
 
+firewall_menu() {
+  # Основной экран — классическое меню управления UFW.
+  # TUI сокетов остаётся отдельным пунктом 10 внутри него.
+  firewall_menu_legacy
+}
+
 firewall_apply_menu() {
   if [[ ! -t 0 ]]; then
     log "UFW (неинтерактивно): SSH+443+UDP-инбаунды панели"
@@ -11806,7 +11705,7 @@ firewall_apply_menu() {
   }
   trap 'tui_restore; return 1' INT TERM
 
-  local W_PTR=1 W_PROTO=6 W_PORT=7 W_PROC=22 W_STATE=10
+  local W_PTR=1 W_PROTO=6 W_PORT=7 W_PID=8 W_PROC=22 W_STATE=10
 
   # ── Кэш видимой длины. Ключ = "__v_" + строка. Префикс гарантирует
   # непустой ключ даже для пустой строки → "${CACHE[$k]:-}" работает всегда.
@@ -11857,9 +11756,33 @@ firewall_apply_menu() {
       $1 ~ /^[0-9]+\/(tcp|udp)$/ && ($2 == "ALLOW" || $2 == "DENY") { print $1, $2 }')
   fi
 
-  # ── Сокеты: разделяем снаружи / loopback ──
-  declare -A SOCK_OUT=() SOCK_LOOP=()
-  local port proc addr
+  # ── Сокеты: сбор одним проходом на протокол (без awk/sed/grep на каждую строку) ──
+  declare -A SOCK_OUT=() SOCK_LOOP=() SOCK_PID_OUT=() SOCK_PID_LOOP=()
+  local port proc pid addr peer info
+  collect_sockets() {
+    local proto="$1" line c1 c2 c3 c4 c5 c6
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      read -r c1 c2 c3 c4 c5 c6 <<<"$line"
+      addr="$c4"; peer="$c5"; info="$c6"
+      [[ -n "$addr" ]] || continue
+      [[ "$proto" == "udp" && "$peer" != "*:*" && "$peer" != "0.0.0.0:*" && "$peer" != "[::]:*" ]] && continue
+      port="${addr##*:}"
+      [[ "$port" =~ ^[0-9]+$ ]] || continue
+      proc="—"; pid="—"
+      if [[ "$info" =~ \"([^\"]+)\".*pid=([0-9]+) ]]; then
+        proc="${BASH_REMATCH[1]}"; pid="${BASH_REMATCH[2]}"
+      fi
+      [[ "$proc" == xray-linux* ]] && proc="xray"
+      local key="${port}/${proto}"
+      case "$addr" in
+        127.*|\[::1\]:*|::1:*) SOCK_LOOP["$key"]="$proc"; SOCK_PID_LOOP["$key"]="$pid" ;;
+        *) SOCK_OUT["$key"]="$proc"; SOCK_PID_OUT["$key"]="$pid" ;;
+      esac
+    done
+  }
+  collect_sockets tcp < <(ss -tlnpH 2>/dev/null)
+  collect_sockets udp < <(ss -ulnpH 2>/dev/null)
 
   while IFS= read -r _ln; do
     [[ -z "$_ln" ]] && continue
@@ -11869,8 +11792,11 @@ firewall_apply_menu() {
     [[ -z "$port" || ! "$port" =~ ^[0-9]+$ ]] && continue
     proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$_ln" | head -1)
     [[ -z "$proc" ]] && proc="—"
+    pid=$(grep -oE 'pid=[0-9]+' <<<"$_ln" | head -1 | cut -d= -f2)
+    [[ -z "$pid" ]] && pid="—"
     case "$proc" in xray-linux*) proc="xray" ;; esac
     SOCK_OUT["${port}/tcp"]="$proc"
+    SOCK_PID_OUT["${port}/tcp"]="$pid"
   done < <(ss -tlnpH 2>/dev/null)
 
   while IFS= read -r _ln; do
@@ -11882,7 +11808,10 @@ firewall_apply_menu() {
     proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$_ln" | head -1)
     [[ -z "$proc" ]] && proc="—"
     case "$proc" in xray-linux*) proc="xray" ;; esac
+    pid=$(grep -oE 'pid=[0-9]+' <<<"$_ln" | head -1 | cut -d= -f2)
+    [[ -z "$pid" ]] && pid="—"
     SOCK_LOOP["${port}/tcp"]="$proc"
+    SOCK_PID_LOOP["${port}/tcp"]="$pid"
   done < <(ss -tlnpH 2>/dev/null)
 
   while IFS= read -r _ln; do
@@ -11895,7 +11824,10 @@ firewall_apply_menu() {
     proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$_ln" | head -1)
     [[ -z "$proc" ]] && proc="—"
     case "$proc" in xray-linux*) proc="xray" ;; esac
+    pid=$(grep -oE 'pid=[0-9]+' <<<"$_ln" | head -1 | cut -d= -f2)
+    [[ -z "$pid" ]] && pid="—"
     SOCK_OUT["${port}/udp"]="$proc"
+    SOCK_PID_OUT["${port}/udp"]="$pid"
   done < <(ss -ulnpH 2>/dev/null)
 
   while IFS= read -r _ln; do
@@ -11908,7 +11840,10 @@ firewall_apply_menu() {
     proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$_ln" | head -1)
     [[ -z "$proc" ]] && proc="—"
     case "$proc" in xray-linux*) proc="xray" ;; esac
+    pid=$(grep -oE 'pid=[0-9]+' <<<"$_ln" | head -1 | cut -d= -f2)
+    [[ -z "$pid" ]] && pid="—"
     SOCK_LOOP["${port}/udp"]="$proc"
+    SOCK_PID_LOOP["${port}/udp"]="$pid"
   done < <(ss -ulnpH 2>/dev/null)
 
   # UDP-инбаунды панели
@@ -11922,12 +11857,12 @@ firewall_apply_menu() {
   local -a items=()
   local seen=""
   add_item() {
-    local proto="$1" port="$2" proc="$3" state="$4" note="$5"
+    local proto="$1" port="$2" pid="$3" proc="$4" state="$5" note="$6"
     [[ -z "$port" ]] && return 0
     local key="${port}/${proto}"
     [[ " $seen " == *" $key "* ]] && return 0
     seen+=" $key"
-    items+=("${proto}|${port}|${proc:-—}|${state}|${note}")
+    items+=("${proto}|${port}|${pid:-—}|${proc:-—}|${state}|${note}")
   }
 
   # Функция: пометка для порта (SSH/ACME/стек/UDP)
@@ -11948,7 +11883,7 @@ firewall_apply_menu() {
   # 1. Сокеты снаружи
   local key
   for key in "${!SOCK_OUT[@]}"; do
-    local proto="${key#*/}" port="${key%/*}" proc="${SOCK_OUT[$key]}"
+    local proto="${key#*/}" port="${key%/*}" proc="${SOCK_OUT[$key]}" pid="${SOCK_PID_OUT[$key]:-—}"
     local state note=""
     if [[ "$ufw_active" == "1" ]]; then
       if [[ -n "${UFW_ALLOW[$key]:-}" ]]; then
@@ -11965,7 +11900,7 @@ firewall_apply_menu() {
     if [[ -n "$ex" ]]; then
       [[ -z "$note" ]] && note="← $ex" || note="← $ex · ${note#← }"
     fi
-    add_item "$proto" "$port" "$proc" "$state" "$note"
+    add_item "$proto" "$port" "$pid" "$proc" "$state" "$note"
   done
 
   # 2. Правила UFW без сокета
@@ -11974,35 +11909,56 @@ firewall_apply_menu() {
     for k in "${!UFW_ALLOW[@]}"; do
       [[ -n "${SOCK_OUT[$k]:-}" ]] && continue
       local proto="${k#*/}" port="${k%/*}"
-      add_item "$proto" "$port" "—" "1" "← правило UFW, слушателя нет"
+      add_item "$proto" "$port" "—" "—" "1" "← правило UFW, слушателя нет"
     done
     for k in "${!UFW_DENY[@]}"; do
       [[ -n "${SOCK_OUT[$k]:-}" ]] && continue
       local proto="${k#*/}" port="${k%/*}"
-      add_item "$proto" "$port" "—" "0" "← DENY (правило UFW), слушателя нет"
+      add_item "$proto" "$port" "—" "—" "0" "← DENY (правило UFW), слушателя нет"
     done
   fi
 
-  # 3. Порт 22
-  local has22=""
+  # 3. SSH-порт проекта (не захардкоженный 22)
+  local has_ssh="" ssh_port="${SSH_PORT:-22}"
   local it
   for it in "${items[@]}"; do
-    [[ "${it#*|}" == "22|"* ]] && has22=1
+    [[ "${it#*|}" == "${ssh_port}|"* ]] && has_ssh=1
   done
-  if [[ -z "$has22" ]]; then
-    local st22="0" nt22=""
+  if [[ -z "$has_ssh" ]]; then
+    local stssh="0" ntsh=""
     if [[ "$ufw_active" == "0" ]]; then
-      st22="1"
-    elif [[ -n "${UFW_ALLOW[22/tcp]:-}" ]]; then
-      st22="1"
-    elif [[ -n "${UFW_DENY[22/tcp]:-}" ]]; then
-      st22="0"; nt22="← DENY (правило UFW)"
+      stssh="1"
+    elif [[ -n "${UFW_ALLOW[${ssh_port}/tcp]:-}" ]]; then
+      stssh="1"
+    elif [[ -n "${UFW_DENY[${ssh_port}/tcp]:-}" ]]; then
+      stssh="0"; ntsh="← DENY (правило UFW)"
     else
-      st22="0"; nt22="← UFW блокирует (default deny)"
+      stssh="0"; ntsh="← UFW блокирует (default deny)"
     fi
-    [[ -z "$nt22" ]] && nt22="← SSH"
-    items=("tcp|22|sshd (не слушает снаружи)|${st22}|${nt22}" "${items[@]}")
+    [[ -z "$ntsh" ]] && ntsh="← SSH"
+    items=("tcp|${ssh_port}|—|sshd (не слушает снаружи)|${stssh}|${ntsh}" "${items[@]}")
   fi
+  # 4. 443 — обязательный внешний вход проекта, даже если nginx сейчас
+  # перезапускается и временно не имеет сокета.
+  local has_https=""
+  for it in "${items[@]}"; do
+    [[ "${it#*|}" == "443|"* ]] && has_https=1
+  done
+  if [[ -z "$has_https" ]]; then
+    local sthttps=1 nthttps="← HTTPS/SNI (обязательный)"
+    if [[ "$ufw_active" == "1" && -z "${UFW_ALLOW[443/tcp]:-}" ]]; then
+      sthttps=0
+    fi
+    items+=("tcp|443|—|nginx/SNI (обязательный)|${sthttps}|${nthttps}")
+  fi
+  # 11443 никогда не должен появляться как открываемый пользовательский порт.
+  local _filtered=() _row _rp _rport
+  for _row in "${items[@]}"; do
+    IFS='|' read -r _rp _rport _ _ _ <<<"$_row"
+    [[ "$_rport" == "11443" ]] && continue
+    _filtered+=("$_row")
+  done
+  items=("${_filtered[@]}")
 
   # Сортировка
   local -a sorted=()
@@ -12037,15 +11993,16 @@ firewall_apply_menu() {
     hdr+=$(pad_vis ""          "$W_PTR");   hdr+=" "
     hdr+=$(pad_vis "Прото"     "$W_PROTO"); hdr+=" "
     hdr+=$(pad_vis "Порт"      "$W_PORT");  hdr+=" "
-    hdr+=$(pad_vis "Процесс"   "$W_PROC");  hdr+=" "
+    hdr+=$(pad_vis "PID"       "$W_PID");   hdr+=" "
+     hdr+=$(pad_vis "Процесс"   "$W_PROC");  hdr+=" "
     hdr+=$(pad_vis "Статус"    "$W_STATE"); hdr+=" "
     hdr+="Примечание"
     printf '%s\n' "$hdr"
     printf "  %s\n" "────────────────────────────────────────────────────────────────────────────"
 
-    local i=0 proto port proc state note ptr state_txt state_color
+    local i=0 proto port pid proc state note ptr state_txt state_color
     for it in "${items[@]}"; do
-      IFS='|' read -r proto port proc state note <<<"$it"
+      IFS='|' read -r proto port pid proc state note <<<"$it"
       ptr=" "; [[ $i -eq $cur ]] && ptr="▶"
       if [[ "$state" == "1" ]]; then
         state_txt="● открыт"; state_color="$G"
@@ -12057,7 +12014,8 @@ firewall_apply_menu() {
       line+=$(pad_vis "$ptr"   "$W_PTR");   line+=" "
       line+=$(pad_vis "$proto" "$W_PROTO"); line+=" "
       line+=$(pad_vis "$port"  "$W_PORT");  line+=" "
-      line+=$(pad_vis "$proc"  "$W_PROC");  line+=" "
+      line+=$(pad_vis "$pid"   "$W_PID");   line+=" "
+       line+=$(pad_vis "$proc"  "$W_PROC");  line+=" "
       local st_padded
       st_padded=$(pad_vis "$state_txt" "$W_STATE")
       line+="${state_color}${st_padded}${N}"
@@ -12098,27 +12056,71 @@ firewall_apply_menu() {
     echo "  ${Y}Enter${N} применить · ${Y}q${N} отмена"
   }
 
+  # Быстрая перерисовка одной строки: навигация и обычное вкл/выкл
+  # больше не очищают весь экран и не пересобирают таблицу.
+  draw_item_row() {
+    local ri="$1" rit rproto rport rpid rproc rstate rnote rptr rtxt rcolor rline
+    rit="${items[$ri]}"
+    IFS='|' read -r rproto rport rpid rproc rstate rnote <<<"$rit"
+    rptr=" "; [[ "$ri" -eq "$cur" ]] && rptr="▶"
+    if [[ "$rstate" == "1" ]]; then rtxt="● открыт"; rcolor="$G"; else rtxt="○ закрыт"; rcolor="$Y"; fi
+    rline="  "
+    rline+=$(pad_vis "$rptr" "$W_PTR"); rline+=" "
+    rline+=$(pad_vis "$rproto" "$W_PROTO"); rline+=" "
+    rline+=$(pad_vis "$rport" "$W_PORT"); rline+=" "
+    rline+=$(pad_vis "$rpid" "$W_PID"); rline+=" "
+    rline+=$(pad_vis "$rproc" "$W_PROC"); rline+=" "
+    rline+="${rcolor}$(pad_vis "$rtxt" "$W_STATE")${N} "
+    rline+="$rnote"
+    tput cup "$((6 + ri))" 0 2>/dev/null || printf '\033[%d;1H' "$((7 + ri))"
+    printf '\033[K%s' "$rline"
+  }
+
   local cur=0
   draw_tui
 
   while :; do
-    local k rest
+    local k rest need_full=0
     IFS= read -rsn1 k </dev/tty || k="q"
     case "$k" in
       $'\x1b')
         IFS= read -rsn2 -t 0.05 rest </dev/tty || rest=""
+        local old_cur=$cur
         case "$rest" in
           '[A') ((cur--)); ((cur < 0)) && cur=$((N_items-1)) ;;
           '[B') ((cur++)); ((cur >= N_items)) && cur=0 ;;
         esac
+        [[ "$old_cur" != "$cur" ]] && { draw_item_row "$old_cur"; draw_item_row "$cur"; tput cup "$((6 + cur))" 0 2>/dev/null || true; }
         ;;
       ' ')
-        IFS='|' read -r proto port proc state note <<<"${items[$cur]}"
-        if [[ "$port" == "22" && "$state" == "1" ]]; then
+        IFS='|' read -r proto port pid proc state note <<<"${items[$cur]}"
+        # Для x-ui переключаем не только правило UFW, но и фактический
+        # web/sub listen: это поведение standalone-TUI из message (2).txt.
+        if [[ "$proto" == "tcp" && "${SOCK_LOOP[${port}/${proto}]:-}" == "x-ui" ]]; then
+          tui_restore
+          echo
+          local _xans=""
+          if [[ "$state" == "1" ]]; then
+            read -rp "Вернуть x-ui на 127.0.0.1 и закрыть порт $port? [y/N]: " _xans || _xans=""
+            if [[ "${_xans,,}" == "y" ]] && xui_set_listen "$port" "127.0.0.1"; then
+              ufw delete allow "$port/tcp" >/dev/null 2>&1 || true
+              state="0"; note="← x-ui спрятан (127.0.0.1)"
+            fi
+          else
+            read -rp "Вытащить x-ui наружу на 0.0.0.0:$port? [y/N]: " _xans || _xans=""
+            if [[ "${_xans,,}" == "y" ]] && xui_set_listen "$port" "0.0.0.0"; then
+              fw_allow "$port" tcp "x-ui"
+              state="1"; note="← x-ui открыт наружу (0.0.0.0)"
+            fi
+          fi
+          items[$cur]="${proto}|${port}|${pid}|${proc}|${state}|${note}"
+          [[ -n "$old_stty" ]] && stty "$old_stty" </dev/tty 2>/dev/null || true
+          tput civis 2>/dev/null || true
+        elif [[ "$port" == "${SSH_PORT:-22}" && "$state" == "1" ]]; then
           tui_restore
           echo
           local ans=""
-          read -rp "$(echo "${R}?${N} Закрыть SSH (порт 22)? Потеряешь доступ снаружи! [y/N]: ")" ans || ans=""
+          read -rp "$(echo "${R}?${N} Закрыть SSH (порт ${SSH_PORT:-22})? Потеряешь доступ снаружи! [y/N]: ")" ans || ans=""
           case "${ans,,}" in
             y|yes|д|да) state=0 ;;
             *)          state=1 ;;
@@ -12128,9 +12130,10 @@ firewall_apply_menu() {
         else
           [[ "$state" == "1" ]] && state=0 || state=1
         fi
-        items[$cur]="${proto}|${port}|${proc}|${state}|${note}"
+        items[$cur]="${proto}|${port}|${pid}|${proc}|${state}|${note}"
         ;;
       'a')
+        need_full=1
         tui_restore
         echo
         local nport=""
@@ -12149,7 +12152,11 @@ firewall_apply_menu() {
               sleep 1
             else
               seen+=" $nkey"
-              items+=("${nproto}|${nnum}|manual|1|← добавлен")
+              mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+              if ! grep -qxF "${nproto}/${nnum}" "$BACKUP_DIR/fw-extra" 2>/dev/null; then
+                printf '%s/%s\n' "$nproto" "$nnum" >> "$BACKUP_DIR/fw-extra"
+              fi
+              items+=("${nproto}|${nnum}|—|manual|1|← добавлен (сохранён)")
               local -a sorted2=()
               while IFS= read -r it; do sorted2+=("$it"); done < <(
                 printf '%s\n' "${items[@]}" | awk -F'|' '{printf "%06d %s\n", $2, $0}' | sort -n | cut -d' ' -f2-
@@ -12166,21 +12173,22 @@ firewall_apply_menu() {
         tput civis 2>/dev/null || true
         ;;
       'd')
-        IFS='|' read -r proto port proc state note <<<"${items[$cur]}"
+        need_full=1
+        IFS='|' read -r proto port pid proc state note <<<"${items[$cur]}"
         if [[ "$state" == "0" ]]; then
           : # уже закрыт
-        elif [[ "$port" == "22" ]]; then
+        elif [[ "$port" == "${SSH_PORT:-22}" ]]; then
           tui_restore
           echo
-          echo -e "${R}⚠ Закрытие SSH (порт 22) оборвёт твою текущую сессию,${N}"
+          echo -e "${R}⚠ Закрытие SSH (порт ${SSH_PORT:-22}) оборвёт твою текущую сессию,${N}"
           echo -e "${R}  если ты подключён по нему снаружи.${N}"
           local ans=""
           read -rp "$(echo -e "? Для подтверждения введи ${Y}YES${N}: ")" ans || ans=""
           case "$ans" in
             YES)
               state=0
-              items[$cur]="${proto}|${port}|${proc}|${state}|${note}"
-              log "SSH (22) помечен как закрытый — применится по Enter"
+              items[$cur]="${proto}|${port}|${pid}|${proc}|${state}|${note}"
+              log "SSH (${SSH_PORT:-22}) помечен как закрытый — применится по Enter"
               ;;
             *) log "Отменено" ;;
           esac
@@ -12195,7 +12203,7 @@ firewall_apply_menu() {
           case "${ans,,}" in
             y|yes|д|да)
               state=0
-              items[$cur]="${proto}|${port}|${proc}|${state}|${note}"
+              items[$cur]="${proto}|${port}|${pid}|${proc}|${state}|${note}"
               log "Порт $port помечен как закрытый"
               ;;
             *) log "Отменено" ;;
@@ -12204,7 +12212,7 @@ firewall_apply_menu() {
           tput civis 2>/dev/null || true
         else
           state=0
-          items[$cur]="${proto}|${port}|${proc}|${state}|${note}"
+          items[$cur]="${proto}|${port}|${pid}|${proc}|${state}|${note}"
         fi
         ;;
       'q'|$'\x03')
@@ -12220,7 +12228,7 @@ firewall_apply_menu() {
         local open_list close_list
         open_list=""; close_list=""
         for it in "${items[@]}"; do
-          IFS='|' read -r proto port proc state note <<<"$it"
+          IFS='|' read -r proto port pid proc state note <<<"$it"
           if [[ "$state" == "1" ]]; then open_list+=" ${port}/${proto}"; else close_list+=" ${port}/${proto}"; fi
         done
         echo "  Откроются:${open_list:- <пусто>}"
@@ -12237,10 +12245,17 @@ firewall_apply_menu() {
         ufw default deny incoming >/dev/null 2>&1 || true
         ufw default allow outgoing >/dev/null 2>&1 || true
         for it in "${items[@]}"; do
-          IFS='|' read -r proto port proc state note <<<"$it"
-          [[ "$state" == "1" ]] && fw_allow "$port" "$proto" "kept"
+          IFS='|' read -r proto port pid proc state note <<<"$it"
+          [[ "$state" == "1" ]] || continue
+          fw_port_locked "$port" && continue
+          fw_allow "$port" "$proto" "kept"
         done
         fw_deny_panel_ports
+        # 11443 — внутренний tproxy/HTTP3, наружу не публикуем даже если
+        # он случайно попал в список сокетов.
+        ufw delete allow 11443/tcp >/dev/null 2>&1 || true
+        ufw delete allow 11443/udp >/dev/null 2>&1 || true
+        ufw deny 11443/tcp >/dev/null 2>&1 || true
         # После reset/изменения правил явно перезагружаем конфигурацию.
         ufw --force enable >/dev/null 2>&1 || true
         ufw reload >/dev/null 2>&1 || true
@@ -14842,13 +14857,12 @@ diagnostics_maintenance_menu() {
     echo "  2) Маршрутизация и диагностика"
     echo "  3) Сменить пароли LucX UI / AdGuard Home"
     echo "  4) Обновить скрипт"
-    echo "  5) Заморозка самолечения"
-    echo "  6) Проверить UDP-инбаунды и открыть порты UFW"
-     echo "  7) Read-only аудит CDN и drift"
-      echo "  8) Полный read-only аудит стека"
+     echo "  5) Проверить UDP-инбаунды и открыть порты UFW"
+     echo "  6) Read-only аудит CDN и drift"
+      echo "  7) Полный read-only аудит стека"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-8]$'
-    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) freeze_menu ;; 6) udp_inbound_firewall_check; pause ;; 7) cdn_audit_report; pause ;; 8) stack_full_audit; pause ;; 0) return 0 ;; esac
+    local c=""; ask c "Выбор" "1" '^[0-7]$'
+    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) udp_inbound_firewall_check; pause ;; 6) cdn_audit_report; pause ;; 7) stack_full_audit; pause ;; 0) return 0 ;; esac
   done
 }
 panel_adguard_menu() {
@@ -14927,100 +14941,6 @@ print(f"{D}  └─ ◆ stack-manager · правка: {mtime}{N}")
 PYHDR
 }
 
-# =====================================================================
-# ЗАМОРОЗКА САМОЛЕЧЕНИЯ
-#   Файл /root/stack-frozen.txt: cert:<domain> / inbound:<id> / ALL-CERTS.
-#   Heal-таймер и авто-выпуск сертов пропускают замороженное молча.
-#   Ручные действия через меню НЕ блокируются.
-# =====================================================================
-freeze_menu() {
-  line; echo -e "${B}   ЗАМОРОЗКА САМОЛЕЧЕНИЯ${N}"; line
-  echo "  Автопочинка (stack-heal, 2 мин) и авто-выпуск сертов НЕ трогают то,"
-  echo "  что заморожено здесь. Ручные действия через меню работают как раньше."
-  if db_protect_state; then
-    echo -e "  ${G}Защита БД: ВКЛ${N} — панель не затирает серты/dest/hostname; hosts — мгновенный возврат"
-  else
-    echo "  Защита БД: выкл (панель может затирать серты/dest при правках инбаундов)"
-  fi
-  echo
-  if [[ -s "$FROZEN_FILE" ]]; then
-    echo -e "  ${B}Заморожено:${N}"
-    sed 's/^/    • /' "$FROZEN_FILE"
-  else
-    echo "  Замороженного нет — самолечение работает по всему стеку."
-  fi
-  echo
-  echo "   1) Заморозить инбаунд (не трогать его серты/decoy/hosts)"
-  echo "   2) Заморозить серт домена (не выпускать и не перевыпускать)"
-  echo "   3) ALL-CERTS: заморозить/разморозить ВСЕ сертификаты"
-  echo "   4) Разморозить строку"
-  echo "   5) Защита БД от перезаписи панелью: вкл/выкл (SQL-триггеры)"
-  echo "   0) Назад"
-  line
-  local a=""; ask a "Выбор" "0" '^[0-9]+$'
-  case "$a" in
-    1)
-      [[ -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
-      sqlite3 -header -column "$XUI_DB" "SELECT id, protocol, port, remark FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null | sed 's/^/    /'
-      local id=""; ask id "ID инбаунда" "" '^[0-9]+$'
-      [[ -z "$id" ]] && return 0
-      if frozen "inbound:$id"; then warn "inbound:$id уже заморожен"; else
-        printf 'inbound:%s\n' "$id" >> "$FROZEN_FILE" 2>/dev/null || { err "не могу писать $FROZEN_FILE"; pause; return 1; }
-        log "Заморожено: inbound:$id"
-      fi
-      ;;
-    2)
-      local d=""; ask d "Домен серта" "" '^[a-zA-Z0-9.-]+$'
-      [[ -z "$d" ]] && return 0
-      if frozen "cert:$d"; then warn "cert:$d уже заморожен"; else
-        printf 'cert:%s\n' "$d" >> "$FROZEN_FILE" 2>/dev/null || { err "не могу писать $FROZEN_FILE"; pause; return 1; }
-        log "Заморожено: cert:$d (авто-выпуск пропускает)"
-      fi
-      ;;
-    3)
-      touch "$FROZEN_FILE" 2>/dev/null || { err "не могу писать $FROZEN_FILE"; pause; return 1; }
-      if grep -qxF 'ALL-CERTS' "$FROZEN_FILE"; then
-        sed -i '/^ALL-CERTS$/d' "$FROZEN_FILE"; log "ALL-CERTS разморожен"
-      else
-        printf 'ALL-CERTS\n' >> "$FROZEN_FILE"; log "ALL-CERTS заморожен — авто-выпуск сертов выключен"
-      fi
-      ;;
-    4)
-      [[ -s "$FROZEN_FILE" ]] || { warn "Замороженного нет"; pause; return 0; }
-      local ln=""; nl -ba "$FROZEN_FILE" | sed 's/^/    /'
-      ask ln "Номер строки для разморозки" "" '^[0-9]+$'
-      [[ -z "$ln" ]] && return 0
-      sed -i "${ln}d" "$FROZEN_FILE" 2>/dev/null && log "Разморожено (строка $ln)"
-      ;;
-    5)
-      if db_protect_state; then
-        local off1=""
-        askyn off1 "Защита БД ВКЛЮЧЕНА. Выключить? (панель снова сможет затирать серты/dest)" "n"
-        [[ "$off1" == true ]] || return 0
-        warn "  Если хочешь осознанно поменять серт/dest через веб-панель — выключи защиту,"
-        warn "  сделай правку, затем включи обратно (триггер вернул бы старое значение)."
-        systemctl stop x-ui >/dev/null 2>&1 || true
-        db_protect_remove
-        systemctl start x-ui >/dev/null 2>&1 || true
-        log "Защита БД выключена"
-      else
-        local on1=""
-        askyn on1 "Включить защиту БД? (серты/dest/hostname переживают правки панели; hosts — мгновенный возврат)" "y"
-        [[ "$on1" == true ]] || return 0
-        systemctl stop x-ui >/dev/null 2>&1 || true
-        if db_protect_on; then
-          log "Защита БД включена: панель больше не затрёт серты/dest/hostname"
-        else
-          err "Не удалось поставить триггеры (см. вывод выше / /root/stack-actions.log)"
-        fi
-        systemctl start x-ui >/dev/null 2>&1 || true
-      fi
-      ;;
-    *) return 0 ;;
-  esac
-  pause
-}
-
 print_menu_actions() {
   echo
   echo -e "  ${B} 1)${N} 🧭 Установка и маршрутизация"
@@ -15094,7 +15014,7 @@ fast_menu_header() {
   [[ -n "$XUI_DB" && -f "$XUI_DB" ]] && inbound_label="${nb:-0} active"
   printf "  %-18s %-12s | %-18s %-12s\n" "UFW" "$ufw_state" "inbounds" "$inbound_label"
   line
-  printf "  ${D}%-56s${N}\n" "Быстрый переход: 1–7 разделы | 0 выход | аудит: раздел 6"
+  printf "  ${D}%-56s${N}\n" "Быстрый переход: 1–7 разделы | 0 выход | аудит: разделы 6–7"
   line
 }
 
@@ -15204,11 +15124,12 @@ auto_full_setup() {
   # (отдельный цикл доменов убран: домен спрашивается в цикле создания
   #  перед портом — «SNI → порт → следующий инбаунд»)
   # (decoy-шаблон спрашивается ПО КАЖДОМУ инбаунду, если нужен свой SNI:
-  #  Reality и VLESS TCP/XHTTP TLS)
+  #  Reality и VLESS TCP TLS; XHTTP TLS работает без decoy)
 
   # --- 5) Создание выбранных инбаундов. Порядок вопросов на КАЖДЫЙ инбаунд:
   #        reality: свой/чужой → (цель | SNI-домен) → порт → заглушка (свой SNI)
-  #        VLESS TLS: SNI-домен → серт → порт → выбор decoy-заглушки
+  #        VLESS TCP TLS: SNI-домен → серт → порт → выбор decoy-заглушки
+  #        VLESS XHTTP TLS: SNI-домен → серт → порт, без decoy
   log "Создание инбаундов…"
   local -A A_DOM=()
   local -a used_ports=()
@@ -15325,14 +15246,15 @@ auto_full_setup() {
       done
     fi
     used_ports+=("$port")
-    # Для собственного Reality и VLESS TLS/XHTTP TLS спрашиваем конкретный
-    # decoy-шаблон. Чужой Reality за SNI цели и CDN-XHTTP сюда не попадают.
+    # Для собственного Reality и VLESS TCP TLS спрашиваем конкретный
+    # decoy-шаблон. XHTTP TLS работает напрямую через SNI passthrough и
+    # намеренно не использует decoy.
     local rdtpl=""
     local _tpl_dom="${sni_domain:-${dom:-}}"
     local _needs_decoy_choice=false
     if [[ "$security" == "reality" && -n "$dom" ]]; then
       _needs_decoy_choice=true
-    elif [[ "$proto" == "vless" && "$security" == "tls" && -n "$_tpl_dom" ]]; then
+    elif [[ "$proto" == "vless" && "$transport" != "xhttp" && "$security" == "tls" && -n "$_tpl_dom" ]]; then
       _needs_decoy_choice=true
     fi
     if [[ "$_needs_decoy_choice" == true ]]; then
@@ -15446,7 +15368,6 @@ auto_full_setup() {
   firewall_apply
 
   # --- 3c) Автопочинка правок панели (каждые 2 мин; трогает x-ui только при находке)
-  install_heal_timer
   # --- 4) ИТОГ
   local pp="" panel_pass adg_pass adg_user
   pp=$(xui_get webBasePath 2>/dev/null || true)
@@ -15485,7 +15406,6 @@ auto_full_setup() {
 # =====================================================================
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   # страховка: если «аренда» снятия защиты БД осталась висеть — снять на выходе
-  trap 'db_protect_resume' EXIT
   if [[ "${1:-}" == "--check" || "${1:-}" == "--self-test" ]]; then
     detect_env
     stack_audit_readonly
@@ -15508,18 +15428,6 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     mkdir -p "$BACKUP_DIR" 2>/dev/null || true
     touch "$BACKUP_DIR/.stack-ever-ran" 2>/dev/null || true
     auto_backup_stack
-    cert_hook_install
-    cert_sync_all
-    sync_inbound_certs
-    cdn_repair 1
-    _self_path="${BASH_SOURCE[0]}"
-    [[ -z "$_self_path" || ! -f "$_self_path" ]] && _self_path="/root/stack-manager.sh"
-    if systemctl is-enabled stack-heal.timer >/dev/null 2>&1; then
-      grep -q "$_self_path" /etc/systemd/system/stack-heal.service 2>/dev/null || {
-        HEAL_TIMER_DONE=0; install_heal_timer
-        warn "heal-таймер переустановлен на этот скрипт"
-      }
-    fi
   else
     warn "Безопасный первый запуск: существующий сервер не изменяется."
     warn "Откройте меню и явно запустите первичную настройку, когда будете готовы."
