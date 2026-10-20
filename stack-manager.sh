@@ -2790,8 +2790,17 @@ create_inbounds_menu() {
     local port_ok=false
     while [[ "$port_ok" != true ]]; do
       ask port "Порт для $name (Enter — $port)" "$port" '^[0-9]{2,5}$'
-      if [[ "$port" == "443" || "$port" == "80" ]]; then
-        err "Порт $port занят nginx (SNI-роутер/ACME) — выбери другой"
+      if [[ "$port" == "443" ]]; then
+
+        err "Порт 443 запрещён для inbound — это только внешний SNI/nginx-порт"
+
+        continue
+
+      fi
+
+      if [[ "$port" == "80" ]]; then
+
+        err "Порт 80 занят ACME/nginx — выбери другой"
         continue
       fi
       if [[ " ${used_ports[*]:-} " == *" $port "* ]]; then
@@ -15229,8 +15238,17 @@ auto_full_setup() {
       local port_ok=false
       while [[ "$port_ok" != true ]]; do
         ask port "Порт для $name (Enter — $port)" "$port" '^[0-9]{2,5}$'
-        if [[ "$port" == "443" || "$port" == "80" ]]; then
-          err "Порт $port занят nginx (SNI-роутер/ACME) — выбери другой"
+        if [[ "$port" == "443" ]]; then
+
+          err "Порт 443 запрещён для inbound — это только внешний SNI/nginx-порт"
+
+          continue
+
+        fi
+
+        if [[ "$port" == "80" ]]; then
+
+          err "Порт 80 занят ACME/nginx — выбери другой"
           continue
         fi
         if [[ " ${used_ports[*]:-} " == *" $port "* ]]; then
