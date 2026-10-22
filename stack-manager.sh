@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.17"
+STACK_MANAGER_VERSION="1.0.19"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -11431,6 +11431,65 @@ security_menu() {
 # Совместимо с xrayTemplateConfig LucX/3x-ui. Если установленная панель
 # не хранит шаблон в БД, используем её фактический config.json как fallback.
 # ─────────────────────────────────────────────────────────────────────────────
+# Валидация пользовательских значений и реальная проверка DoH.
+# Regex в ask() проверяет только форму ввода; здесь проверяем смысл:
+# диапазоны IPv4, hostname, URL и ответ DNS-сервера. Иначе пользователь
+# мог ввести формально подходящее, но заведомо нерабочее значение.
+dns_validate_ipv4() {
+  local ip="$1" oct
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a octs <<< "$ip"
+  for oct in "${octs[@]}"; do
+    (( oct <= 255 )) || return 1
+  done
+  return 0
+}
+dns_validate_hostname() {
+  local h="$1"
+  [[ -n "$h" && "$h" != .* && "$h" != *.*. && "$h" != *..* ]] || return 1
+  [[ "$h" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
+  [[ ${#h} -le 253 ]] || return 1
+  return 0
+}
+dns_validate_doh() {
+  local url="$1" host="$2" ip="$3" parsed_host code body q endpoint_host
+  dns_validate_ipv4 "$ip" || { err "IPv4 DoH некорректен или содержит октет >255: $ip"; return 1; }
+  [[ -n "$host" ]] || { err "DoH host не задан"; return 1; }
+  for endpoint_host in $host; do
+    dns_validate_hostname "$endpoint_host" || { err "DoH host некорректен: $endpoint_host"; return 1; }
+  done
+  [[ "$url" =~ ^https://[^/[:space:]]+/[^[:space:]]+$ ]] || {
+    err "URL DoH должен быть HTTPS-адресом с путём, например https://dns.example/dns-query"; return 1;
+  }
+  parsed_host="${url#https://}"; parsed_host="${parsed_host%%/*}"
+  [[ " $host " == *" $parsed_host "* ]] || {
+    err "Host ($host) не содержит host из URL DoH ($parsed_host)"; return 1;
+  }
+  endpoint_host="$parsed_host"
+  # Запрос A для example.com: проверяем именно DNS-ответ, а не просто TCP/HTTP.
+  q='q80BAAABAAAAAAAAA3d3dwZnb29nbGUDY29tAAABAAE'
+  body=$(mktemp /tmp/stack-doh-test.XXXXXX) || return 1
+  code=$(curl -4 -ksS --max-time 8 --retry 1 --resolve "${endpoint_host}:443:${ip}" \
+    -H 'accept: application/dns-message' \
+    -H 'content-type: application/dns-message' \
+    -o "$body" -w '%{http_code}' "${url}?dns=${q}" 2>/dev/null || true)
+  if [[ "$code" != "200" ]] || ! python3 - "$body" <<'PYDNSCHECK'
+import sys
+p=sys.argv[1]
+data=open(p,'rb').read()
+# DNS header: 12 bytes; QR=1, RCODE=0, минимум один ответ.
+ok=(len(data)>=12 and (data[2] & 0x80) and (data[3] & 0x0f)==0 and int.from_bytes(data[6:8],'big')>0)
+raise SystemExit(0 if ok else 1)
+PYDNSCHECK
+  then
+    rm -f "$body"
+    err "DoH не прошёл реальную DNS-проверку: $url через $ip (HTTP $code, ответ не содержит успешный A-ответ)"
+    return 1
+  fi
+  rm -f "$body"
+  ok "DoH отвечает и реально резолвит DNS: $url → $ip"
+  return 0
+}
 xray_dns_apply_config_file() {
   local mode="$1" doh_url="$2" doh_host="$3" doh_ip="$4"
   local cfg_file="/usr/local/x-ui/bin/config.json"
@@ -11576,6 +11635,11 @@ xray_dns_apply() {
     5|6) [[ -n "$doh_url" && -n "$doh_host" && -n "$doh_ip" ]] || { err "Для пользовательского DoH нужны URL, host и IP"; return 1; } ;;
     *) err "Неизвестный профиль DNS"; return 1 ;;
   esac
+  if [[ "$mode" != "1" ]]; then
+    # Проверяем до остановки x-ui и до записи БД: ошибочный URL, host или IP
+    # не должен оставлять панель без рабочего DNS.
+    dns_validate_doh "$doh_url" "$doh_host" "$doh_ip" || return 1
+  fi
   [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден — DNS не изменён"; return 1; }
   # Если панель ещё не создала шаблон, инициализируем его из фактического
   # рабочего config.json. Это безопаснее, чем писать усечённый шаблон: api,
