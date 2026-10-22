@@ -51,6 +51,7 @@ Stack Manager — это управляющий слой над LucX/x-ui, Xray 
 - **Decoy-шаблоны** для доменов, Reality и TLS-маршрутов.
 - **Сертификаты**: wildcard, персональные сертификаты, проверка домена, срока и пары сертификат/ключ.
 - **Полный read-only health/drift-аудит** с обнаружением orphan CDN-профилей и неслушающих портов.
+- **Управляемый DNS Xray**: системный DNS, Cloudflare/Google/Quad9 DoH, self-hosted DoH и пользовательский DoH.
 - **Безопасное обслуживание**: backups, диагностика, UFW, fail2ban и stack-heal.
 
 ## Что делает скрипт
@@ -229,6 +230,47 @@ Decoy применяется только там, где он не ломает 
 - UDP-транспорт без отдельного TCP-входа.
 
 Если корень домена панели используется AdGuard Home, смена корневого decoy блокируется, чтобы не повредить UI и DoH.
+
+## DNS Xray и DoH
+
+Настройка DNS Xray находится в разделе меню:
+
+```text
+7) Панель и AdGuard → DNS Xray
+```
+
+Поддерживаются системный DNS, Cloudflare DoH, Google DoH, Quad9 DoH,
+self-hosted DoH панели и пользовательский DoH. Для self-hosted-профиля
+скрипт автоматически определяет домен панели и IPv4-адрес сервера.
+
+Настройки применяются к глобальному шаблону Xray панели:
+
+```text
+/etc/x-ui/x-ui.db
+└── settings
+    └── xrayTemplateConfig
+```
+
+Если `xrayTemplateConfig` ещё отсутствует, Stack Manager безопасно создаёт
+его из текущего рабочего конфига `/usr/local/x-ui/bin/config.json`, только
+после проверки обязательных outbound `direct` и `blocked` и существующих
+`routing.rules`. Перед изменением базы создаётся backup. При ошибке записи,
+перезапуска панели или потере DNS после генерации конфигурация автоматически
+откатывается.
+
+После применения можно проверить результат:
+
+```bash
+sqlite3 -noheader /etc/x-ui/x-ui.db \
+  "SELECT value FROM settings WHERE key='xrayTemplateConfig';" | \
+  jq '{dns: .dns, domainStrategy: .routing.domainStrategy}'
+
+jq '{dns: .dns, domainStrategy: .routing.domainStrategy}' \
+  /usr/local/x-ui/bin/config.json
+```
+
+При отсутствии шаблона и рабочего `config.json` операция отменяется без
+изменения базы. Stack Manager не создаёт минимальный или неполный Xray-конфиг.
 
 ## Установка
 

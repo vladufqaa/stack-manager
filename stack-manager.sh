@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.16"
+STACK_MANAGER_VERSION="1.0.17"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -1977,6 +1977,34 @@ auto_backup_stack() {
   for f in /etc/nginx/sites-available/stack.conf /etc/nginx/sites-enabled/stack.conf \
            /etc/nginx/streams-enabled/sni-router.conf /etc/nginx/streams-available/sni-router.conf; do
     [[ -f "$f" ]] && cp -a "$f" "$bd/" 2>/dev/null && saved=true
+  done
+  # Сохраняем итоговый Xray-конфиг как диагностический снимок. Это не источник
+  # восстановления и не заменяет templateSettings: снимок нужен для сравнения
+  # тегов api/blackhole и routing после обновлений панели.
+  local xf
+  for xf in /usr/local/x-ui/bin/config.json /usr/local/x-ui/config.json /etc/x-ui/config.json; do
+    if [[ -f "$xf" ]]; then
+      cp -a "$xf" "$bd/xray-config.json" 2>/dev/null || true
+      sha256sum "$xf" 2>/dev/null | awk '{print $1}' > "$bd/xray-config.sha256" 2>/dev/null || true
+      printf '%s\n' "$xf" > "$bd/xray-config.path"
+      XRAY_SNAPSHOT_PATH="$xf" XRAY_SNAPSHOT_MANIFEST="$bd/xray-manifest.json" python3 - <<'PYXMAN' 2>/dev/null || true
+import json, os, hashlib
+from pathlib import Path
+p=Path(os.environ['XRAY_SNAPSHOT_PATH']); raw=p.read_bytes(); c=json.loads(raw.decode('utf-8'))
+obs=[x.get('tag') for x in c.get('outbounds',[]) if isinstance(x,dict) and isinstance(x.get('tag'),str)]
+r=c.get('routing') if isinstance(c.get('routing'),dict) else {}
+Path(os.environ['XRAY_SNAPSHOT_MANIFEST']).write_text(json.dumps({
+  'schema':1,'source':str(p),'sha256':hashlib.sha256(raw).hexdigest(),
+  'outboundTags':obs,'api':'api' in obs,'blackhole':'blackhole' in obs,
+  'routingRules':len(r.get('rules',[])) if isinstance(r.get('rules'),list) else 0,
+  'hasDns':isinstance(c.get('dns'),dict)
+},ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+PYXMAN
+      # Канонический manifest используется для сравнения с текущим config.json.
+      cp -f "$bd/xray-manifest.json" "$BACKUP_DIR/xray-manifest.json" 2>/dev/null || true
+      saved=true
+      break
+    fi
   done
   [[ "$saved" == true ]] || { rmdir "$bd" 2>/dev/null; return 0; }
   echo "backup-ok" > "$bd/.ok"
@@ -11400,12 +11428,146 @@ security_menu() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DNS Xray/LucX — глобальный шаблон панели
-# Совместимо с xrayTemplateConfig LucX/3x-ui. Настройка меняет только
-# глобальный шаблон Xray в x-ui.db, а не настройки отдельных инбаундов.
+# Совместимо с xrayTemplateConfig LucX/3x-ui. Если установленная панель
+# не хранит шаблон в БД, используем её фактический config.json как fallback.
 # ─────────────────────────────────────────────────────────────────────────────
+xray_dns_apply_config_file() {
+  local mode="$1" doh_url="$2" doh_host="$3" doh_ip="$4"
+  local cfg_file="/usr/local/x-ui/bin/config.json"
+  local dns_backup=""
+  [[ -f "$cfg_file" ]] || return 2
+
+  dns_backup="$BACKUP_DIR/xray-config-dns-$(date +%Y%m%d-%H%M%S)-$$.json"
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+  cp -a "$cfg_file" "$dns_backup" 2>/dev/null || {
+    err "Не удалось создать backup $cfg_file — DNS не изменён"
+    return 1
+  }
+
+  DNS_MODE="$mode" DNS_URL="$doh_url" DNS_HOSTS="$doh_host" DNS_IP="$doh_ip" \
+  python3 - "$cfg_file" <<'PYXFILE'
+import json, os, stat, sys, tempfile
+path = sys.argv[1]
+mode = os.environ.get("DNS_MODE", "1")
+url = os.environ.get("DNS_URL", "")
+hosts = os.environ.get("DNS_HOSTS", "").split()
+ip = os.environ.get("DNS_IP", "").strip()
+try:
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    if not isinstance(cfg, dict):
+        raise ValueError("корень config.json не является объектом")
+    routing = cfg.get("routing")
+    if not isinstance(routing, dict):
+        routing = {}
+    if mode == "1":
+        cfg.pop("dns", None)
+        routing["domainStrategy"] = "AsIs"
+        cfg["fakedns"] = None
+    else:
+        routing["domainStrategy"] = "IPIfNonMatch"
+        cfg["routing"] = routing
+        cfg["dns"] = {
+            "tag": "dns_inbound",
+            "queryStrategy": "UseIPv4",
+            "disableCache": False,
+            "disableFallback": True,
+            "disableFallbackIfMatch": True,
+            "useSystemHosts": False,
+            "enableParallelQuery": False,
+            "serveStale": False,
+            "serveExpiredTTL": 0,
+            "hosts": {host: ip for host in hosts},
+            "servers": [{"address": url, "skipFallback": True,
+                         "queryStrategy": "UseIPv4", "timeoutMs": 4000}]
+        }
+        cfg["fakedns"] = None
+        for outbound in cfg.get("outbounds", []):
+            if not isinstance(outbound, dict) or outbound.get("protocol") != "freedom" or outbound.get("tag") != "direct":
+                continue
+            stream = outbound.get("streamSettings")
+            if not isinstance(stream, dict):
+                stream = {}
+            sockopt = stream.get("sockopt")
+            if not isinstance(sockopt, dict):
+                sockopt = {}
+            sockopt["domainStrategy"] = "ForceIPv4"
+            stream["sockopt"] = sockopt
+            outbound["streamSettings"] = stream
+            break
+    cfg["routing"] = routing
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".config.json.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+except Exception as exc:
+    print("config.json не изменён: %s" % exc, file=sys.stderr)
+    raise SystemExit(1)
+PYXFILE
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    err "Не удалось изменить $cfg_file — backup сохранён: $dns_backup"
+    return 1
+  fi
+
+  systemctl restart x-ui >/dev/null 2>&1 || true
+  sleep 2
+  if ! systemctl is-active --quiet x-ui || ! pgrep -f 'xray-linux-amd64.*config.json' >/dev/null 2>&1; then
+    err "Xray не запустился после изменения DNS — восстанавливаю $dns_backup"
+    systemctl stop x-ui >/dev/null 2>&1 || true
+    cp -a "$dns_backup" "$cfg_file" 2>/dev/null || err "Не удалось восстановить $dns_backup"
+    systemctl start x-ui >/dev/null 2>&1 || true
+    return 1
+  fi
+  # Панель может пересобрать config.json уже после старта. Проверяем именно
+  # фактический файл, иначе нельзя сообщать об успешном применении DNS.
+  DNS_MODE="$mode" DNS_URL="$doh_url" python3 - "$cfg_file" <<'PYXVERIFY'
+import json, os, sys
+path = sys.argv[1]
+mode = os.environ.get("DNS_MODE", "1")
+url = os.environ.get("DNS_URL", "")
+try:
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    routing = cfg.get("routing") if isinstance(cfg.get("routing"), dict) else {}
+    if mode == "1":
+        ok = "dns" not in cfg and routing.get("domainStrategy") == "AsIs"
+    else:
+        dns = cfg.get("dns") if isinstance(cfg.get("dns"), dict) else {}
+        servers = dns.get("servers") if isinstance(dns.get("servers"), list) else []
+        ok = (routing.get("domainStrategy") == "IPIfNonMatch" and
+              any((s.get("address") if isinstance(s, dict) else s) == url for s in servers))
+    raise SystemExit(0 if ok else 1)
+except Exception:
+    raise SystemExit(1)
+PYXVERIFY
+  local verify_rc=$?
+  if [[ $verify_rc -ne 0 ]]; then
+    err "После перезапуска панель перезаписала DNS-конфиг — восстанавливаю $dns_backup"
+    systemctl stop x-ui >/dev/null 2>&1 || true
+    cp -a "$dns_backup" "$cfg_file" 2>/dev/null || err "Не удалось восстановить $dns_backup"
+    systemctl start x-ui >/dev/null 2>&1 || true
+    return 1
+  fi
+  if [[ "$mode" == 1 ]]; then
+    log "DNS Xray применён через $cfg_file: системный режим, routing=AsIs"
+  else
+    log "DNS Xray применён через $cfg_file: $doh_url · routing=IPIfNonMatch · queryStrategy=UseIPv4"
+  fi
+  return 0
+}
+
 xray_dns_apply() {
   local mode="$1" doh_url="${2:-}" doh_host="${3:-}" doh_ip="${4:-}"
-  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден — сначала установите панель"; return 1; }
   case "$mode" in
     1) doh_url=""; doh_host=""; doh_ip="" ;;
     2) doh_url="https://cloudflare-dns.com/dns-query"; doh_host="cloudflare-dns.com one.one.one.one"; doh_ip="1.1.1.1" ;;
@@ -11414,6 +11576,89 @@ xray_dns_apply() {
     5|6) [[ -n "$doh_url" && -n "$doh_host" && -n "$doh_ip" ]] || { err "Для пользовательского DoH нужны URL, host и IP"; return 1; } ;;
     *) err "Неизвестный профиль DNS"; return 1 ;;
   esac
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден — DNS не изменён"; return 1; }
+  # Если панель ещё не создала шаблон, инициализируем его из фактического
+  # рабочего config.json. Это безопаснее, чем писать усечённый шаблон: api,
+  # blackhole, direct и существующие routing.rules переносятся целиком.
+  local has_template=0
+  if sqlite3 "$XUI_DB" \
+      "SELECT 1 FROM settings WHERE key='xrayTemplateConfig' AND value IS NOT NULL AND value<>'' LIMIT 1;" \
+      2>/dev/null | grep -q '^1$'; then
+    has_template=1
+  fi
+  if [[ "$has_template" -eq 0 && -f /usr/local/x-ui/bin/config.json ]]; then
+    local seed_backup="$BACKUP_DIR/xray-template-seed-$(date +%Y%m%d-%H%M%S)-$$.db"
+    mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+    cp -a "$XUI_DB" "$seed_backup" 2>/dev/null || {
+      err "Не удалось создать backup x-ui.db — DNS не изменён"
+      return 1
+    }
+    systemctl stop x-ui >/dev/null 2>&1 || true
+    XRAY_CONFIG_SOURCE=/usr/local/x-ui/bin/config.json python3 - "$XUI_DB" <<'PYXSEED'
+import json, os, sqlite3, sys
+path, source = sys.argv[1], os.environ["XRAY_CONFIG_SOURCE"]
+with open(source, encoding="utf-8") as fh:
+    cfg = json.load(fh)
+if not isinstance(cfg, dict):
+    raise SystemExit("config.json: корень не является объектом")
+outbounds = cfg.get("outbounds") if isinstance(cfg.get("outbounds"), list) else []
+tags = {x.get("tag") for x in outbounds if isinstance(x, dict)}
+if not {"direct", "blocked"}.issubset(tags):
+    raise SystemExit("config.json: отсутствуют обязательные outbound direct/blocked")
+routing = cfg.get("routing")
+if not isinstance(routing, dict) or not isinstance(routing.get("rules"), list):
+    raise SystemExit("config.json: отсутствует routing.rules")
+value = json.dumps(cfg, ensure_ascii=False, indent=2)
+con = sqlite3.connect(path, timeout=30)
+try:
+    cur = con.execute("UPDATE settings SET value=? WHERE key='xrayTemplateConfig'", (value,))
+    if cur.rowcount == 0:
+        con.execute("INSERT INTO settings(key,value) VALUES('xrayTemplateConfig',?)", (value,))
+    con.commit()
+finally:
+    con.close()
+PYXSEED
+    local seed_rc=$?
+    systemctl start x-ui >/dev/null 2>&1 || true
+    if [[ "$seed_rc" -ne 0 ]]; then
+      err "Не удалось создать xrayTemplateConfig из config.json — восстанавливаю backup"
+      systemctl stop x-ui >/dev/null 2>&1 || true
+      cp -a "$seed_backup" "$XUI_DB" 2>/dev/null || err "Не удалось восстановить $seed_backup"
+      systemctl start x-ui >/dev/null 2>&1 || true
+      return 1
+    fi
+    log "xrayTemplateConfig инициализирован из /usr/local/x-ui/bin/config.json"
+  fi
+  # Сначала проверяем наличие шаблона read-only: при его отсутствии не создаём
+  # лишний backup и не запускаем восстановление заведомо неизменённой БД.
+  python3 - "$XUI_DB" <<'PYXPRE'
+import sqlite3, sys
+con=sqlite3.connect(sys.argv[1], timeout=10)
+try:
+    row=con.execute("SELECT 1 FROM settings WHERE key='xrayTemplateConfig' AND value IS NOT NULL AND value<>'' LIMIT 1").fetchone()
+finally:
+    con.close()
+if not row:
+    print("xrayTemplateConfig отсутствует — безопасно отменено", file=sys.stderr)
+    raise SystemExit(10)
+PYXPRE
+  local preflight_rc=$?
+  if [[ $preflight_rc -eq 10 ]]; then
+    log "Изменение DNS отменено: xrayTemplateConfig отсутствует; БД не изменялась"
+    return 1
+  elif [[ $preflight_rc -ne 0 ]]; then
+    err "Не удалось проверить xrayTemplateConfig — DNS-шаблон не изменён"
+    return 1
+  fi
+  # Перед изменением шаблона сохраняем саму БД: это отдельная rollback-точка,
+  # потому что auto_backup_stack может быть вызван не из этого меню.
+  local dns_backup=""
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+  dns_backup="$BACKUP_DIR/x-ui-dns-$(date +%Y%m%d-%H%M%S)-$$.db"
+  if ! cp -a "$XUI_DB" "$dns_backup" 2>/dev/null; then
+    err "Не удалось создать backup x-ui.db — DNS-шаблон не изменён"
+    return 1
+  fi
   systemctl stop x-ui >/dev/null 2>&1 || true
   DNS_MODE="$mode" DNS_URL="$doh_url" DNS_HOSTS="$doh_host" DNS_IP="$doh_ip" \
   python3 - "$XUI_DB" <<'PYXDNS'
@@ -11423,10 +11668,6 @@ mode = os.environ.get("DNS_MODE", "1")
 url = os.environ.get("DNS_URL", "")
 hosts = os.environ.get("DNS_HOSTS", "").split()
 ip = os.environ.get("DNS_IP", "").strip()
-def default_config():
-    return {"routing": {"domainStrategy": "AsIs"}, "outbounds": [
-        {"protocol": "freedom", "tag": "direct", "settings": {}}
-    ]}
 def unwrap(cfg):
     # LucX/3x-ui может хранить конфиг как JSON-обёртку с xraySetting.
     # Возвращаем рабочий объект и способ упаковки обратно, не теряя api/rules/outbounds.
@@ -11442,14 +11683,20 @@ def unwrap(cfg):
 con = sqlite3.connect(path, timeout=30)
 row = con.execute("SELECT value FROM settings WHERE key='xrayTemplateConfig' ORDER BY id DESC LIMIT 1").fetchone()
 if not row or not row[0]:
-    raise SystemExit("xrayTemplateConfig отсутствует — безопасно отменено")
+    print("xrayTemplateConfig отсутствует — безопасно отменено", file=sys.stderr)
+    con.close()
+    raise SystemExit(10)
 try:
     container = json.loads(row[0])
     cfg, wrappers = unwrap(container)
 except Exception as exc:
-    raise SystemExit("xrayTemplateConfig повреждён или имеет неизвестный формат: %s" % exc)
+    print("xrayTemplateConfig повреждён или имеет неизвестный формат: %s" % exc, file=sys.stderr)
+    con.close()
+    raise SystemExit(10)
 if not isinstance(cfg, dict):
-    raise SystemExit("xrayTemplateConfig не является объектом — безопасно отменено")
+    print("xrayTemplateConfig не является объектом — безопасно отменено", file=sys.stderr)
+    con.close()
+    raise SystemExit(10)
 if mode == "1":
     # Только отключаем ранее заданный управляемый DNS; остальные поля сохраняем.
     cfg.pop("dns", None)
@@ -11506,7 +11753,28 @@ con.close()
 PYXDNS
   local rc=$?
   systemctl start x-ui >/dev/null 2>&1 || true
-  [[ $rc -eq 0 ]] || { err "Не удалось записать xrayTemplateConfig"; return 1; }
+  # Код 10 означает штатный безопасный отказ: шаблон отсутствует или
+  # имеет неподдерживаемый формат. БД при этом не трогалась, restore не нужен.
+  if [[ $rc -eq 10 ]]; then
+    log "Изменение DNS отменено: xrayTemplateConfig отсутствует или не поддерживается; backup не восстанавливался"
+    return 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    warn "Не удалось записать xrayTemplateConfig — восстанавливаю backup $dns_backup"
+    systemctl stop x-ui >/dev/null 2>&1 || true
+    cp -a "$dns_backup" "$XUI_DB" 2>/dev/null || err "Не удалось восстановить $dns_backup"
+    systemctl start x-ui >/dev/null 2>&1 || true
+    return 1
+  fi
+  # x-ui генерирует итоговый config.json только после перезапуска; если сервис
+  # не поднялся, возвращаем БД, чтобы не оставлять панель в полуобновлённом виде.
+  if ! systemctl is-active --quiet x-ui; then
+    err "x-ui не запустился после изменения DNS — восстанавливаю backup $dns_backup"
+    systemctl stop x-ui >/dev/null 2>&1 || true
+    cp -a "$dns_backup" "$XUI_DB" 2>/dev/null || err "Не удалось восстановить $dns_backup"
+    systemctl start x-ui >/dev/null 2>&1 || true
+    return 1
+  fi
   if [[ "$mode" == 1 ]]; then
     log "DNS Xray: системный режим (управляемый DNS удалён), routing=AsIs"
   else
