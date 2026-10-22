@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.15"
+STACK_MANAGER_VERSION="1.0.16"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -11398,8 +11398,148 @@ security_menu() {
   esac
 }
 
-# DNS для Xray удалён из скрипта: xray резолвит системно (dns-секция шаблона
-# не трогается), настройки DNS Xray делаются в панели при необходимости.
+# ─────────────────────────────────────────────────────────────────────────────
+# DNS Xray/LucX — глобальный шаблон панели
+# Совместимо с xrayTemplateConfig LucX/3x-ui. Настройка меняет только
+# глобальный шаблон Xray в x-ui.db, а не настройки отдельных инбаундов.
+# ─────────────────────────────────────────────────────────────────────────────
+xray_dns_apply() {
+  local mode="$1" doh_url="${2:-}" doh_host="${3:-}" doh_ip="${4:-}"
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден — сначала установите панель"; return 1; }
+  case "$mode" in
+    1) doh_url=""; doh_host=""; doh_ip="" ;;
+    2) doh_url="https://cloudflare-dns.com/dns-query"; doh_host="cloudflare-dns.com one.one.one.one"; doh_ip="1.1.1.1" ;;
+    3) doh_url="https://dns.google/dns-query"; doh_host="dns.google"; doh_ip="8.8.8.8" ;;
+    4) doh_url="https://dns.quad9.net/dns-query"; doh_host="dns.quad9.net"; doh_ip="9.9.9.9" ;;
+    5|6) [[ -n "$doh_url" && -n "$doh_host" && -n "$doh_ip" ]] || { err "Для пользовательского DoH нужны URL, host и IP"; return 1; } ;;
+    *) err "Неизвестный профиль DNS"; return 1 ;;
+  esac
+  systemctl stop x-ui >/dev/null 2>&1 || true
+  DNS_MODE="$mode" DNS_URL="$doh_url" DNS_HOSTS="$doh_host" DNS_IP="$doh_ip" \
+  python3 - "$XUI_DB" <<'PYXDNS'
+import json, os, sqlite3, sys
+path = sys.argv[1]
+mode = os.environ.get("DNS_MODE", "1")
+url = os.environ.get("DNS_URL", "")
+hosts = os.environ.get("DNS_HOSTS", "").split()
+ip = os.environ.get("DNS_IP", "").strip()
+def default_config():
+    return {"routing": {"domainStrategy": "AsIs"}, "outbounds": [
+        {"protocol": "freedom", "tag": "direct", "settings": {}}
+    ]}
+def unwrap(cfg):
+    # LucX/3x-ui может хранить конфиг как JSON-обёртку с xraySetting.
+    # Возвращаем рабочий объект и способ упаковки обратно, не теряя api/rules/outbounds.
+    wrappers = []
+    for _ in range(8):
+        if isinstance(cfg, dict) and "xraySetting" in cfg and not any(k in cfg for k in ("dns", "routing", "outbounds", "inbounds")):
+            wrappers.append(cfg)
+            inner = cfg["xraySetting"]
+            cfg = json.loads(inner) if isinstance(inner, str) else inner
+        else:
+            return cfg, wrappers
+    raise ValueError("слишком много вложенных xraySetting")
+con = sqlite3.connect(path, timeout=30)
+row = con.execute("SELECT value FROM settings WHERE key='xrayTemplateConfig' ORDER BY id DESC LIMIT 1").fetchone()
+if not row or not row[0]:
+    raise SystemExit("xrayTemplateConfig отсутствует — безопасно отменено")
+try:
+    container = json.loads(row[0])
+    cfg, wrappers = unwrap(container)
+except Exception as exc:
+    raise SystemExit("xrayTemplateConfig повреждён или имеет неизвестный формат: %s" % exc)
+if not isinstance(cfg, dict):
+    raise SystemExit("xrayTemplateConfig не является объектом — безопасно отменено")
+if mode == "1":
+    # Только отключаем ранее заданный управляемый DNS; остальные поля сохраняем.
+    cfg.pop("dns", None)
+    routing = cfg.get("routing") if isinstance(cfg.get("routing"), dict) else {}
+    routing["domainStrategy"] = "AsIs"
+    cfg["routing"] = routing
+    cfg["fakedns"] = None
+else:
+    routing = cfg.get("routing") if isinstance(cfg.get("routing"), dict) else {}
+    routing["domainStrategy"] = "IPIfNonMatch"
+    cfg["routing"] = routing
+    host_map = {}
+    for h in hosts:
+        host_map[h] = ip
+    cfg["dns"] = {
+        "tag": "dns_inbound",
+        "queryStrategy": "UseIPv4",
+        "disableCache": False,
+        "disableFallback": True,
+        "disableFallbackIfMatch": True,
+        "useSystemHosts": False,
+        "enableParallelQuery": False,
+        "serveStale": False,
+        "serveExpiredTTL": 0,
+        "hosts": host_map,
+        "servers": [{"address": url, "skipFallback": True,
+                      "queryStrategy": "UseIPv4", "timeoutMs": 4000}]
+    }
+    cfg["fakedns"] = None
+    for ob in cfg.get("outbounds", []):
+        if not isinstance(ob, dict) or ob.get("protocol") != "freedom" or ob.get("tag") != "direct":
+            continue
+        stream = ob.get("streamSettings") if isinstance(ob.get("streamSettings"), dict) else {}
+        sock = stream.get("sockopt") if isinstance(stream.get("sockopt"), dict) else {}
+        sock["domainStrategy"] = "ForceIPv4"
+        stream["sockopt"] = sock
+        ob["streamSettings"] = stream
+        break
+# Восстанавливаем исходную обёртку LucX/3x-ui, если она была.
+# Это важно: при записи внутреннего объекта нельзя терять структуру шаблона.
+value_obj = cfg
+for wrapper in reversed(wrappers):
+    wrapper["xraySetting"] = json.dumps(value_obj, ensure_ascii=False, indent=2) if isinstance(wrapper.get("xraySetting"), str) else value_obj
+    value_obj = wrapper
+value = json.dumps(value_obj, ensure_ascii=False, indent=2)
+con.execute("UPDATE settings SET value=? WHERE key='xrayTemplateConfig'", (value,))
+if con.total_changes == 0:
+    raise SystemExit("xrayTemplateConfig не обновлён")
+con.commit()
+try:
+    con.execute("PRAGMA wal_checkpoint(TRUNCATE)"); con.commit()
+except Exception: pass
+con.close()
+PYXDNS
+  local rc=$?
+  systemctl start x-ui >/dev/null 2>&1 || true
+  [[ $rc -eq 0 ]] || { err "Не удалось записать xrayTemplateConfig"; return 1; }
+  if [[ "$mode" == 1 ]]; then
+    log "DNS Xray: системный режим (управляемый DNS удалён), routing=AsIs"
+  else
+    log "DNS Xray применён: $doh_url · routing=IPIfNonMatch · queryStrategy=UseIPv4"
+  fi
+}
+
+xray_dns_menu() {
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден — сначала установите панель"; return 1; }
+  line; echo -e "${B}   DNS В ПАНЕЛИ LUCX/3X-UI${N}"; line
+  echo "  1) Системный DNS (убрать управляемый шаблон)"
+  echo "  2) DoH Cloudflare (1.1.1.1)"
+  echo "  3) DoH Google (8.8.8.8)"
+  echo "  4) DoH Quad9 (9.9.9.9)"
+  echo "  5) Self-hosted DoH панели (домен + IP сервера автоматически)"
+  echo "  6) Свой DoH (ввести URL, host и IP вручную)"
+  local mode="" url="" host="" ip=""
+  ask mode "Профиль DNS" "2" '^[1-6]$'
+  case "$mode" in
+    5)
+      [[ -n "${PANEL_DOMAIN:-}" ]] || PANEL_DOMAIN=$(xui_get webDomain 2>/dev/null || true)
+      ip=$(server_ip4)
+      [[ -n "$PANEL_DOMAIN" && -n "$ip" ]] || { err "Не удалось получить домен панели или IPv4 сервера"; return 1; }
+      url="https://${PANEL_DOMAIN}/dns-query"; host="$PANEL_DOMAIN"
+      echo "  Self-hosted: $url"; echo "  hosts: $host → $ip" ;;
+    6)
+      ask url "URL DoH (например https://dns.example/dns-query)" "https://" '^https://[^[:space:]]+$'
+      ask host "DoH host для hosts" "" '^[a-zA-Z0-9.-]+$'
+      ask ip "IPv4 DoH host" "" '^([0-9]{1,3}\.){3}[0-9]{1,3}$' ;;
+  esac
+  xray_dns_apply "$mode" "$url" "$host" "$ip"
+  pause
+}
 
 # =====================================================================
 # FIREWALL
@@ -14879,9 +15019,10 @@ panel_adguard_menu() {
     line; echo -e "${B}   ПАНЕЛЬ И ADGUARD${N}"; line
     echo "  1) Управление LucX/3x-ui"
     echo "  2) Управление AdGuard Home"
+    echo "  3) DNS Xray в панели LucX/3x-ui"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-2]$'
-    case "$c" in 1) panel_manage; pause ;; 2) adguard_manage; pause ;; 0) return 0 ;; esac
+    local c=""; ask c "Выбор" "1" '^[0-3]$'
+    case "$c" in 1) panel_manage; pause ;; 2) adguard_manage; pause ;; 3) xray_dns_menu ;; 0) return 0 ;; esac
   done
 }
 
