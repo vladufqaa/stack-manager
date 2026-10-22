@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.19"
+STACK_MANAGER_VERSION="1.0.20"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -11846,6 +11846,31 @@ PYXDNS
   fi
 }
 
+# Определить внешний домен AdGuard Home по фактической конфигурации.
+# При отдельном SNI DoH живёт на adguard.<зона>, а не на домене панели.
+xray_adguard_doh_endpoint() {
+  local panel="${PANEL_DOMAIN:-}" dom="" block=""
+  [[ -n "$panel" ]] || panel=$(xui_get webDomain 2>/dev/null || true)
+  [[ "$panel" == "null" ]] && panel=""
+  # Приоритет — реальный SNI-map: он показывает, куда nginx отправляет DoH.
+  if [[ -f "$SNI_CONF" ]]; then
+    dom=$(awk '$2 == "agh_backend;" {print $1; exit}' "$SNI_CONF" 2>/dev/null || true)
+  fi
+  if [[ -n "$dom" ]]; then
+    printf '%s' "$dom"
+    return 0
+  fi
+  # Если отдельного SNI нет, проверяем proxy AdGuard в корневом блоке панели.
+  if [[ -f "$STACK_CONF" ]] && grep -q "listen 127.0.0.1:4443" "$STACK_CONF" 2>/dev/null; then
+    block=$(sed -n '/listen 127\.0\.0\.1:4443/,/^}/p' "$STACK_CONF" 2>/dev/null || true)
+    if grep -q "proxy_pass https://127\.0\.0\.1:" <<< "$block"; then
+      printf '%s' "$panel"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 xray_dns_menu() {
   [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден — сначала установите панель"; return 1; }
   line; echo -e "${B}   DNS В ПАНЕЛИ LUCX/3X-UI${N}"; line
@@ -11859,11 +11884,13 @@ xray_dns_menu() {
   ask mode "Профиль DNS" "2" '^[1-6]$'
   case "$mode" in
     5)
-      [[ -n "${PANEL_DOMAIN:-}" ]] || PANEL_DOMAIN=$(xui_get webDomain 2>/dev/null || true)
       ip=$(server_ip4)
-      [[ -n "$PANEL_DOMAIN" && -n "$ip" ]] || { err "Не удалось получить домен панели или IPv4 сервера"; return 1; }
-      url="https://${PANEL_DOMAIN}/dns-query"; host="$PANEL_DOMAIN"
-      echo "  Self-hosted: $url"; echo "  hosts: $host → $ip" ;;
+      host=$(xray_adguard_doh_endpoint 2>/dev/null || true)
+      [[ -n "$host" && -n "$ip" ]] || {
+        err "Не найден внешний домен AdGuard Home в SNI/nginx-конфигурации — DNS не изменён"; return 1;
+      }
+      url="https://${host}/dns-query"
+      echo "  Self-hosted AdGuard: $url"; echo "  hosts: $host → $ip" ;;
     6)
       ask url "URL DoH (например https://dns.example/dns-query)" "https://" '^https://[^[:space:]]+$'
       ask host "DoH host для hosts" "" '^[a-zA-Z0-9.-]+$'
