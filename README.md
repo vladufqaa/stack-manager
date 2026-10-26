@@ -19,6 +19,10 @@
 </p>
 
 <p align="center">
+  <b>Русский</b> · <a href="README.en.md">English</a>
+</p>
+
+<p align="center">
   <a href="#-что-это">Что это</a> ·
   <a href="#-как-это-работает">Как работает</a> ·
   <a href="#-возможности">Возможности</a> ·
