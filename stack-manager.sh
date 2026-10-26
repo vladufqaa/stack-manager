@@ -869,7 +869,7 @@ udp_inbound_ports() {
 }
 
 # Заморозка: строка вида «cert:<domain>», «inbound:<id>» или «ALL-CERTS»
-# в FROZEN_FILE запрещает АВТОМАТИКЕ (heal-таймер, авто-выпуск сертов)
+# в FROZEN_FILE запрещает АВТОМАТИКЕ (авто-выпуск сертов)
 # трогать объект. Ручные действия через меню не блокируются.
 frozen() { return 1; }
 
@@ -3920,92 +3920,11 @@ PYDEDUP
   return 0
 }
 
-# --- Автопочинка после правок инбаундов в панели -----------------------------
-# Панель при сохранении инбаунда (даже «просто добавил клиента») сбрасывает
-# dest/пути сертов из своей памяти. Таймер stack-heal.timer (2 мин) гоняет
-# лёгкую read-only проверку; самолечение запускается ТОЛЬКО при находке.
-
-inbounds_need_heal() {
-  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 1
-  # python3 + read-only sqlite: не спотыкается о многострочный JSON в БД
-  # и о блокировку записи (статистика панели), в отличие от sqlite3|while-read
-  python3 - "$XUI_DB" <<'PYNEEDHEAL' 2>/dev/null
-import sqlite3, json, socket, sys
-
-def port_listens(p):
-    s = socket.socket(); s.settimeout(1.5)
-    try:
-        s.connect(("127.0.0.1", p)); return True
-    except Exception:
-        return False
-    finally:
-        s.close()
-
-try:
-    con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=5)
-    rows = con.execute("SELECT id, protocol, settings, stream_settings FROM inbounds WHERE enable=1 AND port>0").fetchall()
-except Exception:
-    sys.exit(1)   # БД недоступна — не считаем поломкой
-
-SKIP = {"qwdtt", "csqdtt", "csqtt", "wireguard", "amnezia", "amneziawg", "awg", "mtproto", "tun"}
-FROZEN_INB = set()
-try:
-    FROZEN_INB = {l.strip().split(":",1)[1] for l in open("/root/stack-frozen.txt") if l.strip().startswith("inbound:")}
-except Exception:
-    pass
-CDN_IDS = set()
-try:
-    CDN_IDS = {l.strip().split("|",1)[0] for l in open("/root/stack-backups/cdn-profiles.tsv")
-               if l.strip() and "|" in l and l.split("|",1)[0].isdigit()}
-except Exception:
-    pass
-for iid, proto, setts_s, stream_s in rows:
-    if proto in SKIP:
-        continue
-    if str(iid) in CDN_IDS:
-        continue                          # CDN-режим: TLS у nginx, серт в инбаунде не нужен
-    if f"inbound:{iid}" in FROZEN_INB:
-        continue
-    try:    st = json.loads(stream_s or "{}")
-    except Exception: st = {}
-    try:    se = json.loads(setts_s or "{}")
-    except Exception: se = {}
-    rs = st.get("realitySettings") or {}
-    dom = se.get("domain") or se.get("hostname") or se.get("sni") \
-          or (st.get("tlsSettings") or {}).get("serverName") \
-          or (rs.get("serverNames") or [None])[0]
-    if not dom:
-        continue
-    if (st.get("security") or "").lower() == "reality":
-        dest = str(rs.get("dest") or rs.get("target") or "")
-        # Смотрим на фактический порт из dest, а не на формулу 4444+id: иначе
-        # любое расхождение с формулой давало вечный цикл «автопочинки».
-        dp = ""
-        if "127.0.0.1:" in dest:
-            dp = dest.split("127.0.0.1:", 1)[1].split(":")[0].strip()
-        if dp.isdigit() and port_listens(int(dp)):
-            continue                      # dest на живом decoy — ок
-        sys.exit(0)                       # dest сбит панелью или decoy мёртв
-    if (st.get("tlsSettings") or {}).get("certificates"):
-        continue                          # серт вписан в stream (xray-класс)
-    if se.get("certFile"):
-        continue                          # серт вписан в settings (caddy-класс)
-    # сервис жив и слушает свой порт → серт фактически работает; панель-менеджер
-    # туннелей мог перегенерить settings — не считаем это поломкой (иначе цикл)
-    try:
-        _p = int(se.get("port") or 0)
-    except Exception:
-        _p = 0
-    if _p and port_listens(_p):
-        continue
-    sys.exit(0)                           # серт не вписан
-sys.exit(1)
-PYNEEDHEAL
-}
-
-heal_once() { return 0; }
-
-install_heal_timer() { return 0; }
+# --- Самолечение по таймеру убрано из архитектуры ----------------------------
+# Таймер stack-heal.timer больше не существует: install_heal_timer()/heal_once()
+# и проверка inbounds_need_heal() удалены как мёртвый код. При установке и
+# переустановке uninstall_heal_timer() дочищает остатки старых юнитов.
+# Отклонения чинятся вручную (п.1/п.4).
 
 uninstall_heal_timer() {
   systemctl disable --now stack-heal.timer 2>/dev/null || true
@@ -6932,7 +6851,7 @@ EOF
 # =====================================================================
 # Канонический порт decoy для инбаунда: 4444 + id.
 # Это же правило используют configure_sni_for_inbound, decoy_ensure_all и
-# самолечение (sync_inbound_needs / inbounds_need_heal). Раньше п.1 нумеровал
+# самолечение (sync_inbound_needs). Раньше п.1 нумеровал
 # порты последовательно (4444, 4445, 4446…), из-за чего самолечение каждые
 # 2 минуты считало reality-dest сбитым, переписывало decoy-блоки на «свои»
 # порты и не перезагружало nginx — конфиг расходился с работающим nginx,
@@ -7501,7 +7420,7 @@ stack_full_audit() {
   if command -v nginx >/dev/null 2>&1; then nginx -t >/dev/null 2>&1 && log "nginx -t: OK" || { err "nginx -t: FAIL"; issues=$((issues+1)); }; fi
   [[ -f "$SNI_CONF" ]] && log "SNI-конфиг: найден" || { warn "SNI-конфиг отсутствует"; issues=$((issues+1)); }
   echo "[ Services ]"
-  for svc in nginx x-ui stack-heal.timer; do
+  for svc in nginx x-ui; do
     systemctl is-active --quiet "$svc" 2>/dev/null && log "$svc: active" || warn "$svc: не active"
   done
   echo "[ Listening ports ]"
@@ -13766,16 +13685,12 @@ PYDOMS
     else warn2 "$d → $a_ip, а сервер: $srv_ip"; fi
   done <<<"$doms"
 
-  echo -e "${B}— Heal-таймер —${N}"
-  if systemctl is-enabled --quiet stack-heal.timer 2>/dev/null; then
-    ok "самолечение включено (каждые 2 мин); последний лог: $(tail -1 /root/stack-heal.log 2>/dev/null | head -c 80)"
-    if db_protect_state; then
-      ok "защита БД: серты/dest/hostname защищены от перезаписи панелью"
-    else
-      warn "защита БД выключена — панель может затирать серты/dest при правках (включается в разделе «Заморозка самолечения»)"
-    fi
+  echo -e "${B}— Самолечение / защита БД —${N}"
+  warn2 "самолечение по таймеру убрано из архитектуры; отклонения чинятся вручную (п.1/п.4)"
+  if db_protect_state; then
+    ok "защита БД: серты/dest/hostname защищены от перезаписи панелью"
   else
-    warn2 "самолечение выключено (отклонения чинятся только вручную: п.1/п.4)"
+    warn "защита БД выключена — панель может затирать серты/dest при правках (включается в разделе «Заморозка самолечения»)"
   fi
 
   echo
@@ -13797,7 +13712,7 @@ stack_audit_readonly() {
   local pass fail
   pass(){ ok "$*"; }
   fail(){ err "$*"; bad=$((bad+1)); }
-  echo -e "${B}— nginx / SNI / stack-heal —${N}"
+  echo -e "${B}— nginx / SNI —${N}"
   systemctl is-active --quiet nginx 2>/dev/null && pass "nginx активен" || fail "nginx не активен"
   nginx_ready && pass "nginx.conf найден" || fail "nginx или nginx.conf отсутствует"
   if sni_router_present; then
@@ -13807,8 +13722,6 @@ stack_audit_readonly() {
     fail "SNI-роутер отсутствует"
   fi
   nginx -t >/dev/null 2>&1 && pass "nginx -t OK" || fail "nginx -t FAILED"
-  stack_heal_present && pass "stack-heal найден" || warn "stack-heal отсутствует"
-  systemctl is-enabled --quiet stack-heal.timer 2>/dev/null && pass "stack-heal.timer включён" || warn "stack-heal.timer не включён"
   echo -e "${B}— БД —${N}"
   if [[ -f "$XUI_DB" ]]; then
     dbcount=$(sqlite3 -readonly -cmd '.timeout 3000' "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || true)
