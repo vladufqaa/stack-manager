@@ -712,7 +712,8 @@ sni_domain_taken() { [[ -n "$(sni_domain_owner "$@")" ]]; }
 #   $1 = имя переменной результата, $2 = id инбаунда, $3 = домен по умолчанию
 # ВАЖНО: переменная результата НЕ должна называться d/p/r/in — это локали ask()
 ask_sni_domain() {
-  local __v="$1" __id="$2" __def="$3" __label="${4:-SNI-домен для #${__id}}" d_val owner
+  local __v="$1" __id="$2" __def="$3" d_val owner
+  local __label="${4:-SNI-домен для #${__id}}"
   while :; do
     d_val=""
     ask d_val "$__label" "$__def" '^[a-zA-Z0-9.-]+$'
@@ -1895,6 +1896,7 @@ decoy_panel_choose() {
   fi
   if [[ "$choice" == "2" && "$ADG_PRESENT" != true ]]; then
     askyn do_install "AdGuard Home не установлен. Установить сейчас?" "y"
+    # shellcheck disable=SC2154 # задаётся askyn выше
     if [[ "$do_install" == true ]]; then
       install_adguard_home || { warn "Не удалось — падаем на stub"; choice=1; }
     else
@@ -1904,6 +1906,7 @@ decoy_panel_choose() {
   if [[ "$choice" == "4" ]]; then
     if [[ "$ADG_PRESENT" != true ]]; then
       askyn do_install4 "AdGuard Home не установлен. Установить сейчас?" "y"
+      # shellcheck disable=SC2154 # задаётся askyn выше
       if [[ "$do_install4" == true ]]; then
         install_adguard_home || { warn "Не удалось — падаем на stub"; choice=1; }
       else
@@ -2195,7 +2198,7 @@ setup_panel_cert_domain() {
     return 0
   fi
 
-  echo; echo -e "${B}   ДОМЕН И СЕРТИФИКАТ ПАНЕЛИ${N}"
+  echo; line; echo -e "${B}   ДОМЕН И СЕРТИФИКАТ ПАНЕЛИ${N}"; line
   local pdomain="${PANEL_DOMAIN:-}"
   if [[ -z "$pdomain" ]]; then
     ask pdomain "Домен панели (A-запись → этот сервер)" "panel.example.com" '^[a-zA-Z0-9.-]+$'
@@ -2778,12 +2781,12 @@ create_inbounds_menu() {
       local def2="h.example.com"
       case "$proto" in
         trojan) def2="t.example.com";;
-        vless) [[ "$transport" == "xhttp" ]] && def2="x.example.com";;
+        vless)
+          if [[ "$transport" == "xhttp" ]]; then def2="x.example.com"; else def2="r.example.com"; fi ;;
         naive) def2="n.example.com";;
         anytls) def2="at.example.com";;
         trusttunnel|trust-tunnel) def2="tt.example.com";;
         tproxy) def2="tg.example.com";;
-        vless) def2="r.example.com";;
       esac
       local d_new="" owner2=""
       while :; do
@@ -5983,7 +5986,7 @@ cert_audit() {
 
     # в SNI-карте? (по имени как домен). Для wildcard-пути cert-name
     # может отличаться от SNI-домена, поэтому JSON/БД проверяются отдельно.
-    if [[ -f "$SNI_CONF" ]] && grep -qE "^[[:space:]]+$name[[:space:]]+" "$SNI_CONF" 2>/dev/null; then
+    if [[ -f "$SNI_CONF" ]] && grep -qE "^[[:space:]]+${name}[[:space:]]+" "$SNI_CONF" 2>/dev/null; then
       in_sni=1; used_in+=" SNI"
     fi
     if [[ "$in_db" == 1 && "$used_in" != *"SNI"* ]]; then
@@ -6153,6 +6156,7 @@ cert_wildcard_issue() {
   local need_token=true
   if [[ -f "$CF_CREDS" ]] && grep -q 'dns_cloudflare_api_token' "$CF_CREDS" 2>/dev/null; then
     askyn reuse "Использовать сохранённый Cloudflare API Token ($CF_CREDS)?" "y"
+    # shellcheck disable=SC2154 # задаётся askyn выше
     [[ "$reuse" == true ]] && need_token=false
   fi
   if [[ "$need_token" == true ]]; then
@@ -9648,6 +9652,7 @@ add_inbound() {
       else
         warn "#$id ($proto/$port) → НЕ в SNI"
         askyn do_it "Настроить #$id сейчас?" "y"
+        # shellcheck disable=SC2154 # задаётся askyn выше
         [[ "$do_it" == true ]] && configure_sni_for_inbound "$id" "$proto" "$port" "$panel_domain"
       fi
       count=$((count+1))
@@ -10711,8 +10716,6 @@ change_decoy() {
       ls -1 "$DECOY_TPL_DIR" 2>/dev/null | sed 's/^/    /'
     fi
     pause; return 0
-
-  pause
 }
 
 # =====================================================================
@@ -11396,7 +11399,7 @@ security_menu() {
       pause
       ;;
     3)
-      > "$DECOY_LOG_ACCESS" 2>/dev/null || true
+      : > "$DECOY_LOG_ACCESS" 2>/dev/null || true
       systemctl restart fail2ban 2>/dev/null || true
       log "Лог деко-попыток очищен, fail2ban перезапущен"
       pause
@@ -11878,7 +11881,7 @@ xray_dns_menu() {
   echo "  2) DoH Cloudflare (1.1.1.1)"
   echo "  3) DoH Google (8.8.8.8)"
   echo "  4) DoH Quad9 (9.9.9.9)"
-  echo "  5) Self-hosted DoH панели (домен + IP сервера автоматически)"
+  echo "  5) Self-hosted DoH AdGuard (домен из SNI, IP автоматически)"
   echo "  6) Свой DoH (ввести URL, host и IP вручную)"
   local mode="" url="" host="" ip=""
   ask mode "Профиль DNS" "2" '^[1-6]$'
@@ -12628,7 +12631,7 @@ firewall_apply_menu() {
           tui_restore
           echo
           local ans=""
-          read -rp "$(echo "${R}?${N} Закрыть SSH (порт ${SSH_PORT:-22})? Потеряешь доступ снаружи! [y/N]: ")" ans || ans=""
+          read -rp "${R}?${N} Закрыть SSH (порт ${SSH_PORT:-22})? Потеряешь доступ снаружи! [y/N]: " ans || ans=""
           case "${ans,,}" in
             y|yes|д|да) state=0 ;;
             *)          state=1 ;;
@@ -15403,53 +15406,6 @@ run_menu_action() {
   esac
 }
 
-# ─── Стиль меню: боксы со счётчиками (как RKN-GUARD) ─────────────────
-# Рамки с эмодзи считает python3 (unicodedata): под LC_ALL=C баш итерирует
-# строку по БАЙТАМ и ломает выравнивание, поэтому ширина — не его работа.
-svc_dot() { systemctl is-active --quiet "$1" 2>/dev/null && echo "🟢" || echo "🔴"; }
-menu_header() { # <ngx> <xui> <adg> <f2b> <ufw_ok> <nb> <att> <bans> <amin> <duse> <db> <mtime>
-  python3 - "$@" <<'PYHDR'
-import sys, unicodedata, re
-G,R,Y,B,D,N = "\033[0;32m","\033[0;31m","\033[1;33m","\033[0;36m","\033[90m","\033[0m"
-ngx,xui,adg,f2b,ufw_ok,nb,att,bans,amin,duse,db,mtime = sys.argv[1:13]
-def w(s):
-    s = re.sub(r"\x1b\[[0-9;]*m", "", s)          # ANSI-коды не видны — не ширина
-    total, prev = 0, 0
-    for ch in s:
-        total += wch(ord(ch), prev)
-        prev = ord(ch)
-    return total
-def wch(cp, prev):
-    if cp == 0xFE0F:
-        return 1 if 0x2B00 <= prev <= 0x2BFF else 0   # ⬇️/➡️ становятся широкими
-    if cp == 0x200D:
-        return 0
-    wide = unicodedata.east_asian_width(chr(cp)) in ('W','F') \
-        or 0x1F000 <= cp <= 0x1FAFF or 0x2600 <= cp <= 0x27BF
-    return 2 if wide else 1
-def line(s, W):
-    return "│" + s + " " * max(W - w(s), 0) + "│"
-def center(s, W):
-    pad = max(W - w(s), 0); l = pad // 2
-    return "│" + " " * l + s + " " * (pad - l) + "│"
-W = 58
-dot = lambda v: "🟢" if v == "1" else "🔴"
-cs = "—" if amin == "—" else (f"{R}{amin} дн{N}" if amin.isdigit() and int(amin) < 14 else f"{amin} дн")
-print(f"{B}╔{'═'*W}╗{N}")
-print(f"{B}{center('STACK MANAGER', W)}{N}")
-print(f"{B}{center('SNI-роутер · LucX/x-ui · AdGuard · decoy', W)}{N}")
-print(f"{B}╚{'═'*W}╝{N}")
-print(f"{B}┌{'─'*W}┐{N}")
-print(line(f"{ngx} nginx  {xui} x-ui  {adg} AdGuard  {f2b} f2b", W))
-print(line(f"👥 инбаунды: {G}{nb}{N}   🔥 decoy-хиты: {Y}{att}{N}   ⛔ баны: {R}{bans}{N}", W))
-print(line(f"🔒 серты: мин. {cs}   💾 диск: {duse}%   📁 {db}", W))
-ufw = f"🚧 UFW {G}active{N}" if ufw_ok == "1" else f"🚧 UFW {R}down{N}"
-print(line(f"{ufw}   🩺 диагностика: раздел 6", W))
-print(f"{B}└{'─'*W}┘{N}")
-print(f"{D}  └─ ◆ stack-manager · правка: {mtime}{N}")
-PYHDR
-}
-
 print_menu_actions() {
   echo
   echo -e "  ${B} 1)${N} 🧭 Установка и маршрутизация"
@@ -15476,14 +15432,13 @@ fast_menu_header() {
     [[ "$_panel_port" =~ ^[0-9]+$ ]] && _public_port="$_panel_port"
   fi
   if [[ -n "$_pd" && "$_pd" != "panel.example.com" ]]; then
-    _pp="${_pp#/}"
+    _pp="${_pp#/}"; _pp="${_pp%/}"   # ведущий и хвостовой слеши — добавим ровно один
     if [[ -n "$_public_port" ]]; then
       panel_url="https://$_pd:${_public_port}/"
     else
       panel_url="https://$_pd/"
     fi
     [[ -n "$_pp" ]] && panel_url="${panel_url}${_pp}/"
-    [[ "$panel_url" != */ ]] && panel_url="${panel_url}/"
   fi
   if [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && systemctl is-active --quiet "$ADG_SERVICE" 2>/dev/null; then
     _adg_dom="$(xui_get webDomain 2>/dev/null || true)"
