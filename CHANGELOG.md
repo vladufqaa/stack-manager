@@ -2,6 +2,16 @@
 
 Все заметные изменения Stack Manager собраны в этом файле.
 
+## [1.0.23] — 2026-10-26
+
+### Изменено
+
+- Большая волна вычистки мёртвого кода: скрипт сократился на ~730 строк (26 функций) без изменения поведения. Удалены хелперы, осиротевшие после вывода самолечения из архитектуры и переработки аудита: старый read-only аудит (`stack_audit_readonly`, `scan_ports` — заменены «⚡ Проверить всё и починить» и сокетными проверками `ss`), заглушки заморозки (`frozen`, `db_protect_state`, `db_protect_remove`), хелперы журнала панели (`panel_journal_started`, `panel_journal_note_settings`, `panel_journal_note_listen`, `db_update_inbound`, `db_capture_hosts`), серт-хелперы (`cert_install_to_certroot`, `cert_sync_all`, `cert_hook_install`, `sync_panel_certs_menu`, `cert_lines_migrate_to_mode`, `cert_lines_show`, `cert_domains_rename`), decoy/hosts-хелперы (`decoy_templates_by_domain`, `decoy_reset_all`, `decoy_domain_apply_tpl`, `decoy_tpl_store_del`, `tls_fallback_clear`, `hosts_ownership_import_stack_rows`), `xray_dns_apply_config_file`, SNI-хелперы (`sni_repair_links`, `sni_domain_taken`, `ask_sni_domain`).
+
+### Исправлено
+
+- Убраны висячие ссылки на удалённую переменную `FROZEN_FILE` в списке очистки полного сброса и в откате стека: заменены литералом `/root/stack-frozen.txt`, поэтому легаси-файл старых версий по-прежнему убирается.
+
 ## [1.0.22] — 2026-10-26
 
 ### Добавлено

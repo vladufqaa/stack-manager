@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.22"
+STACK_MANAGER_VERSION="1.0.23"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -107,7 +107,6 @@ stack_mark_configured() {
 WILDCARD_DOMAIN=""
 WILDCARD_STATE="/root/stack-backups/wildcard-domain"
 CF_CREDS="/root/.secrets/cloudflare.ini"
-FROZEN_FILE="/root/stack-frozen.txt"   # заморозка самолечения: cert:<domain> / inbound:<id> / ALL-CERTS
 CERT_DOMAINS_FILE="/etc/letsencrypt/stack-domains.txt"
 # Режим выпуска сертификатов (A/B): файл + переменная (см. cert_mode_*)
 CERT_MODE=""
@@ -402,41 +401,6 @@ nginx_ready() {
 
 # Безопасное восстановление связки SNI-файлов без пересоздания инбаундов.
 # Ничего не меняет в БД и не генерирует новые маршруты.
-sni_repair_links() {
-  line; echo -e "${B}   ВОССТАНОВЛЕНИЕ SNI-РОУТЕРА${N}"; line
-  nginx_ready || { err "nginx или /etc/nginx/nginx.conf отсутствует"; pause; return 1; }
-  local src=""
-  if [[ -f "$SNI_CONF" ]]; then
-    src="$SNI_CONF"
-  elif [[ -f /etc/nginx/streams-available/sni-router.conf ]]; then
-    src="/etc/nginx/streams-available/sni-router.conf"
-  elif [[ -f /etc/nginx/streams-enabled/sni-router.conf ]]; then
-    src="/etc/nginx/streams-enabled/sni-router.conf"
-  fi
-  [[ -n "$src" ]] || { err "SNI-конфигурация не найдена — нужен п.1 или п.2"; pause; return 1; }
-  if ! mkdir -p "$NGINX_STREAM_DIR" /etc/nginx/streams-available 2>/dev/null; then
-    err "Не удалось создать каталоги Nginx для SNI"; pause; return 1
-  fi
-  if [[ "$src" != "$SNI_CONF" ]]; then
-    cp -f "$src" "$SNI_CONF" || { err "Не удалось восстановить $SNI_CONF"; pause; return 1; }
-  fi
-  rm -f /etc/nginx/streams-available/sni-router.conf 2>/dev/null || true
-  if ! ln -s "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null && \
-     ! cp -f "$SNI_CONF" /etc/nginx/streams-available/sni-router.conf 2>/dev/null; then
-    err "Не удалось создать ссылку streams-available для SNI"; pause; return 1
-  fi
-  ensure_stream_include || { err "Не удалось подключить SNI include в nginx"; pause; return 1; }
-  if nginx -t 2>/dev/null; then
-    if ! nginx_reload; then
-      err "nginx -t OK, но reload nginx не выполнен"; pause; return 1
-    fi
-    log "SNI-связка восстановлена; БД и маршруты не изменялись."
-  else
-    err "nginx -t не прошёл после восстановления SNI"; nginx -t 2>&1 | tail -6
-    pause; return 1
-  fi
-  pause
-}
 
 # Пересборка SNI-карты из текущей БД, без изменений БД и сертификатов.
 rebuild_sni_from_db() {
@@ -708,28 +672,6 @@ sni_domain_owner() {
   echo "$be"
 }
 
-sni_domain_taken() { [[ -n "$(sni_domain_owner "$@")" ]]; }
-
-# Интерактивный запрос уникального SNI-домена:
-#   $1 = имя переменной результата, $2 = id инбаунда, $3 = домен по умолчанию
-# ВАЖНО: переменная результата НЕ должна называться d/p/r/in — это локали ask()
-ask_sni_domain() {
-  local __v="$1" __id="$2" __def="$3" d_val owner
-  local __label="${4:-SNI-домен для #${__id}}"
-  while :; do
-    d_val=""
-    ask d_val "$__label" "$__def" '^[a-zA-Z0-9.-]+$'
-    [[ -z "$d_val" ]] && { err "Пустой домен."; continue; }
-    owner=$(sni_domain_owner "$d_val" "$__id")
-    if [[ -n "$owner" ]]; then
-      err "Домен $d_val уже занят ($owner). Укажите другой SNI-домен — у двух инбаундов не может быть один SNI."
-      continue
-    fi
-    printf -v "$__v" '%s' "$d_val"
-    SNI_USED["$d_val"]="inb_${__id}_backend"
-    return 0
-  done
-}
 
 check_domain_points_to_server() {
   local domain="$1" server_ip="${2:-}"
@@ -868,30 +810,11 @@ udp_inbound_ports() {
   done | sort -un
 }
 
-# Заморозка: строка вида «cert:<domain>», «inbound:<id>» или «ALL-CERTS»
-# в FROZEN_FILE запрещает АВТОМАТИКЕ (авто-выпуск сертов)
-# трогать объект. Ручные действия через меню не блокируются.
-frozen() { return 1; }
-
-# Защита БД и заморозка отключены.
-# =====================================================================
-# ЗАЩИТА БД ОТ ПЕРЕЗАПИСИ ПАНЕЛЬЮ (SQL-триггеры, раздела защиты БД)
-#   Панель при правке инбаунда сохраняет свою копию JSON целиком и может
-#   затереть вписанные скриптом пути сертов / reality-dest / hostname.
-#   Триггер AFTER UPDATE возвращает защищённые ключи, если панель их снесла
-#   (первичная запись при пустом OLD проходит свободно). hosts защищён
-#   мгновенно: триггер на DELETE сразу возвращает строку из тени hosts_shadow,
-#   а если следом панель вставляет свою (схема delete-all+insert) — дедуп
-#   убирает нашу временную (sm_pending), оставляя только её. Самолечение —
-#   страховка на случай, если триггеры были выключены.
-#   Свои правки скрипт делает через db_protect_suspend (триггеры роняются,
-#   тень сохраняется; RETURN-ловушка возвращает всё на место).
-#   SQL валидирован тестами на мок-БД и на реальной копии x-ui.db.
-# =====================================================================
+# Заморозка самолечения и защита БД выведены из архитектуры: отклонения
+# чинятся вручную через меню. db_protect_on/off/remove — no-op заглушки,
+# оставленные под существующие вызовы; отдельного состояния защиты нет.
 db_protect_on() { return 0; }
 db_protect_off() { return 0; }
-db_protect_remove() { return 0; }
-db_protect_state() { return 1; }
 
 # Для функций скрипта, осознанно меняющих защищённые ключи (dest/target,
 # литералы сертов, certFile/keyFile/hostname).
@@ -964,74 +887,10 @@ inbounds_json_pairs() {
 }
 
 # Обновление строки inbounds с автоматическим снимком для отката
-db_update_inbound() {
-  # $1 = id, $2 = SQL-выражение для SET (например "listen='127.0.0.1'")
-  local id="$1" set_expr="$2" mode="${3:-journal}"
-  [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" || -z "$set_expr" ]] && return 1
-  [[ "$mode" == "journal" ]] && panel_journal_capture_row inbounds "$id"
-  if ! sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET $set_expr WHERE id=$id;" 2>/dev/null; then
-    err "Не удалось обновить inbound #$id"; return 1
-  fi
-  return 0
-}
 
 # Строка hosts/восстановление всей строки — та же логика для таблицы hosts
-db_capture_hosts() { panel_journal_capture_row hosts "$1"; }
 
-# =====================================================================
-# ЖУРНАЛ ИЗМЕНЕНИЙ ПАНЕЛИ (для честного отката)
-#   Первая правка каждого объекта фиксирует значение ДО неё; повторные
-#   правки того же объекта в журнал не попадают — при откате вернётся
-#   ровно исходное значение. Объекты, которых скрипт не касался, в журнал
-#   не попадают вообще и откатом не трогаются (п.2 «не трогать чужое»).
-# =====================================================================
-panel_journal_started() {
-  [[ -s "$PANEL_JOURNAL" || -s "$LISTEN_JOURNAL" || -s "$ROWS_JOURNAL" || -f "$JOURNAL_MARK" ]]
-}
 
-panel_journal_note_settings() {
-  # $1 = key (settings.key), $2 = новое значение (для сравнения)
-  local k="$1" newv="$2" cur=""
-  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
-  # журнал ведём только когда есть точка отсчёта: иначе на уже настроенном
-  # стеке «прежнее» значение — это результат работы скрипта, а не «до него»
-  [[ -f "$JOURNAL_MARK" ]] || return 0
-  [[ -z "$k" ]] && return 0
-  mkdir -p "$BACKUP_DIR" 2>/dev/null || return 0
-  # первая правка ключа уже зафиксирована — повторно не пишем (идемпотентно)
-  [[ -s "$PANEL_JOURNAL" ]] && grep -q "^settings	${k}	" "$PANEL_JOURNAL" 2>/dev/null && return 0
-  cur=$("$DB_BIN" -cmd ".timeout 3000" "$XUI_DB" \
-        "SELECT value FROM settings WHERE key='$k' LIMIT 1;" 2>/dev/null || true)
-  [[ "$cur" == "$newv" ]] && return 0         # не изменится — писать нечего
-  # NULL/отсутствие строки и пустая строка — разные состояния, различаем
-  if [[ -z "$cur" ]]; then
-    cur=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-          "SELECT COUNT(*) FROM settings WHERE key='$k';" 2>/dev/null || echo 0)
-    [[ "$cur" == "0" ]] && cur="__NULL__" || cur="__EMPTY__"
-  fi
-  printf 'settings\t%s\t%s\t%s\n' "$k" "$cur" "$XUI_DB" >> "$PANEL_JOURNAL" 2>/dev/null || {
-    warn "journal: не удалось записать settings.$k"; return 1
-  }
-}
-
-panel_journal_note_listen() {
-  # $1 = id инбаунда (первую правку listen фиксируем, повторные — нет)
-  local id="$1" cur=""
-  [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" ]] && return 0
-  [[ -f "$JOURNAL_MARK" ]] || return 0
-  mkdir -p "$BACKUP_DIR" 2>/dev/null || return 0
-  [[ -s "$LISTEN_JOURNAL" ]] && grep -q "^${id}	" "$LISTEN_JOURNAL" 2>/dev/null && return 0
-  cur=$("$DB_BIN" -cmd ".timeout 3000" "$XUI_DB" \
-        "SELECT COALESCE(listen,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-  if [[ -z "$cur" ]]; then
-    cur=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-          "SELECT COUNT(*) FROM inbounds WHERE id=$id AND listen IS NULL;" 2>/dev/null || echo 0)
-    [[ "$cur" == "0" ]] && cur="__EMPTY__" || cur="__NULL__"
-  fi
-  printf '%s\t%s\t%s\n' "$id" "$cur" "$XUI_DB" >> "$LISTEN_JOURNAL" 2>/dev/null || {
-    warn "journal: не удалось записать listen для #$id"; return 1
-  }
-}
 
 # Применить журнал в обратном порядке: вернуть старые значения.
 # $1 = 1 — тихо (журнал отката, без интерактива)
@@ -3418,33 +3277,11 @@ cert_mirror_to_certroot() {   # <live-dir> <domain> → echo "<fullchain> <privk
   return 0
 }
 
-cert_install_to_certroot() {  # <domain> — по одноимённой линии certbot (live)
-  local d="$1"
-  cert_mirror_to_certroot "/etc/letsencrypt/live/$d" "$d"
-}
 
-cert_sync_all() {             # зеркало упразднено — оставлено для совместимости
-  return 0
-}
 
 # deploy-hook: после каждого certbot renew — рестарт панели/nginx/AdGuard
 # (серты живут в live/, зеркало упразднено). Хук перезаписывается при каждом
 # запуске скрипта — старая версия с зеркалом не должна выжить.
-cert_hook_install() {
-  local hook="/etc/letsencrypt/renewal-hooks/deploy/stack-cert-mirror.sh"
-  mkdir -p "$(dirname "$hook")" 2>/dev/null || return 0
-  cat > "$hook" <<'EOS'
-#!/usr/bin/env bash
-# stack-manager: после renew рестартуем потребителей сертов (серты в live/)
-systemctl restart x-ui 2>/dev/null || true
-nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
-if [ -f /opt/AdGuardHome/AdGuardHome.yaml ] && grep -q "certificate_path: /etc/letsencrypt/live/" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; then
-  systemctl restart AdGuardHome 2>/dev/null || systemctl restart adguardhome 2>/dev/null || true
-fi
-EOS
-  chmod +x "$hook" 2>/dev/null || true
-  return 0
-}
 
 # Вписывает пути сертификатов в settings инбаундов:
 #   naive/anytls/trusttunnel/tproxy → settings.certFile/keyFile
@@ -3620,11 +3457,6 @@ import sqlite3, json, sys, subprocess, re
 db = sys.argv[1]
 targets = set(a.lower() for a in sys.argv[2:])
 SKIP = {"qwdtt","csqdtt","csqtt","wireguard","amnezia","amneziawg","awg","mtproto","tun"}
-FROZEN_INB = set()
-try:
-    FROZEN_INB = {l.strip().split(":",1)[1] for l in open("/root/stack-frozen.txt") if l.strip().startswith("inbound:")}
-except Exception:
-    pass
 CDN_IDS = set()
 try:
     CDN_IDS = {l.strip().split("|",1)[0] for l in open("/root/stack-backups/cdn-profiles.tsv")
@@ -3646,7 +3478,6 @@ for iid, proto, s1, s2 in rows:
     p = (proto or "").lower()
     if p in SKIP: continue
     if str(iid) in CDN_IDS: continue            # CDN-режим: TLS у nginx, серт в инбаунде не нужен
-    if f"inbound:{iid}" in FROZEN_INB: continue
     try: se = json.loads(s1 or "{}")
     except Exception: se = {}
     try: st = json.loads(s2 or "{}")
@@ -3697,7 +3528,6 @@ sync_inbound_certs() {
   while IFS=$'\x1f' read -r id proto dom stream; do
     [[ -z "$id" || -z "$dom" || "$dom" == "null" ]] && continue
     dom="$(printf '%s' "$dom" | tr -d '[:space:]')"   # хвост-пробел/CR ломает пути live/<домен>
-    frozen "inbound:$id" && continue   # заморожено (раздел «Заморозка самолечения») — самолечение не трогает
     # «аренда» снятия защиты на КАЖДУЮ итерацию: правки сертов/dest этой итерации
     # не должны откатываться триггером (см. db_protect_suspend)
     db_protect_suspend
@@ -4118,63 +3948,6 @@ cert_multi_name_resolve() {
   return 0
 }
 
-sync_panel_certs_menu() {
-  local _wd _cur_wc _cur_sc _cp _newcert _newkey
-  _wd="${PANEL_DOMAIN:-$(xui_get webDomain 2>/dev/null || true)}"
-  [[ -z "$_wd" ]] && return 0
-
-  _cur_wc=$(xui_get webCertFile 2>/dev/null || true)
-  _cur_sc=$(xui_get subCertFile 2>/dev/null || true)
-
-  # Ищем подходящий серт для домена панели (live/<домен>/ или SAN покрывающий)
-  _cp=$(cert_paths "$_wd") || _cp=""
-  if [[ -z "$_cp" ]]; then
-    warn "Серт для $_wd не найден в live/ — будет выпущен позже в этом прогоне"
-    return 0
-  fi
-  _newcert="${_cp%% *}"; _newkey="${_cp##* }"
-
-  echo
-  echo -e "${B}▸ Сертификаты панели и подписок${N}"
-  echo "  домен панели:  $_wd"
-  echo "  найден серт:   $_newcert"
-
-  # ── Панель (web UI) ──
-  if [[ "$_cur_wc" == "$_newcert" ]]; then
-    log "  Серт панели в БД уже актуален — менять нечего"
-  else
-    echo "  в панели сейч.: ${_cur_wc:-<пусто>}"
-    local _go=""
-    askyn _go "  Обновить серт ПАНЕЛИ в настройках x-ui?" "y"
-    if [[ "$_go" == true ]]; then
-      systemctl stop x-ui 2>/dev/null || true
-      xui_set_setting webCertFile "$_newcert"
-      xui_set_setting webKeyFile  "$_newkey"
-      systemctl start x-ui 2>/dev/null || true
-      log "  ✓ Серт панели в БД обновлён: $_newcert"
-    else
-      warn "  Серт панели не тронут"
-    fi
-  fi
-
-  # ── Подписки ──
-  if [[ "$_cur_sc" == "$_newcert" ]]; then
-    log "  Серт подписок в БД уже актуален"
-  else
-    echo "  в подписках:   ${_cur_sc:-<пусто>}"
-    local _go2=""
-    askyn _go2 "  Обновить серт ПОДПИСОК в настройках x-ui?" "y"
-    if [[ "$_go2" == true ]]; then
-      systemctl stop x-ui 2>/dev/null || true
-      xui_set_setting subCertFile "$_newcert"
-      xui_set_setting subKeyFile  "$_newkey"
-      systemctl start x-ui 2>/dev/null || true
-      log "  ✓ Серт подписок в БД обновлён: $_newcert"
-    else
-      warn "  Серт подписок не тронут"
-    fi
-  fi
-}
 
 # =====================================================================
 # ФАЙЛЫ ЛИНИЙ СЕРТИФИКАТОВ (для режима B — несколько линий)
@@ -4458,97 +4231,8 @@ cert_mode_line_base() {   # <domain> → печатает all.<base>
 
 # Миграция: разложить текущий stack-domains.txt по линиям (для B).
 # В режиме A — оставляем как есть.
-cert_lines_migrate_to_mode() {
-  local target="${1:-$CERT_MODE}"
-  local pd=""
-  pd=$(xui_get webDomain 2>/dev/null || true)
-  [[ -z "$pd" || "$pd" == "null" ]] && return 1
-  if [[ "$target" == "A" ]]; then
-    # Собрать все домены из всех линий → stack-domains.txt; удалить файлы линий
-    local -a all=()
-    cert_lines_load
-    local ln d
-    for ln in "${CERT_LINES[@]}"; do
-      cert_line_domains_load "$ln"
-      for d in "${CERT_LINE_DOMAINS[@]}"; do
-        [[ " ${all[*]} " == *" $d "* ]] && continue
-        all+=("$d")
-      done
-    done
-    # Собрать из старых файлов (если их нет в массиве — добавить с диска)
-    for f in "$CERT_LINE_FILE_PREFIX"*.domains; do
-      [[ -f "$f" ]] || continue
-      while IFS= read -r d; do
-        d="$(printf '%s' "$d" | tr -d '[:space:]')"
-        [[ -z "$d" ]] && continue
-        [[ " ${all[*]} " == *" $d "* ]] && continue
-        all+=("$d")
-      done < "$f"
-    done
-    [[ -z "${all[*]}" ]] && return 0
-    mkdir -p "$(dirname "$CERT_DOMAINS_FILE")" 2>/dev/null || true
-    printf '%s\n' "${all[@]}" > "$CERT_DOMAINS_FILE" 2>/dev/null || true
-    chmod 600 "$CERT_DOMAINS_FILE" 2>/dev/null || true
-    # Удаляем файлы линий и список
-    rm -f "$CERT_LINES_FILE" 2>/dev/null || true
-    for f in "$CERT_LINE_FILE_PREFIX"*.domains; do
-      [[ -f "$f" ]] && rm -f "$f" 2>/dev/null || true
-    done
-    log "cert-lines: миграция → A (одна линия $pd, ${#all[@]} дом.)"
-    return 0
-  fi
-  # target == B
-  local -a domains=()
-  if [[ -f "$CERT_DOMAINS_FILE" ]]; then
-    while IFS= read -r d; do
-      d="$(printf '%s' "$d" | tr -d '[:space:]')"
-      [[ -z "$d" ]] && continue
-      domains+=("$d")
-    done < "$CERT_DOMAINS_FILE"
-  fi
-  [[ ${#domains[@]} -eq 0 ]] && return 0
-  # Разложить по базам. Всю wildcard-зону собираем в одну линию wildcard.
-  if [[ -z "${WILDCARD_DOMAIN:-}" && -f "$WILDCARD_STATE" ]]; then
-    WILDCARD_DOMAIN=$(head -n 1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]' || true)
-  fi
-  local pbase="${pd#*.}"
-  [[ "$pbase" != *.* ]] && pbase="$pd"
-  : > "$CERT_LINES_FILE"
-  local d line
-  for d in "${domains[@]}"; do
-    if [[ -n "${WILDCARD_DOMAIN:-}" && ( "$d" == "$WILDCARD_DOMAIN" || "$d" == *."$WILDCARD_DOMAIN" ) ]]; then
-      line="$WILDCARD_DOMAIN"
-    elif [[ "$d" == "$pd" || "$d" == "$pbase" || "$d" == *."$pbase" ]]; then
-      line="$pd"
-    else
-      line=$(cert_mode_line_base "$d")
-    fi
-    cert_lines_add "$line"
-    cert_line_domains_add "$line" "$d"
-  done
-  # Очищаем stack-domains.txt (его роль теперь — только в A)
-  : > "$CERT_DOMAINS_FILE"
-  log "cert-lines: миграция → B (${#CERT_LINES[@]} линий)"
-  return 0
-}
 
 # Показать все линии с их SAN (для аудита/меню)
-cert_lines_show() {
-  cert_lines_load
-  if [[ ${#CERT_LINES[@]} -eq 0 ]]; then
-    warn "Линии сертов не найдены (режим ${CERT_MODE:-?}, домен панели не определён?)"
-    return 0
-  fi
-  local ln d n
-  for ln in "${CERT_LINES[@]}"; do
-    cert_line_domains_load "$ln"
-    n=${#CERT_LINE_DOMAINS[@]}
-    echo "  - $ln  (${n} дом.)"
-    for d in "${CERT_LINE_DOMAINS[@]}"; do
-      echo "      $d"
-    done
-  done
-}
 
 # =====================================================================
 # ДОМЕН + СЕРТИФИКАТ ПАНЕЛИ СРАЗУ ПОСЛЕ ЧИСТОЙ УСТАНОВКИ
@@ -4641,11 +4325,6 @@ cert_domains_remove() {
     CERT_DOMAINS=("${newlist[@]}")
     cert_domains_save
   fi
-}
-cert_domains_rename() {
-  local old="$1" new="$2"
-  cert_domains_remove "$old"
-  cert_domains_add "$new"
 }
 
 # Выпуск единого мультисерта: stack-multi покрывает ВСЕ домены из
@@ -5167,8 +4846,6 @@ cert_issue() {
   # невидимый хвост (пробел/CR из БД или ans-файла) ломает пути live/<домен> —
   # certbot нормализует имя, скрипт ищет файлы по «грязному» пути и не находит
   d="$(printf '%s' "$d" | tr -d '[:space:]')"
-  frozen "ALL-CERTS" && { warn "cert_issue: сертификаты заморожены (ALL-CERTS) — «$d» пропущен"; return 1; }
-  frozen "cert:$d" && { warn "cert_issue: «$d» в заморозке — пропуск"; return 1; }
   # ЖЁСТКИЙ ЗАПРЕТ: цели чужого reality — НЕ наши домены. Let's Encrypt серт
   # на них не выдаст (HTTP-01/DNS-01 недоступны), а спрашивать пользователя
   # «какой сертификат для www.samsung.com» — баг, какими бы путями домен
@@ -6511,15 +6188,6 @@ decoy_tpl_store_set() {   # <domain> <шаблон>
   return 0
 }
 
-decoy_tpl_store_del() {   # <domain> — вернуть домен к общему шаблону
-  local d="${1:-}"
-  [[ -n "$d" && -s "$DECOY_TPL_MAP" ]] || return 0
-  local tmp; tmp=$(mktemp 2>/dev/null) || return 0
-  awk -F'\t' -v d="$d" '$1!=d' "$DECOY_TPL_MAP" > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$DECOY_TPL_MAP" 2>/dev/null || true
-  return 0
-}
-
 # Шаблон из действующего decoy-блока домена (маркер: tpl=… root=…)
 decoy_tpl_from_block() {   # <domain> → шаблон (custom:/путь для своего сайта)
   local dom="${1:-}" line="" t="" r=""
@@ -6928,13 +6596,6 @@ tls_fallback_set() {   # <inbound_id> <decoy_port>
   return 0
 }
 
-tls_fallback_clear() {   # <inbound_id>
-  local id="$1"
-  [[ "$id" =~ ^[0-9]+$ ]] || return 1
-  db_protect_suspend
-  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET settings=json_remove(COALESCE(settings,'{}'),'\$.fallbacks') WHERE id=$id;" 2>/dev/null
-  db_protect_resume
-}
 
 # Восстановить HTTPS-заглушку для уже существующего SNI-маршрута.
 # Важно: configure_sni_for_inbound раньше сразу выходил из existing_domain,
@@ -6990,21 +6651,6 @@ tls_decoy_ensure_existing() {   # <id> <domain>
 hosts_ownership_ensure() {
   [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 1
   sqlite3 -cmd ".timeout 3000" "$XUI_DB" "CREATE TABLE IF NOT EXISTS sm_hosts_owned (inbound_id INTEGER NOT NULL, port INTEGER NOT NULL, address TEXT NOT NULL, sni TEXT NOT NULL DEFAULT '', PRIMARY KEY(inbound_id,port,address,sni));" 2>/dev/null
-}
-hosts_ownership_import_stack_rows() {
-  [[ -f "$SNI_CONF" && -f "$XUI_DB" ]] || return 0
-  hosts_ownership_ensure || return 0
-  local _dom _be _id _addr _sni
-  while IFS='|' read -r _dom _be; do
-    [[ "$_be" =~ ^inb_([0-9]+)_backend$ ]] || continue
-    _id="${BASH_REMATCH[1]}"
-    while IFS='|' read -r _addr _sni; do
-      [[ -n "$_addr" ]] || continue
-      sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT OR IGNORE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES($_id,443,'$(printf '%s' "$_addr" | sed "s/'/''/g")','$(printf '%s' "$_sni" | sed "s/'/''/g")');" 2>/dev/null || true
-    done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT COALESCE(address,''),COALESCE(sni,'') FROM hosts WHERE inbound_id=$_id AND port=443 AND (address='$_dom' OR sni='$_dom');" 2>/dev/null || true)
-  done < <(awk '
-    /^map / { inm=1; next } inm && /^}/ { inm=0 } inm && /^[[:space:]]/ && NF>=2 { d=$1; sub(/;$/, "", d); b=$2; sub(/;$/, "", b); print d "|" b }
-  ' "$SNI_CONF" 2>/dev/null)
 }
 hosts_owned_delete() {
   local id="$1" port="${2:-443}"
@@ -7382,7 +7028,7 @@ cdn_audit_report() {
 # Полный read-only аудит стека: inbound/hosts/SNI/CDN/decoy/certs/services/UFW.
 stack_full_audit() {
   line; echo -e "${B}   ПОЛНЫЙ АУДИТ СТЕКА (READ-ONLY)${N}"; line
-  local issues=0 id proto port listen en st dom backend cert key exp svc _ss
+  local issues=0 id proto port listen en st dom backend cert key exp svc _ss d _crt _left certn dbbad
   [[ -f "$XUI_DB" ]] || { err "x-ui.db не найден"; return 1; }
   echo "[ Inbounds / hosts ]"
   while IFS='|' read -r id proto port listen en st; do
@@ -7445,6 +7091,34 @@ stack_full_audit() {
         warn "orphan CDN profile #$id ($origin → $cdn)"; issues=$((issues+1))
       fi
     done < "$CDN_PROFILES"
+  fi
+  echo "[ Certificates ]"
+  if [[ -d /etc/letsencrypt/live ]]; then
+    certn=0
+    for d in /etc/letsencrypt/live/*; do
+      [[ -d "$d" ]] || continue; certn=$((certn+1)); _crt="$d/fullchain.pem"
+      [[ -f "$_crt" ]] || { err "$(basename "$d"): fullchain отсутствует"; issues=$((issues+1)); continue; }
+      _left=$((($(date -d "$(openssl x509 -enddate -noout -in "$_crt" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0)-$(date +%s))/86400))
+      if (( _left < 0 )); then
+        err "$(basename "$d"): сертификат просрочен"; issues=$((issues+1))
+      elif (( _left < 14 )); then
+        warn "$(basename "$d"): истекает через $_left дн"
+      else
+        log "$(basename "$d"): $_left дн"
+      fi
+    done
+    (( certn == 0 )) && warn "Сертификатов нет"
+  else
+    warn "/etc/letsencrypt/live отсутствует"
+  fi
+  echo "[ DB JSON ]"
+  dbbad=$(sqlite3 -readonly -cmd '.timeout 3000' "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1 AND (port IS NULL OR port<=0 OR (COALESCE(settings,'') <> '' AND json_valid(settings)=0) OR (COALESCE(stream_settings,'') <> '' AND json_valid(stream_settings)=0));" 2>/dev/null || echo -1)
+  if [[ "$dbbad" == 0 ]]; then
+    log "JSON и порты inbounds валидны"
+  elif [[ "$dbbad" == "-1" ]]; then
+    warn "не удалось проверить JSON/порты inbounds"; issues=$((issues+1))
+  else
+    err "проблемные inbounds: $dbbad"; issues=$((issues+1))
   fi
   echo "[ UFW ]"
   if command -v ufw >/dev/null 2>&1; then ufw status | head -1; else warn "ufw не установлен"; fi
@@ -10356,203 +10030,9 @@ decoy_pick_inbound() {
 #       снимается целиком; боевой fallback (другой dest) не трогается
 #     • свой Reality — decoy остаётся (заглушка обязательна)
 #     • TG WEB-PROXY — пропуск (decoy ему не ставится)
-decoy_reset_all() {
-  line; echo -e "${B}   DECOY: УБРАТЬ (КАК ИЗНАЧАЛЬНО: ТОЛЬКО REALITY + ПАНЕЛЬ)${N}"; line
-  stack_ensure
-  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден"; pause; return 1; }
-  local id dom be proto st fb ds d ok changed=0 restarted=0
-  # Идём по всей БД, а не только по SNI-карте: лишний decoy/fallback
-  # должен удаляться даже у инбаунда с потерянным маршрутом.
-  while IFS='|' read -r id proto; do
-    [[ "$id" =~ ^[0-9]+$ ]] || continue
-    dom=$(awk -v want="inb_${id}_backend" '
-      /^map / { inmap=1; next }
-      inmap && /^}/ { inmap=0 }
-      inmap && $2 == want { d=$1; sub(/;$/, "", d); print d; exit }
-    ' "$SNI_CONF" 2>/dev/null || true)
-    be="inb_${id}_backend"
-    [[ -z "$proto" ]] && continue
-    st=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(stream_settings,'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-    if [[ "$proto" == "vless" ]] && grep -qi '"security": *"reality"' <<<"$st"; then
-      echo "  #$id $dom — Reality: decoy остаётся (как изначально)"
-      continue
-    fi
-    if [[ "$proto" == "tproxy" ]]; then
-      echo "  #$id $dom — TG WEB-PROXY: декоя нет и не было"
-      continue
-    fi
-    # 1) decoy-блок stack.conf у этого домена (если вдруг есть) — убрать
-    if stack_decoy_meta "$dom" >/dev/null 2>&1; then
-      stack_del_decoy "$dom"
-      changed=1
-      log "  #$id $dom — decoy-блок убран из stack.conf"
-    fi
-    # 2) decoy-fallback у vless/trojan+TLS (ставился п.4.1)
-    if [[ "$proto" == "vless" || "$proto" == "trojan" ]] && grep -qE '"security": ?"tls"' <<<"$st"; then
-      fb=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(settings,'\$.fallbacks'),'[]') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-      if [[ -n "$fb" && "$fb" != "[]" && "$fb" != "null" ]]; then
-        ds=$(grep -oE '"dest"[[:space:]]*:[[:space:]]*[^,}]+' <<<"$fb" | sed -E 's/.*:[[:space:]]*//; s/^"//; s/"$//')
-        if [[ -n "$ds" ]]; then
-          ok=1
-          for d in $ds; do
-             [[ "$d" == "80" || "$d" == "127.0.0.1:80" || "$d" =~ ^127\.0\.0\.1:4[0-9]{3,5}$ ]] || ok=0
-           done
-          if (( ok )); then
-            db_protect_suspend
-            if ! sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET settings=json_remove(settings,'\$.fallbacks') WHERE id=$id;"; then
-              err "Не удалось убрать decoy-fallback у #$id"; continue
-            fi
-            restarted=1
-            log "  #$id $dom — decoy-fallback (127.0.0.1:80) снят"
-            changed=1
-          else
-            echo "  #$id $dom — fallback боевой (не decoy): не трогаю"
-          fi
-        fi
-      fi
-    fi
-  done < <(sqlite3 -separator '|' -cmd ".timeout 3000" "$XUI_DB" \
-    "SELECT id, protocol FROM inbounds WHERE enable=1 ORDER BY id;" 2>/dev/null || true)
-  (( restarted )) && systemctl restart x-ui >/dev/null 2>&1 || true
-  if (( changed )); then
-    nginx_reload || true
-    log "Готово: decoy остался только у Reality-инбаундов и панели (как изначально)."
-  else
-    log "Менять нечего: decoy уже только у Reality и панели."
-  fi
-  pause
-}
 
 # ── Шаблоны decoy по доменам: свой шаблон (или свой сайт) каждому домену ──
-# Применяет шаблон к уже существующему decoy-блоку домена (порт/серт сохраняются,
-# reality-dest остаётся валидным).
-decoy_domain_apply_tpl() {   # <domain> <tpl>
-  local dom="${1:-}" tpl="${2:-}" meta="" port="" root="" cert="" key=""
-  [[ -n "$dom" && -n "$tpl" ]] || return 1
-  # XHTTP+TLS использует тот же TLS fallback, что и TCP+TLS.
-  # Удалять decoy для него нельзя: внешний SNI должен открывать страницу.
-  if [[ -f "$XUI_DB" ]] && sqlite3 "$XUI_DB" "SELECT 1 FROM inbounds WHERE enable=1 AND (protocol='vless' OR protocol='trojan') AND json_extract(stream_settings,'\$.xhttpSettings') IS NOT NULL AND json_extract(stream_settings,'\$.security')='tls' AND (json_extract(stream_settings,'\$.tlsSettings.serverName')='$dom' OR json_extract(stream_settings,'\$.xhttpSettings.host')='$dom') LIMIT 1;" 2>/dev/null | grep -q 1; then
-    : # применяем шаблон к существующему HTTPS-decoy ниже
-  fi
-  meta=$(stack_decoy_meta "$dom" 2>/dev/null || true)
-  if [[ -z "$meta" ]]; then
-    warn "  $dom: decoy-блока нет — выбор сохранён, применится при создании decoy (п.1 / «раздать всем»)"
-    return 0
-  fi
-  read -r port root cert key <<<"$meta"
-  [[ "$port" =~ ^[0-9]+$ ]] || { warn "  $dom: не удалось определить порт decoy"; return 1; }
-  mk_decoy "$port" "$dom" "$cert" "$key" "$root" "$tpl" || return 1
-  # CDN-ORIGIN: держим tpl и в профиле, иначе cdn_repair вернёт прежний шаблон
-  if [[ -n "$(cdn_profile_origin_tpl "$dom" 2>/dev/null || true)" ]]; then
-    local row proto cdn path dport
-    row=$(grep -m1 -E "\|${dom}\|" "$CDN_PROFILES" 2>/dev/null || true)
-    if [[ -n "$row" ]]; then
-      proto=$(printf '%s' "$row" | cut -d'|' -f2)
-      cdn=$(printf '%s' "$row" | cut -d'|' -f4)
-      path=$(printf '%s' "$row" | cut -d'|' -f5)
-      dport=$(printf '%s' "$row" | cut -d'|' -f7)
-      cdn_profile_save_add "$(printf '%s' "$row" | cut -d'|' -f1)" "$proto" "$dom" "$cdn" "$path" "$tpl" "$dport"
-    fi
-  fi
-  log "  $dom → «$tpl» (порт $port)"
-  return 0
-}
-
 # Меню: задать шаблон каждому домену (или один на всех), сбросить к общему.
-decoy_templates_by_domain() {
-  detect_env
-  stack_ensure
-  line; echo -e "${B}   DECOY: ШАБЛОНЫ ПО ДОМЕНАМ${N}"; line
-  local -a DOMS=()
-  local d be t
-  local _panel=""
-  _panel=$(xui_get webDomain 2>/dev/null || true)
-  [[ -z "$_panel" || "$_panel" == "null" ]] && _panel=$(xui_get subDomain 2>/dev/null || true)
-  # 1) домены, у которых уже есть decoy-блок (главный источник)
-  while IFS= read -r d; do
-    [[ -n "$d" ]] && DOMS+=("$d")
-  done < <(grep -oE '# >>> decoy .*domain=[^ ]+' "$STACK_CONF" 2>/dev/null | grep -oE 'domain=[^ ]+$' | cut -d= -f2 | sort -u)
-  # 2) CDN-ORIGIN домены (их decoy обслуживает cdn-блок)
-  while IFS= read -r d; do
-    [[ -n "$d" ]] && DOMS+=("$d")
-  done < <(awk -F'|' 'NF>=4 && $3!="" {print $3}' "$CDN_PROFILES" 2>/dev/null || true)
-  # 3) домены инбаундов из SNI-карты (если decoy-блока ещё нет)
-  while IFS='|' read -r d be; do
-    [[ -n "$d" ]] || continue
-    [[ "$be" =~ ^(inb_[0-9]+_backend|hysteria_[0-9]+_web|cdn_frontend)$ ]] || continue
-    DOMS+=("$d")
-  done < <(awk '
-    /^map / { inmap=1; next }
-    inmap && /^}/ { inmap=0 }
-    inmap && /^[[:space:]]/ && NF >= 2 {
-      dom=$1; sub(/;$/, "", dom); be=$2; sub(/;$/, "", be)
-      if (dom != "" && dom != "default") print dom "|" be
-    }' "$SNI_CONF" 2>/dev/null)
-  # уникализация + исключения: домен панели (у него своя заглушка в п.1) и
-  # CDN-фронты (это домены внешнего CDN, серт и заглушку даёт он)
-  local -a U=()
-  for d in ${DOMS[@]+"${DOMS[@]}"}; do
-    local seen=false x f
-    for x in ${U[@]+"${U[@]}"}; do [[ "$x" == "$d" ]] && { seen=true; break; }; done
-    [[ "$seen" == true ]] && continue
-    [[ -n "$_panel" && "$d" == "$_panel" ]] && continue
-    while IFS= read -r f; do
-      [[ -n "$f" && "$f" == "$d" ]] && { seen=true; break; }
-    done < <(cdn_front_domains 2>/dev/null)
-    [[ "$seen" == true ]] && continue
-    U+=("$d")
-  done
-  DOMS=(${U[@]+"${U[@]}"})
-  if [[ ${#DOMS[@]} -eq 0 ]]; then
-    warn "Домены не найдены (нет SNI-карты и профилей) — сначала п.1"
-    pause; return 0
-  fi
-  echo "  Домены и их текущие заглушки:"
-  local i=0
-  for d in "${DOMS[@]}"; do
-    i=$((i+1))
-    t=$(decoy_tpl_current "$d")
-    printf "  %2d) %-34s → %s\n" "$i" "$d" "$t"
-  done
-  echo
-  echo "  a) задать ОДИН шаблон всем доменам (заодно станет общим по умолчанию)"
-  echo "  r) сбросить домен к общему шаблону"
-  echo "  0) Назад"
-  local m=""
-  ask m "Выбор (номер домена / a / r / 0)" "0" '^[0-9]+$|^[aArR]$'
-  [[ "$m" == "0" || -z "$m" ]] && return 0
-  local changed=0
-  if [[ "${m,,}" == "a" ]]; then
-    local tpl=""
-    decoy_template_choose_impl tpl "Decoy для ВСЕХ доменов" "$(decoy_default_tpl)"
-    tpl="${tpl:-$(decoy_default_tpl)}"
-    decoy_selected_set "$tpl"
-    for d in "${DOMS[@]}"; do
-      decoy_tpl_store_set "$d" "$tpl" >/dev/null 2>&1 || true
-      decoy_domain_apply_tpl "$d" "$tpl" && changed=1
-    done
-  elif [[ "${m,,}" == "r" ]]; then
-    local n=""
-    ask n "Номер домена для сброса" "1" '^[0-9]+$'
-    (( n >= 1 && n <= ${#DOMS[@]} )) || { err "Нет такого домена"; pause; return 1; }
-    d="${DOMS[$((n-1))]}"
-    decoy_tpl_store_del "$d"
-    t=$(decoy_tpl_for "$d")
-    decoy_domain_apply_tpl "$d" "$t" && changed=1
-    log "  $d: свой шаблон сброшен — действует «$t»"
-  else
-    (( m >= 1 && m <= ${#DOMS[@]} )) || { err "Нет такого домена"; pause; return 1; }
-    d="${DOMS[$((m-1))]}"
-    local tpl=""
-    decoy_template_choose_impl tpl "Decoy для $d" "$(decoy_tpl_current "$d")"
-    tpl="${tpl:-$(decoy_tpl_current "$d")}"
-    decoy_tpl_store_set "$d" "$tpl" >/dev/null 2>&1 || true
-    decoy_domain_apply_tpl "$d" "$tpl" && changed=1
-  fi
-  (( changed )) && nginx_reload || true
-  pause
-  return 0
-}
 
 change_decoy() {
   line; echo -e "${B}   DECOY: ДОСТУПНЫЕ ОБЪЕКТЫ ДЛЯ СМЕНЫ${N}"; line
@@ -11548,140 +11028,6 @@ PYDNSCHECK
   ok "DoH отвечает и реально резолвит DNS: $url → $ip"
   return 0
 }
-xray_dns_apply_config_file() {
-  local mode="$1" doh_url="$2" doh_host="$3" doh_ip="$4"
-  local cfg_file="/usr/local/x-ui/bin/config.json"
-  local dns_backup=""
-  [[ -f "$cfg_file" ]] || return 2
-
-  dns_backup="$BACKUP_DIR/xray-config-dns-$(date +%Y%m%d-%H%M%S)-$$.json"
-  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
-  cp -a "$cfg_file" "$dns_backup" 2>/dev/null || {
-    err "Не удалось создать backup $cfg_file — DNS не изменён"
-    return 1
-  }
-
-  DNS_MODE="$mode" DNS_URL="$doh_url" DNS_HOSTS="$doh_host" DNS_IP="$doh_ip" \
-  python3 - "$cfg_file" <<'PYXFILE'
-import json, os, stat, sys, tempfile
-path = sys.argv[1]
-mode = os.environ.get("DNS_MODE", "1")
-url = os.environ.get("DNS_URL", "")
-hosts = os.environ.get("DNS_HOSTS", "").split()
-ip = os.environ.get("DNS_IP", "").strip()
-try:
-    with open(path, encoding="utf-8") as fh:
-        cfg = json.load(fh)
-    if not isinstance(cfg, dict):
-        raise ValueError("корень config.json не является объектом")
-    routing = cfg.get("routing")
-    if not isinstance(routing, dict):
-        routing = {}
-    if mode == "1":
-        cfg.pop("dns", None)
-        routing["domainStrategy"] = "AsIs"
-        cfg["fakedns"] = None
-    else:
-        routing["domainStrategy"] = "IPIfNonMatch"
-        cfg["routing"] = routing
-        cfg["dns"] = {
-            "tag": "dns_inbound",
-            "queryStrategy": "UseIPv4",
-            "disableCache": False,
-            "disableFallback": True,
-            "disableFallbackIfMatch": True,
-            "useSystemHosts": False,
-            "enableParallelQuery": False,
-            "serveStale": False,
-            "serveExpiredTTL": 0,
-            "hosts": {host: ip for host in hosts},
-            "servers": [{"address": url, "skipFallback": True,
-                         "queryStrategy": "UseIPv4", "timeoutMs": 4000}]
-        }
-        cfg["fakedns"] = None
-        for outbound in cfg.get("outbounds", []):
-            if not isinstance(outbound, dict) or outbound.get("protocol") != "freedom" or outbound.get("tag") != "direct":
-                continue
-            stream = outbound.get("streamSettings")
-            if not isinstance(stream, dict):
-                stream = {}
-            sockopt = stream.get("sockopt")
-            if not isinstance(sockopt, dict):
-                sockopt = {}
-            sockopt["domainStrategy"] = "ForceIPv4"
-            stream["sockopt"] = sockopt
-            outbound["streamSettings"] = stream
-            break
-    cfg["routing"] = routing
-    directory = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(prefix=".config.json.", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-except Exception as exc:
-    print("config.json не изменён: %s" % exc, file=sys.stderr)
-    raise SystemExit(1)
-PYXFILE
-  local rc=$?
-  if [[ $rc -ne 0 ]]; then
-    err "Не удалось изменить $cfg_file — backup сохранён: $dns_backup"
-    return 1
-  fi
-
-  systemctl restart x-ui >/dev/null 2>&1 || true
-  sleep 2
-  if ! systemctl is-active --quiet x-ui || ! pgrep -f 'xray-linux-amd64.*config.json' >/dev/null 2>&1; then
-    err "Xray не запустился после изменения DNS — восстанавливаю $dns_backup"
-    systemctl stop x-ui >/dev/null 2>&1 || true
-    cp -a "$dns_backup" "$cfg_file" 2>/dev/null || err "Не удалось восстановить $dns_backup"
-    systemctl start x-ui >/dev/null 2>&1 || true
-    return 1
-  fi
-  # Панель может пересобрать config.json уже после старта. Проверяем именно
-  # фактический файл, иначе нельзя сообщать об успешном применении DNS.
-  DNS_MODE="$mode" DNS_URL="$doh_url" python3 - "$cfg_file" <<'PYXVERIFY'
-import json, os, sys
-path = sys.argv[1]
-mode = os.environ.get("DNS_MODE", "1")
-url = os.environ.get("DNS_URL", "")
-try:
-    with open(path, encoding="utf-8") as fh:
-        cfg = json.load(fh)
-    routing = cfg.get("routing") if isinstance(cfg.get("routing"), dict) else {}
-    if mode == "1":
-        ok = "dns" not in cfg and routing.get("domainStrategy") == "AsIs"
-    else:
-        dns = cfg.get("dns") if isinstance(cfg.get("dns"), dict) else {}
-        servers = dns.get("servers") if isinstance(dns.get("servers"), list) else []
-        ok = (routing.get("domainStrategy") == "IPIfNonMatch" and
-              any((s.get("address") if isinstance(s, dict) else s) == url for s in servers))
-    raise SystemExit(0 if ok else 1)
-except Exception:
-    raise SystemExit(1)
-PYXVERIFY
-  local verify_rc=$?
-  if [[ $verify_rc -ne 0 ]]; then
-    err "После перезапуска панель перезаписала DNS-конфиг — восстанавливаю $dns_backup"
-    systemctl stop x-ui >/dev/null 2>&1 || true
-    cp -a "$dns_backup" "$cfg_file" 2>/dev/null || err "Не удалось восстановить $dns_backup"
-    systemctl start x-ui >/dev/null 2>&1 || true
-    return 1
-  fi
-  if [[ "$mode" == 1 ]]; then
-    log "DNS Xray применён через $cfg_file: системный режим, routing=AsIs"
-  else
-    log "DNS Xray применён через $cfg_file: $doh_url · routing=IPIfNonMatch · queryStrategy=UseIPv4"
-  fi
-  return 0
-}
 
 xray_dns_apply() {
   local mode="$1" doh_url="${2:-}" doh_host="${3:-}" doh_ip="${4:-}"
@@ -11961,17 +11307,6 @@ xray_dns_menu() {
 # =====================================================================
 # FIREWALL
 # =====================================================================
-scan_ports() {
-  {
-    ss -tlnpH 2>/dev/null | awk '{print "tcp|" $4}'
-    # udp: только НАСТОЯЩИЕ слушатели (peer *:*); сокеты с конкретным peer —
-    # это исходящие сессии на ephemeral-портах, в UFW им делать нечего
-    ss -ulnpH 2>/dev/null | awk '$5 == "*:*" {print "udp|" $4}'
-  } 2>/dev/null | while IFS='|' read -r proto bind; do
-    [[ -z "$proto" || -z "$bind" ]] && continue
-    echo "$proto|${bind##*:}|${bind%:*}"
-  done | sort -u
-}
 
 fw_allow() {
   local port="$1" proto="$2" comment="${3:-}"
@@ -13817,68 +13152,6 @@ PYDOMS
 }
 
 # Единый read-only аудит для CI/ручной проверки. Не меняет БД, nginx и сервисы.
-stack_audit_readonly() {
-  line; echo -e "${B}   ПОЛНЫЙ READ-ONLY АУДИТ СТЕКА${N}"; line
-  local bad=0 x dbcount dbbad cert_dir d crt left
-  local pass fail
-  pass(){ ok "$*"; }
-  fail(){ err "$*"; bad=$((bad+1)); }
-  echo -e "${B}— nginx / SNI —${N}"
-  systemctl is-active --quiet nginx 2>/dev/null && pass "nginx активен" || fail "nginx не активен"
-  nginx_ready && pass "nginx.conf найден" || fail "nginx или nginx.conf отсутствует"
-  if sni_router_present; then
-    pass "SNI-файл найден"
-    grep -qE '^map[[:space:]]+\$ssl_preread_server_name' "$SNI_CONF" 2>/dev/null && pass "SNI map найден" || fail "SNI map отсутствует"
-  else
-    fail "SNI-роутер отсутствует"
-  fi
-  nginx -t >/dev/null 2>&1 && pass "nginx -t OK" || fail "nginx -t FAILED"
-  echo -e "${B}— БД —${N}"
-  if [[ -f "$XUI_DB" ]]; then
-    dbcount=$(sqlite3 -readonly -cmd '.timeout 3000' "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1;" 2>/dev/null || true)
-    [[ "$dbcount" =~ ^[0-9]+$ ]] && pass "x-ui.db читается: $dbcount включённых inbounds" || fail "x-ui.db не читается"
-    dbbad=$(sqlite3 -readonly -cmd '.timeout 3000' "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE enable=1 AND (port IS NULL OR port<=0 OR (COALESCE(settings,'') <> '' AND json_valid(settings)=0) OR (COALESCE(stream_settings,'') <> '' AND json_valid(stream_settings)=0));" 2>/dev/null || echo -1)
-    if [[ "$dbbad" == 0 ]]; then
-      pass "JSON и порты inbounds валидны"
-    elif [[ "$dbbad" == -1 ]]; then
-      fail "Не удалось проверить JSON и порты inbounds"
-    else
-      fail "Проблемные inbounds: $dbbad"
-      # Выводим конкретную строку и конкретную причину, а не только счётчик.
-      while IFS='|' read -r _iid _proto _port _remark _pbad _sbad _tbad; do
-        [[ -n "$_iid" ]] || continue
-        local _why=()
-        [[ "$_pbad" == 1 ]] && _why+=("порт=${_port:-пусто}")
-        [[ "$_sbad" == 1 ]] && _why+=("settings: невалидный JSON")
-        [[ "$_tbad" == 1 ]] && _why+=("stream_settings: невалидный JSON")
-        local _label="#$_iid ${_proto:-?}"
-        [[ -n "$_remark" ]] && _label+=" ($_remark)"
-        warn "  $_label — ${_why[*]}"
-      done < <(sqlite3 -readonly -separator '|' -cmd '.timeout 3000' "$XUI_DB" "SELECT id, protocol, COALESCE(port,''), COALESCE(remark,''), CASE WHEN port IS NULL OR port<=0 THEN 1 ELSE 0 END, CASE WHEN COALESCE(settings,'') <> '' AND json_valid(settings)=0 THEN 1 ELSE 0 END, CASE WHEN COALESCE(stream_settings,'') <> '' AND json_valid(stream_settings)=0 THEN 1 ELSE 0 END FROM inbounds WHERE enable=1 AND (port IS NULL OR port<=0 OR (COALESCE(settings,'') <> '' AND json_valid(settings)=0) OR (COALESCE(stream_settings,'') <> '' AND json_valid(stream_settings)=0)) ORDER BY id;" 2>/dev/null || true)
-    fi
-  else
-    fail "x-ui.db не найден"
-  fi
-  echo -e "${B}— сертификаты / UFW —${N}"
-  cert_dir=/etc/letsencrypt/live
-  if [[ -d "$cert_dir" ]]; then
-    local certn=0
-    for d in "$cert_dir"/*; do
-      [[ -d "$d" ]] || continue; certn=$((certn+1)); crt="$d/fullchain.pem"
-      [[ -f "$crt" ]] || { fail "$(basename "$d"): fullchain отсутствует"; continue; }
-      left=$((($(date -d "$(openssl x509 -enddate -noout -in "$crt" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0)-$(date +%s))/86400))
-      (( left < 0 )) && fail "$(basename "$d"): сертификат просрочен" || (( left < 14 )) && warn "$(basename "$d"): истекает через $left дн" || pass "$(basename "$d"): $left дн"
-    done
-    (( certn == 0 )) && warn "Сертификатов нет"
-  else
-    warn "$cert_dir отсутствует"
-  fi
-  ufw_is_active && pass "UFW активен" || warn "UFW выключен"
-  line
-  (( bad > 0 )) && { err "Аудит завершён: критических проблем $bad"; return 1; }
-  ok "Аудит завершён без критических проблем"
-  return 0
-}
 
 # Наблюдение за стеком: одиночный прогон или обновление каждые 10 сек
 stack_doctor_menu() {
@@ -14895,7 +14168,7 @@ rb_wipe_stack_state() {
   local -a wipe=(
     "$BACKUP_DIR/.pre-install-done"
     "$BACKUP_DIR/.stack-ever-ran"
-    "$FROZEN_FILE"
+    /root/stack-frozen.txt
     "$CERT_MODE_FILE"
     "$CERT_LINES_FILE"
     "$WILDCARD_STATE"
@@ -14909,10 +14182,6 @@ rb_wipe_stack_state() {
   done
   rm -f "$CERT_LINE_FILE_PREFIX"*.domains 2>/dev/null || true
 
-  # 3) триггеры защиты БД + вспомогательные таблицы (ставятся скриптом)
-  if [[ -n "$XUI_DB" && -f "$XUI_DB" ]] && db_protect_state; then
-    db_protect_remove && log "  защита БД: триггеры и hosts_shadow сняты"
-  fi
   # Файлы линий сертов: удаляем по префиксу, т.к. имена линий заранее неизвестны
   rm -f "$CERT_LINE_FILE_PREFIX"*.domains 2>/dev/null || true
   # Триггеры, которые ставит ensure_shareonly_triggers: пересоздаются при
@@ -15169,7 +14438,7 @@ rb_full_rollback() {
     /etc/nginx/streams-enabled/sni-router.conf \
     /etc/nginx/streams-available/sni-router.conf \
     /etc/nginx/snippets/decoy-headers.conf 2>/dev/null || true
-  rm -f "$BACKUP_DIR/.pre-install-done" "$FROZEN_FILE" "$CERT_MODE_FILE" \
+  rm -f "$BACKUP_DIR/.pre-install-done" /root/stack-frozen.txt "$CERT_MODE_FILE" \
     "$CERT_LINES_FILE" "$WILDCARD_STATE" /root/.stack-src 2>/dev/null || true
 
   line
@@ -15321,7 +14590,7 @@ routing_diagnostics_menu() {
         local d=""
         ask d "Диагностика" "1" '^[0-3]$'
         case "$d" in
-          1) stack_audit_readonly; pause ;;
+          1) stack_full_audit; pause ;;
           2) stack_doctor_menu ;;
           3) stealth_audit ;;
         esac
@@ -15929,7 +15198,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   # страховка: если «аренда» снятия защиты БД осталась висеть — снять на выходе
   if [[ "${1:-}" == "--check" || "${1:-}" == "--self-test" ]]; then
     detect_env
-    stack_audit_readonly
+    stack_full_audit
     exit $?
   fi
   # СТРОГИЙ БЕЗОПАСНЫЙ СТАРТ:
