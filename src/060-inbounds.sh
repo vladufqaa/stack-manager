@@ -382,12 +382,12 @@ create_inbounds_menu() {
     # CDN-профиль. Раньше create_inbounds_menu создавал только голый XHTTP,
     # потому что CDN-логика была реализована лишь в auto_full_setup.
     local _is_cdn=false
-    CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""
+    CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""; CDN_PRE_PROVIDER=""
     if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
       _is_cdn=true
       cdn_ask_profile "0" "$proto"
       CDN_PRE_ANSWER="true"
-      CDN_PRE_CDN="$CDN_DOM"; CDN_PRE_ORIGIN="$CDN_ORIGIN"; CDN_PRE_PATH="$CDN_PATH"; CDN_PRE_TPL="$CDN_TPL"
+      CDN_PRE_CDN="$CDN_DOM"; CDN_PRE_ORIGIN="$CDN_ORIGIN"; CDN_PRE_PATH="$CDN_PATH"; CDN_PRE_TPL="$CDN_TPL"; CDN_PRE_PROVIDER="$CDN_PROVIDER"
       security="none"
     fi
 

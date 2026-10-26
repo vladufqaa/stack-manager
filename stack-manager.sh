@@ -2579,12 +2579,12 @@ create_inbounds_menu() {
     # CDN-профиль. Раньше create_inbounds_menu создавал только голый XHTTP,
     # потому что CDN-логика была реализована лишь в auto_full_setup.
     local _is_cdn=false
-    CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""
+    CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""; CDN_PRE_PROVIDER=""
     if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
       _is_cdn=true
       cdn_ask_profile "0" "$proto"
       CDN_PRE_ANSWER="true"
-      CDN_PRE_CDN="$CDN_DOM"; CDN_PRE_ORIGIN="$CDN_ORIGIN"; CDN_PRE_PATH="$CDN_PATH"; CDN_PRE_TPL="$CDN_TPL"
+      CDN_PRE_CDN="$CDN_DOM"; CDN_PRE_ORIGIN="$CDN_ORIGIN"; CDN_PRE_PATH="$CDN_PATH"; CDN_PRE_TPL="$CDN_TPL"; CDN_PRE_PROVIDER="$CDN_PROVIDER"
       security="none"
     fi
 
@@ -6868,14 +6868,26 @@ cdn_profile_get() {   # <id> → печатает строку профиля (�
   [[ -s "$CDN_PROFILES" ]] || return 1
   grep -m1 -E "^${1}\|" "$CDN_PROFILES" 2>/dev/null
 }
-cdn_profile_field() {   # <id> <номер поля 1..7> → значение
+cdn_profile_field() {   # <id> <номер поля 1..8> → значение
   local row; row=$(cdn_profile_get "$1") || return 1
   printf '%s' "$row" | cut -d'|' -f"$2"
 }
-cdn_profile_save_add() {   # <id> <proto> <origin> <cdn> <path> <tpl> <decoy_port>
+cdn_profile_provider() {   # <id> → beget|yandex|other|"" (старые профили без поля)
+  local row; row=$(cdn_profile_get "$1") || return 1
+  printf '%s' "$row" | cut -d'|' -f8
+}
+cdn_provider_label() {   # <код> → человекочитаемое имя провайдера
+  case "$1" in
+    beget)  printf 'Beget' ;;
+    yandex) printf 'Yandex Cloud' ;;
+    other)  printf 'Свой CDN' ;;
+    *)      printf 'не указан' ;;
+  esac
+}
+cdn_profile_save_add() {   # <id> <proto> <origin> <cdn> <path> <tpl> <decoy_port> [provider]
   cdn_profile_remove "$1"
   mkdir -p "$(dirname "$CDN_PROFILES")" 2>/dev/null || true
-  printf '%s|%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" >> "$CDN_PROFILES"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "${8:-}" >> "$CDN_PROFILES"
 }
 cdn_profile_remove() {   # <id>
   [[ -s "$CDN_PROFILES" ]] || return 0
@@ -7007,7 +7019,7 @@ cdn_audit_report() {
     proto=$(cdn_profile_field "$id" 2); origin=$(cdn_profile_field "$id" 3)
     cdn=$(cdn_profile_field "$id" 4); path=$(cdn_profile_field "$id" 5)
     tpl=$(cdn_profile_field "$id" 6); dport=$(cdn_profile_field "$id" 7)
-    echo; echo "CDN #$id ($proto): origin=$origin cdn=$cdn path=$path"
+    echo; echo "CDN #$id ($proto, провайдер: $(cdn_provider_label "$(cdn_profile_field "$id" 8)")): origin=$origin cdn=$cdn path=$path"
     if ! sqlite3 "$XUI_DB" "SELECT 1 FROM inbounds WHERE id=$id AND enable=1;" 2>/dev/null | grep -q 1; then
       err "  DRIFT: inbound отсутствует или выключен"; issues=$((issues+1)); continue
     fi
@@ -7293,7 +7305,7 @@ cdn_repair() {   # [quiet] [noreload]
         (( quiet )) || warn "  CDN #$id: восстановлен http-блок $origin (путь $path → 127.0.0.1:$port)"
       fi
       # обновить профиль актуальным decoy-портом
-      cdn_profile_save_add "$id" "$proto" "$origin" "$cdn" "$path" "$tpl" "${dport:-0}"
+      cdn_profile_save_add "$id" "$proto" "$origin" "$cdn" "$path" "$tpl" "${dport:-0}" "$(cdn_profile_provider "$id")"
     fi
     # 3) hosts-строка: address/sni/host_header = CDN-домен, security=tls явно
     #    (в нашей схеме TLS терминирует nginx; 'same' унаследовал бы none),
@@ -7400,9 +7412,49 @@ cdn_origin_in_panel() {   # <domain> [skip_inbound_id]
 
 # Вопросы CDN-профиля: домены + путь + шаблон decoy. Заполняет глобальные
 # CDN_ORIGIN/CDN_DOM/CDN_PATH/CDN_TPL. Не-TTY → детерминированные дефолты.
+# Провайдер CDN — кто терминирует TLS от клиентов перед нашим nginx:
+#   beget | yandex | other. Влияет на подсказки настройки у провайдера,
+#   сохраняется 8-м полем CDN-профиля. CDN_PRE_PROVIDER задаёт ответ заранее
+#   (неинтерактивные сценарии), пусто/не-TTY → other.
+cdn_ask_provider() {   # → CDN_PROVIDER
+  if [[ -n "${CDN_PRE_PROVIDER:-}" ]]; then
+    CDN_PROVIDER="$CDN_PRE_PROVIDER"
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    CDN_PROVIDER="other"
+    return 0
+  fi
+  local pv=""
+  echo
+  echo "  Провайдер CDN (кто принимает TLS от клиентов перед сервером):"
+  echo "   1) Beget"
+  echo "   2) Yandex Cloud"
+  echo "   3) Другой / свой"
+  ask pv "Выбор [1/2/3]" "1" '^[123]$'
+  case "$pv" in
+    2) CDN_PROVIDER="yandex" ;;
+    3) CDN_PROVIDER="other" ;;
+    *) CDN_PROVIDER="beget" ;;
+  esac
+}
+
 cdn_ask_profile() {   # <id> <proto>
   local id="$1" proto="$2" base="${PANEL_DOMAIN:-$(xui_get webDomain 2>/dev/null || true)}"
   [[ "$base" == *.example.* ]] && base="exemple.com"
+  cdn_ask_provider
+  case "$CDN_PROVIDER" in
+    beget)
+      echo "  Beget: в панели Beget включи CDN для cdn-домена (CNAME на их edge),"
+      echo "  origin = ORIGIN-домен, HTTPS к origin на порт 443, кэш выключи"
+      echo "  (правило «не кэшировать»), POST/uploads разрешены (packet-up)."
+      ;;
+    yandex)
+      echo "  Yandex Cloud: создай CDN-ресурс — origin = ORIGIN-домен (HTTPS, порт 443),"
+      echo "  дополнительный домен = cdn-домен (CNAME → *.edgecdn.ru), сертификат на стороне"
+      echo "  Яндекса (LE от Яндекса или свой), кэш выключи, Host/SNI к origin = ORIGIN."
+      ;;
+  esac
   if [[ -n "${CDN_PRE_CDN:-}" && -n "${CDN_PRE_ORIGIN:-}" ]]; then
     CDN_DOM="$CDN_PRE_CDN"; CDN_ORIGIN="$CDN_PRE_ORIGIN"
   else
@@ -7587,7 +7639,7 @@ xhttp_cdn_setup() {   # <inbound_id> <proto> <port>
 
   # 5) hosts: адрес/SNI/Host header = CDN, security=tls (для клиента «TLS есть»)
   hosts_cdn_upsert "$id" "$cdn_dom" "$proto"
-  cdn_profile_save_add "$id" "$proto" "$origin_dom" "$cdn_dom" "$new_path" "$_cdn_tpl" "${_cdn_decoy_port:-0}"
+  cdn_profile_save_add "$id" "$proto" "$origin_dom" "$cdn_dom" "$new_path" "$_cdn_tpl" "${_cdn_decoy_port:-0}" "$CDN_PROVIDER"
 
   [[ "$xui_was" == 1 ]] && { systemctl start x-ui >/dev/null 2>&1 || true; sleep 2; }
   nginx_reload || true
@@ -7651,7 +7703,7 @@ cdn_change_decoy() {   # <id>
   [[ "$ndport" != "$dport" ]] && dport="$ndport"
   mk_decoy "$dport" "$origin" "$cert" "$key" "/var/www/decoy-cdn-$id" "$tpl" || return 1
   stack_cdn_upsert "$origin" "$cdn" "$path" "$port" "$dport" "$cert" "$key"
-  cdn_profile_save_add "$id" "$proto" "$origin" "$cdn" "$path" "$tpl" "$dport"
+  cdn_profile_save_add "$id" "$proto" "$origin" "$cdn" "$path" "$tpl" "$dport" "$(printf '%s' "$row" | cut -d'|' -f8)"
   nginx_reload || true
   log "CDN ORIGIN $origin: decoy обновлён ($tpl)"
 }
@@ -7659,7 +7711,7 @@ cdn_change_decoy() {   # <id>
 # Мини-меню для инбаунда, у которого CDN-профиль уже есть.
 cdn_existing_menu() {   # <id>
   local id="$1"
-  log "Инбаунд #$id уже в CDN-режиме: $(cdn_profile_field "$id" 3) → $(cdn_profile_field "$id" 4)"
+  log "Инбаунд #$id уже в CDN-режиме ($(cdn_provider_label "$(cdn_profile_provider "$id")")): $(cdn_profile_field "$id" 3) → $(cdn_profile_field "$id" 4)"
   echo "   1) Сверить и починить (маршрут/блок/hosts/путь)"
   echo "   2) Перенастроить (домены/путь/шаблон decoy)"
   echo "   3) Снять CDN-режим (инбаунд останется)"
@@ -7688,7 +7740,7 @@ cdn_change_profile() {   # <id>
   tpl=$(printf '%s' "$row" | cut -d'|' -f6)
   dport=$(printf '%s' "$row" | cut -d'|' -f7)
   port=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT port FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-  echo "  Профиль #$id: $proto · origin=$origin · cdn=$cdn · путь=$path · decoy=${dport:-0} · шаблон=$tpl"
+  echo "  Профиль #$id: $proto · origin=$origin · cdn=$cdn · путь=$path · decoy=${dport:-0} · шаблон=$tpl · провайдер=$(cdn_provider_label "$(printf '%s' "$row" | cut -d'|' -f8)")"
   echo
   echo "   1) Сменить домены (CDN и/или origin)"
   echo "   2) Сменить путь"
@@ -7699,6 +7751,7 @@ cdn_change_profile() {   # <id>
   ask a "Выбор" "0" '^[0-4]$'
   [[ "$a" == "0" ]] && return 0
   local n_origin="$origin" n_cdn="$cdn" n_path="$path" n_tpl="$tpl"
+  local n_prov; n_prov=$(printf '%s' "$row" | cut -d'|' -f8)
   case "$a" in
     1)
       ask n_cdn    "Новый домен, привязанный к CDN" "$cdn" '^[a-zA-Z0-9.-]+$'
@@ -7713,7 +7766,7 @@ cdn_change_profile() {   # <id>
     4)
       CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_ANSWER=""
       cdn_ask_profile "$id" "$proto"
-      n_cdn="$CDN_DOM"; n_origin="$CDN_ORIGIN"; n_path="$CDN_PATH"; n_tpl="$CDN_TPL"
+      n_cdn="$CDN_DOM"; n_origin="$CDN_ORIGIN"; n_path="$CDN_PATH"; n_tpl="$CDN_TPL"; n_prov="$CDN_PROVIDER"
       ;;
   esac
   # При редактировании разрешаем сохранить текущий ORIGIN этого профиля,
@@ -7768,7 +7821,7 @@ cdn_change_profile() {   # <id>
   cdn_frontend_ensure "$n_origin" "$n_cdn"
   stack_cdn_upsert "$n_origin" "$n_cdn" "$n_path" "$port" "${dport:-0}" "$cert" "$key"
   hosts_cdn_upsert "$id" "$n_cdn" "$proto"
-  cdn_profile_save_add "$id" "$proto" "$n_origin" "$n_cdn" "$n_path" "$n_tpl" "${dport:-0}"
+  cdn_profile_save_add "$id" "$proto" "$n_origin" "$n_cdn" "$n_path" "$n_tpl" "${dport:-0}" "$n_prov"
   nginx_reload || true
   audit "cdn:reprofiled inbound=$id: $origin/$cdn → $n_origin/$n_cdn path=$n_path"
   log "CDN-профиль #$id перенастроен: $n_origin → $n_cdn, путь $n_path"
@@ -14923,7 +14976,7 @@ auto_full_setup() {
     # ── CDN-профиль только для явно выбранного пункта VLESS XHTTP (через CDN):
     # создаём сразу без security, nginx терминирует TLS. Ответы — в CDN_PRE_*,
     # их подхватит xhttp_cdn_setup при configure_sni_for_inbound (в initial_setup).
-    CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""
+    CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""; CDN_PRE_PROVIDER=""
     local _is_cdn=false
     if [[ "$transport" == "xhttp" && "$security" != "reality" ]]; then
        if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
@@ -14942,7 +14995,7 @@ auto_full_setup() {
       if [[ "$_is_cdn" == true ]]; then
         cdn_ask_profile "0" "$proto"   # спросит CDN/ORIGIN-домены, путь, decoy
         CDN_PRE_ANSWER="true"
-        CDN_PRE_CDN="$CDN_DOM"; CDN_PRE_ORIGIN="$CDN_ORIGIN"; CDN_PRE_PATH="$CDN_PATH"; CDN_PRE_TPL="$CDN_TPL"
+        CDN_PRE_CDN="$CDN_DOM"; CDN_PRE_ORIGIN="$CDN_ORIGIN"; CDN_PRE_PATH="$CDN_PATH"; CDN_PRE_TPL="$CDN_TPL"; CDN_PRE_PROVIDER="$CDN_PROVIDER"
         security="none"     # TLS терминирует nginx — инбаунд создаём голым
         dom=""; sn=""       # SNI-домен/серт инбаунду не нужны
         rdtpl=""

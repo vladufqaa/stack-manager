@@ -92,7 +92,7 @@ auto_full_setup() {
     # ── CDN-профиль только для явно выбранного пункта VLESS XHTTP (через CDN):
     # создаём сразу без security, nginx терминирует TLS. Ответы — в CDN_PRE_*,
     # их подхватит xhttp_cdn_setup при configure_sni_for_inbound (в initial_setup).
-    CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""
+    CDN_PRE_ANSWER=""; CDN_PRE_CDN=""; CDN_PRE_ORIGIN=""; CDN_PRE_PATH=""; CDN_PRE_TPL=""; CDN_PRE_PROVIDER=""
     local _is_cdn=false
     if [[ "$transport" == "xhttp" && "$security" != "reality" ]]; then
        if [[ "$name" == "VLESS XHTTP (через CDN)" ]]; then
@@ -111,7 +111,7 @@ auto_full_setup() {
       if [[ "$_is_cdn" == true ]]; then
         cdn_ask_profile "0" "$proto"   # спросит CDN/ORIGIN-домены, путь, decoy
         CDN_PRE_ANSWER="true"
-        CDN_PRE_CDN="$CDN_DOM"; CDN_PRE_ORIGIN="$CDN_ORIGIN"; CDN_PRE_PATH="$CDN_PATH"; CDN_PRE_TPL="$CDN_TPL"
+        CDN_PRE_CDN="$CDN_DOM"; CDN_PRE_ORIGIN="$CDN_ORIGIN"; CDN_PRE_PATH="$CDN_PATH"; CDN_PRE_TPL="$CDN_TPL"; CDN_PRE_PROVIDER="$CDN_PROVIDER"
         security="none"     # TLS терминирует nginx — инбаунд создаём голым
         dom=""; sn=""       # SNI-домен/серт инбаунду не нужны
         rdtpl=""
