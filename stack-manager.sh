@@ -7320,8 +7320,8 @@ cdn_profile_remove() {   # <id>
 # Домены CDN-фронтов (поле 4 профилей: то, что привязано к внешнему CDN).
 # Это НЕ наши домены: серт на них не выпускается (TLS терминирует CDN) и в SAN
 # они не включаются. ORIGIN (поле 3) — наш домен, он в SAN идёт как обычно.
-cdn_front_domains() {   # [файл профилей]
-  local f="${1:-$CDN_PROFILES}" row
+cdn_front_domains() {   # домены-фронты из $CDN_PROFILES (4-е поле)
+  local f="$CDN_PROFILES" row
   [[ -s "$f" ]] || return 0
   while IFS= read -r row; do
     [[ -n "$row" ]] || continue
