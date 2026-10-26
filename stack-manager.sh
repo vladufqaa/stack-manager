@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.21"
+STACK_MANAGER_VERSION="1.0.22"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -6895,7 +6895,7 @@ reality_set_dest() {
   local _stored=""
   _stored=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
   if [[ "$_stored" != "127.0.0.1:$decoy_port" ]]; then
-    warn "  Reality dest НЕ удержался в БД (#$id: в базе '${_stored:-пусто}', ожидалось 127.0.0.1:$decoy_port) — защита БД «Заморозка самолечения» мешает правке"
+    warn "  Reality dest НЕ удержался в БД (#$id: в базе '${_stored:-пусто}', ожидалось 127.0.0.1:$decoy_port) — перепроверь decoy-порт (п.2)"
   fi
   db_protect_resume
   log "  Reality dest → 127.0.0.1:$decoy_port (decoy nginx)"
@@ -7382,7 +7382,7 @@ cdn_audit_report() {
 # Полный read-only аудит стека: inbound/hosts/SNI/CDN/decoy/certs/services/UFW.
 stack_full_audit() {
   line; echo -e "${B}   ПОЛНЫЙ АУДИТ СТЕКА (READ-ONLY)${N}"; line
-  local issues=0 id proto port listen en st dom backend cert key exp svc
+  local issues=0 id proto port listen en st dom backend cert key exp svc _ss
   [[ -f "$XUI_DB" ]] || { err "x-ui.db не найден"; return 1; }
   echo "[ Inbounds / hosts ]"
   while IFS='|' read -r id proto port listen en st; do
@@ -7426,7 +7426,10 @@ stack_full_audit() {
   echo "[ Listening ports ]"
   while IFS='|' read -r id proto port listen en; do
     [[ "$en" == 1 && "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || continue
-    if ! ss -ltnup 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
+    # ss -t видит только TCP: для UDP-протоколов слушателя ищем через -u,
+    # иначе здоровый UDP-инбаунд помечается «не слушает».
+    _ss="-ltnup"; is_udp_proto "$proto" && _ss="-lnup"
+    if ! ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
       warn "#${id} $proto:$port — сокет не слушает"; issues=$((issues+1))
     else
       log "#${id} $proto:$port — socket OK"
@@ -7481,7 +7484,7 @@ stack_check_fix() {
   fi
 
   log "Этап 2/3: починка…"
-  local svc id proto port row dports=""
+  local svc id proto port row dports="" _ss
   # 1) Упавшие сервисы
   for svc in nginx x-ui; do
     if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -7511,7 +7514,8 @@ stack_check_fix() {
   local -a dead=() still=()
   while IFS='|' read -r id proto port; do
     [[ "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || continue
-    ss -ltnup 2>/dev/null | grep -Eq ":${port}[[:space:]]" || dead+=("$id|$proto|$port")
+    _ss="-ltnup"; is_udp_proto "$proto" && _ss="-lnup"
+    ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]" || dead+=("$id|$proto|$port")
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
   if (( ${#dead[@]} )); then
     for row in "${dead[@]}"; do dports+="${row##*|} "; done
@@ -7520,7 +7524,8 @@ stack_check_fix() {
     sleep 3
     for row in "${dead[@]}"; do
       IFS='|' read -r id proto port <<<"$row"
-      if ss -ltnup 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
+      _ss="-ltnup"; is_udp_proto "$proto" && _ss="-lnup"
+      if ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
         log "  #$id $proto:$port — поднялся после рестарта"
       else
         still+=("$id|$proto|$port")
@@ -13792,14 +13797,6 @@ PYDOMS
     else warn2 "$d → $a_ip, а сервер: $srv_ip"; fi
   done <<<"$doms"
 
-  echo -e "${B}— Самолечение / защита БД —${N}"
-  warn2 "самолечение по таймеру убрано из архитектуры; отклонения чинятся вручную (п.1/п.4)"
-  if db_protect_state; then
-    ok "защита БД: серты/dest/hostname защищены от перезаписи панелью"
-  else
-    warn "защита БД выключена — панель может затирать серты/dest при правках (включается в разделе «Заморозка самолечения»)"
-  fi
-
   echo
   line
   if [[ "$problems" -eq 0 ]]; then
@@ -15404,22 +15401,18 @@ diagnostics_maintenance_menu() {
     echo "  1) ⚡ Проверить всё и починить (аудит → автопочинка → контроль)"
     echo "  2) Статус стека"
     echo "  3) Маршрутизация и диагностика"
-    echo "  4) Сменить пароли LucX UI / AdGuard Home"
-    echo "  5) Обновить скрипт"
-    echo "  6) Проверить UDP-инбаунды и открыть порты UFW"
-    echo "  7) Read-only аудит CDN и drift"
-    echo "  8) Полный read-only аудит стека"
+    echo "  4) Полный read-only аудит стека (вкл. CDN и drift)"
+    echo "  5) Сменить пароли LucX UI / AdGuard Home"
+    echo "  6) Обновить скрипт"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-8]$'
+    local c=""; ask c "Выбор" "1" '^[0-6]$'
     case "$c" in
       1) stack_check_fix; pause ;;
       2) show_status ;;
       3) routing_diagnostics_menu ;;
-      4) change_admin_passwords ;;
-      5) update_self ;;
-      6) udp_inbound_firewall_check; pause ;;
-      7) cdn_audit_report; pause ;;
-      8) stack_full_audit; pause ;;
+      4) stack_full_audit; pause ;;
+      5) change_admin_passwords ;;
+      6) update_self ;;
       0) return 0 ;;
     esac
   done
