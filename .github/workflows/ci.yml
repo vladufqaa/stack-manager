@@ -26,6 +26,12 @@ jobs:
       - name: shellcheck
         run: shellcheck --severity=warning stack-manager.sh stack-manager-update.sh
 
+      - name: Сборка из src/ синхронна с закоммиченным stack-manager.sh
+        run: |
+          cp stack-manager.sh /tmp/committed.sh
+          ./build.sh
+          cmp /tmp/committed.sh stack-manager.sh
+
   release-consistency:
     runs-on: ubuntu-latest
     steps:
