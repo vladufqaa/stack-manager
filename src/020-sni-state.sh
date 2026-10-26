@@ -30,6 +30,31 @@ sni_domain_owner() {
   echo "$be"
 }
 
+# Спросить SNI-домен для инбаунда: непустой, синтаксически валидный, не занятый
+# другим инбаундом/панелью. Занятый домен записывается в SNI_USED.
+#   $1 = имя переменной результата, $2 = id инбаунда, $3 = значение по умолчанию,
+#   $4 = подпись вопроса (опционально).
+# Восстановлено после ошибочного удаления в 1.0.23: вызовы остались в
+# cdn/initial-setup/inbound-ops, и без определения поток создания инбаунда
+# падал «command not found».
+ask_sni_domain() {
+  local __v="$1" __id="$2" __def="$3" d_val owner
+  local __label="${4:-SNI-домен для #${__id}}"
+  while :; do
+    d_val=""
+    ask d_val "$__label" "$__def" '^[a-zA-Z0-9.-]+$'
+    [[ -z "$d_val" ]] && { err "Пустой домен."; continue; }
+    owner=$(sni_domain_owner "$d_val" "$__id")
+    if [[ -n "$owner" ]]; then
+      err "Домен $d_val уже занят ($owner). Укажите другой SNI-домен — у двух инбаундов не может быть один SNI."
+      continue
+    fi
+    printf -v "$__v" '%s' "$d_val"
+    SNI_USED["$d_val"]="inb_${__id}_backend"
+    return 0
+  done
+}
+
 
 check_domain_points_to_server() {
   local domain="$1" server_ip="${2:-}"

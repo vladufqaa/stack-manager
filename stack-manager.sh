@@ -128,7 +128,7 @@ DB_BIN="/usr/bin/sqlite3"
 # TLS терминирует nginx. Единый локальный SSL-фронтенд + tsv-профили.
 # =====================================================================
 CDN_FE_PORT=47443                                        # локальный ssl-фронтенд nginx (http{})
-CDN_PROFILES="/root/stack-backups/cdn-profiles.tsv"      # id|proto|origin|cdn|path|tpl|decoy_port
+CDN_PROFILES="/root/stack-backups/cdn-profiles.tsv"      # id|proto|origin|cdn|path|tpl|decoy_port|provider
 CDN_FORCE_IDS=""                                         # инбаунды, выбранные мастером как CDN
 declare -a CERT_LINES=()
 CERT_MULTI_NAME=""           # динамически = домен панели (cert_multi_name_resolve)
@@ -672,6 +672,31 @@ sni_domain_owner() {
   echo "$be"
 }
 
+# Спросить SNI-домен для инбаунда: непустой, синтаксически валидный, не занятый
+# другим инбаундом/панелью. Занятый домен записывается в SNI_USED.
+#   $1 = имя переменной результата, $2 = id инбаунда, $3 = значение по умолчанию,
+#   $4 = подпись вопроса (опционально).
+# Восстановлено после ошибочного удаления в 1.0.23: вызовы остались в
+# cdn/initial-setup/inbound-ops, и без определения поток создания инбаунда
+# падал «command not found».
+ask_sni_domain() {
+  local __v="$1" __id="$2" __def="$3" d_val owner
+  local __label="${4:-SNI-домен для #${__id}}"
+  while :; do
+    d_val=""
+    ask d_val "$__label" "$__def" '^[a-zA-Z0-9.-]+$'
+    [[ -z "$d_val" ]] && { err "Пустой домен."; continue; }
+    owner=$(sni_domain_owner "$d_val" "$__id")
+    if [[ -n "$owner" ]]; then
+      err "Домен $d_val уже занят ($owner). Укажите другой SNI-домен — у двух инбаундов не может быть один SNI."
+      continue
+    fi
+    printf -v "$__v" '%s' "$d_val"
+    SNI_USED["$d_val"]="inb_${__id}_backend"
+    return 0
+  done
+}
+
 
 check_domain_points_to_server() {
   local domain="$1" server_ip="${2:-}"
@@ -887,6 +912,42 @@ inbounds_json_pairs() {
 }
 
 # Обновление строки inbounds с автоматическим снимком для отката
+
+# Сменить listen инбаунда напрямую в БД, при mode=journal — с записью прежнего
+# значения в LISTEN_JOURNAL (формат читателя panel_journal_apply:
+# id<TAB>значение_для_отката<TAB>db, спецзначения __NULL__/__EMPTY__).
+#   $1 = id, $2 = новое значение ('' | 127.0.0.1 | 0.0.0.0 | что угодно),
+#   $3 = journal|direct (по умолчанию journal)
+# Первое изменение для id — приоритетное: откат возвращает исходный listen,
+# а не промежуточный. Восстановлено самодостаточно: в v1.0.15 функцию удалили
+# вместе со старыми journal-хелперами, а вызовы (cdn-профиль, полный откат)
+# остались — слушатель молча не переключался, «command not found» гасился || true.
+db_set_listen() {
+  local id="$1" want="$2" mode="${3:-journal}"
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" || -z "$id" ]] && return 1
+  # Значение не ограничиваем списком: в поле может лежать что угодно (в т.ч.
+  # вписанное руками), и откат обязан вернуть именно его. Требование одно —
+  # без кавычек и переводов строк, иначе ломается SQL-литерал.
+  if [[ "$want" == *"'"* || "$want" == *$'\n'* ]]; then
+    err "db_set_listen: значение listen содержит кавычку/перевод строки — запись невозможна"
+    return 1
+  fi
+  if [[ "$mode" == "journal" ]]; then
+    panel_journal_capture_row inbounds "$id" 2>/dev/null || true
+    if ! awk -F'\t' -v i="$id" '$1==i{f=1} END{exit !f}' "$LISTEN_JOURNAL" 2>/dev/null; then
+      local old enc
+      old=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+            "SELECT CASE WHEN listen IS NULL THEN '__NULL__' WHEN listen='' THEN '__EMPTY__' ELSE listen END FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+      enc="${old:-__EMPTY__}"
+      mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+      printf '%s\t%s\t%s\n' "$id" "$enc" "$XUI_DB" >> "$LISTEN_JOURNAL" 2>/dev/null || true
+    fi
+  fi
+  local sq; sq=$(sql_escape "$want")
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "UPDATE inbounds SET listen='$sq' WHERE id=$id AND COALESCE(listen,'') <> '$sq';" 2>/dev/null || true
+  return 0
+}
 
 # Строка hosts/восстановление всей строки — та же логика для таблицы hosts
 

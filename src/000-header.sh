@@ -128,7 +128,7 @@ DB_BIN="/usr/bin/sqlite3"
 # TLS терминирует nginx. Единый локальный SSL-фронтенд + tsv-профили.
 # =====================================================================
 CDN_FE_PORT=47443                                        # локальный ssl-фронтенд nginx (http{})
-CDN_PROFILES="/root/stack-backups/cdn-profiles.tsv"      # id|proto|origin|cdn|path|tpl|decoy_port
+CDN_PROFILES="/root/stack-backups/cdn-profiles.tsv"      # id|proto|origin|cdn|path|tpl|decoy_port|provider
 CDN_FORCE_IDS=""                                         # инбаунды, выбранные мастером как CDN
 declare -a CERT_LINES=()
 CERT_MULTI_NAME=""           # динамически = домен панели (cert_multi_name_resolve)
