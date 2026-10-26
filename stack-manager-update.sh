@@ -20,7 +20,8 @@ rollback(){
   log "Активирован релиз $target"
 }
 install_release(){
-  local src="$1" ver="$2" dest="$RELEASES/$ver" tmp
+  local src="$1" ver="$2" tmp
+  local dest="$RELEASES/$ver"
   [[ -f "$src/stack-manager.sh" && -f "$src/VERSION" ]] || { err 'В пакете нет stack-manager.sh или VERSION'; return 1; }
   [[ "$(tr -d '[:space:]' < "$src/VERSION")" == "$ver" ]] || { err 'VERSION внутри пакета не совпадает'; return 1; }
   bash -n "$src/stack-manager.sh"

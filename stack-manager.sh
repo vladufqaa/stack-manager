@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.20"
+STACK_MANAGER_VERSION="1.0.21"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -577,7 +577,9 @@ ensure_deps() {  local missing=() t
     local _ngx_pkgs
     _ngx_pkgs=$(dpkg -l 2>/dev/null | awk '/^ii/ && $2 ~ /nginx/ {print $2}' | tr '\n' ' ')
     [[ -z "$_ngx_pkgs" ]] && _ngx_pkgs="nginx nginx-common nginx-full"
-    apt-get install -y --reinstall -o Dpkg::Options::=--force-confmiss $_ngx_pkgs >/dev/null 2>&1 || true
+    local -a _ngx_pkgs_arr=()
+    read -r -a _ngx_pkgs_arr <<< "$_ngx_pkgs"
+    apt-get install -y --reinstall -o Dpkg::Options::=--force-confmiss "${_ngx_pkgs_arr[@]}" >/dev/null 2>&1 || true
     if [[ ! -f /etc/nginx/nginx.conf ]]; then
       # nginx.conf и базовые каталоги принадлежат nginx-common, а не всегда
       # пакету nginx. force-confmiss нужен для conffile, удалённого вручную.
@@ -5937,7 +5939,7 @@ cert_audit() {
   fi
 
   # Уникализация
-  active_domains=$(printf '%s\n' $active_domains | sort -u | tr '\n' ' ')
+  active_domains=$(printf '%s\n' "$active_domains" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')
   echo -e "${B}▸ Активные домены стека:${N}"
   echo "  $active_domains"
   echo
@@ -6861,6 +6863,7 @@ EOF
     ua_block='    if ($http_user_agent ~* (curl|wget|python|scrapy|httpclient|okhttp|go-http|libwww|zgrab|nikto|dirbuster|gobuster|wfuzz|nuclei|masscan|headless|bot|spider|crawler|scanner)) { return 404; }'
   fi
 
+  # shellcheck disable=SC2154 # \$uri/\$args — переменные nginx, не bash
   local body
   body=$(cat <<EOF
 server {
@@ -6901,6 +6904,7 @@ mk_plain_fallback_decoy() {   # <port> <domain> <root>
   [[ "$port" =~ ^[0-9]+$ && "$dom" && "$root" ]] || return 1
   stack_ensure
   stack_del_decoy "$dom" "fallback-plain" 2>/dev/null || true
+  # shellcheck disable=SC2154 # \\$uri — переменная nginx в heredoc
   {
     echo "# >>> fallback-plain port=$port root=$root domain=$dom"
     cat <<EOF
