@@ -25,3 +25,28 @@ jobs:
 
       - name: shellcheck
         run: shellcheck --severity=warning stack-manager.sh stack-manager-update.sh
+
+  release-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: VERSION == STACK_MANAGER_VERSION == последняя запись CHANGELOG
+        run: |
+          v_file=$(tr -d '[:space:]' < VERSION)
+          v_script=$(grep -m1 -E '^STACK_MANAGER_VERSION="' stack-manager.sh | sed -E 's/^STACK_MANAGER_VERSION="([^"]+)"/\1/')
+          v_changelog=$(grep -m1 -E '^## \[' CHANGELOG.md | sed -E 's/^## \[([^]]+)\].*/\1/')
+          echo "VERSION=${v_file} | STACK_MANAGER_VERSION=${v_script} | CHANGELOG=${v_changelog}"
+          if [[ "$v_file" != "$v_script" || "$v_script" != "$v_changelog" ]]; then
+            echo "::error::Версии расходятся — синхронизируйте VERSION, STACK_MANAGER_VERSION и CHANGELOG"
+            exit 1
+          fi
+
+      - name: У последней записи CHANGELOG существует тег (иначе релиз не соберётся)
+        run: |
+          git fetch --tags --force
+          v_changelog=$(grep -m1 -E '^## \[' CHANGELOG.md | sed -E 's/^## \[([^]]+)\].*/\1/')
+          if ! git tag -l "v${v_changelog}" | grep -q .; then
+            echo "::error::Тег v${v_changelog} не существует — запушьте тег, workflow «Build release package» опубликует релиз"
+            exit 1
+          fi

@@ -1,0 +1,37 @@
+# Локальные служебные каталоги (копии старых версий, эксперименты) — не для репозитория
+/backups/
+/dist/
+/analysis-dual/
+/work/
+
+# Устаревшие скрипты и файлы других проектов, живущие в этом воркспейсе
+/1.sh
+/compose_story.py
+/fix_putevye.py
+/disabled_backup.txt
+/icon_lampa_horizontal.png
+/icon_lampa_horizontal_clean.png
+
+# Мусор
+*.log
+*.tmp
+~$*
+Thumbs.db
+.DS_Store
+
+# Прочие проекты этого воркспейса (не часть репозитория stack-manager)
+/*.wgt
+/*.xlsx
+/*.bat
+/*.jpg
+/icon_*.png
+/logo.png
+/inspect_wgt/
+/make_auto*.py
+/variants_story.py
+/print_waybills.ps1
+/shellcheck-*.txt
+/snippet.sh
+/rollback.txt
+/packages_backup.txt
+/stack-manager.sh.before-no-selfheal
