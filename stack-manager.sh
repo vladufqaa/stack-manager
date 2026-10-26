@@ -3594,10 +3594,12 @@ PYPASS
     ask apass "Новый пароль ADGUARD (Enter — случайный)" "" '^$|.{6,}'
     [[ -z "$apass" ]] && apass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
     if adg_set_admin "$auser" "$apass"; then
+      local apd
+      apd=$(xui_get webDomain 2>/dev/null || true)
+      [[ -z "$apd" || "$apd" == "null" ]] && apd="${PANEL_DOMAIN:-}"
       {
         echo "AdGuard Home — $(date '+%F %T')"
-        echo "  URL:    https://${PANEL_DOMAIN:-<домен панели>}/"
-        echo "  DoH:    https://${PANEL_DOMAIN:-<домен панели>}/dns-query"
+        [[ -n "$apd" ]] && { echo "  URL:    https://$apd/"; echo "  DoH:    https://$apd/dns-query"; }
         echo "  Логин:  $auser"
         echo "  Пароль: $apass"
       } > /root/adguard-credentials.txt
@@ -10746,6 +10748,11 @@ show_status() {
     echo "  Панель:  домен не задан"
   fi
   if [[ "$ADG_PRESENT" == true ]]; then
+    # Сервис числится установленным, но не активен — честно говорим об этом,
+    # а не рисуем URL, по которому всё равно 502.
+    if [[ -n "$ADG_SERVICE" ]] && ! systemctl is-active --quiet "$ADG_SERVICE" 2>/dev/null; then
+      echo "  AdGuard: сервис '$ADG_SERVICE' не активен (переустановка — раздел 7-2)"
+    else
     # режим AdGuard: за панелью (прокси в 4443-блоке) / отдельный SNI-домен / локально
     if grep -q "listen 127.0.0.1:4443" "$STACK_CONF" 2>/dev/null && \
        sed -n '/listen 127\.0\.0\.1:4443/,/^}/p' "$STACK_CONF" 2>/dev/null | grep -q "proxy_pass https://127.0.0.1:"; then
@@ -10765,14 +10772,20 @@ show_status() {
     fi
     echo "  AdGuard: $adg_url"
     echo "  DoH:     $doh_url"
+    fi
   fi
-  if [[ -f /root/panel-credentials.txt ]]; then
-    echo "  ── панель (/root/panel-credentials.txt):"
-    sed 's/^/  │    /' /root/panel-credentials.txt
+  # ── Креды: cred-файлы — это СНИМОК пароля на момент установки/смены,
+  # а не живые данные: пароль часто меняют позже, и дамп содержимого
+  # вводит в заблуждение. Показываем путь и дату снимка, не сам пароль.
+  local cf cdate
+  cf=/root/panel-credentials.txt
+  if [[ -f "$cf" ]]; then
+    cdate=$(grep -m1 -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' "$cf" 2>/dev/null || true)
+    echo "  Креды панели:  $cf (снимок ${cdate:-без даты}; пароль меняли — используйте свой)"
   fi
   if [[ "$ADG_PRESENT" == true && -f /root/adguard-credentials.txt ]]; then
-    echo "  ── AdGuard (/root/adguard-credentials.txt):"
-    sed 's/^/  │    /' /root/adguard-credentials.txt
+    cdate=$(grep -m1 -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' /root/adguard-credentials.txt 2>/dev/null || true)
+    echo "  Креды AdGuard: /root/adguard-credentials.txt (снимок ${cdate:-без даты})"
   fi
 
   echo; echo "▸ SNI:"
