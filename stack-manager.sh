@@ -7484,7 +7484,7 @@ stack_check_fix() {
   fi
 
   log "Этап 2/3: починка…"
-  local svc id proto port row dports="" _ss
+  local svc id proto port row dports="" _ss waited=0
   # 1) Упавшие сервисы
   for svc in nginx x-ui; do
     if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -7511,7 +7511,7 @@ stack_check_fix() {
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
   if command -v ufw >/dev/null 2>&1; then ufw --force enable >/dev/null 2>&1 || true; fi
   # 5) Мёртвые сокеты → пересборка xray-конфига (рестарт x-ui), затем перепроверка
-  local -a dead=() still=()
+  local -a dead=() still=() pending=()
   while IFS='|' read -r id proto port; do
     [[ "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || continue
     _ss="-ltnup"; is_udp_proto "$proto" && _ss="-lnup"
@@ -7521,15 +7521,22 @@ stack_check_fix() {
     for row in "${dead[@]}"; do dports+="${row##*|} "; done
     log "  не слушаются порты: ${dports% } — пересобираю конфиг xray (рестарт x-ui)"
     systemctl restart x-ui 2>/dev/null || true
-    sleep 3
-    for row in "${dead[@]}"; do
-      IFS='|' read -r id proto port <<<"$row"
-      _ss="-ltnup"; is_udp_proto "$proto" && _ss="-lnup"
-      if ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
-        log "  #$id $proto:$port — поднялся после рестарта"
-      else
-        still+=("$id|$proto|$port")
-      fi
+    # xray с Reality/туннелями поднимает сокеты дольше 3 секунд: фикс sleep 3
+    # ловил момент «раздевания» и давал ложные «сокет не слушает». Ждём до 30 с.
+    still=("${dead[@]}")
+    while (( ${#still[@]} )) && (( waited < 30 )); do
+      sleep 3; waited=$((waited+3))
+      pending=()
+      for row in "${still[@]}"; do
+        IFS='|' read -r id proto port <<<"$row"
+        _ss="-ltnup"; is_udp_proto "$proto" && _ss="-lnup"
+        if ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
+          log "  #$id $proto:$port — поднялся (через ${waited}с)"
+        else
+          pending+=("$row")
+        fi
+      done
+      still=("${pending[@]}")
     done
     if (( ${#still[@]} )); then
       warn "  не поднялось автоматически (протокол не поддерживается ядром или битый конфиг):"
