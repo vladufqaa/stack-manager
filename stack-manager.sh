@@ -7449,6 +7449,113 @@ stack_full_audit() {
   log "Полный аудит: критических проблем не найдено"
 }
 
+# ⚡ ПРОВЕРКА И ПОЧИНКА одним действием: полный read-only аудит → безопасная
+# автопочинка найденного → контрольный аудит с дельтой. Принципы:
+#   • чиним только детерминированное: упавшие сервисы, серты/decoy инбаундов
+#     (sync_inbound_certs), CDN-дрейф (cdn_repair), отсутствующие UDP-правила
+#     UFW, пересборку xray-конфига (рестарт x-ui) для мёртвых сокетов;
+#   • НЕ выпускаем сертификаты LE (квоты/DNS — раздел 3) и не правим битый
+#     nginx-конфиг вслепую — только показываем причину.
+stack_check_fix() {
+  line; echo -e "${B}   ПРОВЕРКА И ПОЧИНКА (одним действием)${N}"; line
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || { err "x-ui.db не найден — проверять нечего"; return 1; }
+  local _a1 _a2 before after
+  _a1="$(mktemp /tmp/stack-doctor.XXXXXX)"; _a2="$(mktemp /tmp/stack-doctor.XXXXXX)"
+  log "Этап 1/3: полная проверка стека (read-only)…"
+  stack_full_audit > "$_a1" 2>&1 || true
+  cat "$_a1"
+  before=$(grep -cE '\[!\]|\[x\]' "$_a1" 2>/dev/null || true)
+  before="${before:-0}"
+  if (( before == 0 )); then
+    rm -f "$_a1" "$_a2"
+    log "Проблем не найдено — починка не требуется"
+    return 0
+  fi
+  echo
+  local do_fix=false
+  askyn do_fix "Найдено замечаний: $before. Применить безопасную автопочинку?" "y"
+  if [[ "$do_fix" != true ]]; then
+    rm -f "$_a1" "$_a2"
+    warn "Отменено. Ручная починка: разделы 1–4 и 6"
+    return 0
+  fi
+
+  log "Этап 2/3: починка…"
+  local svc id proto port row dports=""
+  # 1) Упавшие сервисы
+  for svc in nginx x-ui; do
+    if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
+      systemctl start "$svc" 2>/dev/null || true
+      if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        log "  сервис $svc поднят"
+      else
+        err "  сервис $svc не поднимается — смотрите journalctl -u $svc -n 20"
+      fi
+    fi
+  done
+  # 2) Серты/decoy инбаундов (молчит, если чинить нечего)
+  sync_inbound_certs || true
+  # 3) CDN-дрейф (SNI-маршрут, http-блок, hosts, путь; сам делает reload)
+  cdn_repair 0 0 || true
+  # 4) UDP-порты без правил UFW
+  while IFS='|' read -r id proto port; do
+    [[ -n "$id" && "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || continue
+    is_udp_proto "$proto" || continue
+    if ! ufw status 2>/dev/null | awk -v p="$port" '$0 ~ ("[[:space:]]" p "/udp([[:space:]]|$)") || $0 ~ ("[[:space:]]" p "([[:space:]]|$)") {found=1} END{exit !found}'; then
+      fw_allow "$port" udp "udp-инбаунд #$id"
+      log "  UDP/$port открыт в UFW (инбаунд #$id $proto)"
+    fi
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
+  if command -v ufw >/dev/null 2>&1; then ufw --force enable >/dev/null 2>&1 || true; fi
+  # 5) Мёртвые сокеты → пересборка xray-конфига (рестарт x-ui), затем перепроверка
+  local -a dead=() still=()
+  while IFS='|' read -r id proto port; do
+    [[ "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || continue
+    ss -ltnup 2>/dev/null | grep -Eq ":${port}[[:space:]]" || dead+=("$id|$proto|$port")
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
+  if (( ${#dead[@]} )); then
+    for row in "${dead[@]}"; do dports+="${row##*|} "; done
+    log "  не слушаются порты: ${dports% } — пересобираю конфиг xray (рестарт x-ui)"
+    systemctl restart x-ui 2>/dev/null || true
+    sleep 3
+    for row in "${dead[@]}"; do
+      IFS='|' read -r id proto port <<<"$row"
+      if ss -ltnup 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
+        log "  #$id $proto:$port — поднялся после рестарта"
+      else
+        still+=("$id|$proto|$port")
+      fi
+    done
+    if (( ${#still[@]} )); then
+      warn "  не поднялось автоматически (протокол не поддерживается ядром или битый конфиг):"
+      for row in "${still[@]}"; do
+        IFS='|' read -r id proto port <<<"$row"
+        warn "    #$id $proto:$port — причины: journalctl -u x-ui | grep $port"
+      done
+    fi
+  fi
+  # 6) Битый nginx-конфиг не чиним вслепую
+  if ! nginx -t >/dev/null 2>&1; then
+    err "  nginx -t: FAIL — конфиг битый, правится вручную (nginx -T покажет место)"
+  fi
+
+  log "Этап 3/3: контрольная проверка…"
+  stack_full_audit > "$_a2" 2>&1 || true
+  cat "$_a2"
+  after=$(grep -cE '\[!\]|\[x\]' "$_a2" 2>/dev/null || true)
+  after="${after:-0}"
+  rm -f "$_a1" "$_a2"
+  echo
+  if (( after == 0 )); then
+    log "Готово: было замечаний $before → осталось 0"
+  elif (( after < before )); then
+    log "Готово: было замечаний $before → осталось $after (остаток расшифрован выше)"
+  else
+    warn "Готово: было замечаний $before → осталось $after (автопочинка здесь не помогает — см. выше)"
+  fi
+  (( after == 0 ))
+}
+
 # Проверка и починка CDN-маршрутизации по профилям: SNI-map, upstream,
 # http-блок, decoy. Живой тест: путь → xray (любой HTTP-ответ), остальное → decoy.
 #   quiet=1 — без вопросов/логов восстановления (вызов из автопутей)
@@ -15294,16 +15401,27 @@ backups_rollback_menu() {
 diagnostics_maintenance_menu() {
   while :; do
     line; echo -e "${B}   ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ${N}"; line
-    echo "  1) Статус стека"
-    echo "  2) Маршрутизация и диагностика"
-    echo "  3) Сменить пароли LucX UI / AdGuard Home"
-    echo "  4) Обновить скрипт"
-     echo "  5) Проверить UDP-инбаунды и открыть порты UFW"
-     echo "  6) Read-only аудит CDN и drift"
-      echo "  7) Полный read-only аудит стека"
+    echo "  1) ⚡ Проверить всё и починить (аудит → автопочинка → контроль)"
+    echo "  2) Статус стека"
+    echo "  3) Маршрутизация и диагностика"
+    echo "  4) Сменить пароли LucX UI / AdGuard Home"
+    echo "  5) Обновить скрипт"
+    echo "  6) Проверить UDP-инбаунды и открыть порты UFW"
+    echo "  7) Read-only аудит CDN и drift"
+    echo "  8) Полный read-only аудит стека"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-7]$'
-    case "$c" in 1) show_status ;; 2) routing_diagnostics_menu ;; 3) change_admin_passwords ;; 4) update_self ;; 5) udp_inbound_firewall_check; pause ;; 6) cdn_audit_report; pause ;; 7) stack_full_audit; pause ;; 0) return 0 ;; esac
+    local c=""; ask c "Выбор" "1" '^[0-8]$'
+    case "$c" in
+      1) stack_check_fix; pause ;;
+      2) show_status ;;
+      3) routing_diagnostics_menu ;;
+      4) change_admin_passwords ;;
+      5) update_self ;;
+      6) udp_inbound_firewall_check; pause ;;
+      7) cdn_audit_report; pause ;;
+      8) stack_full_audit; pause ;;
+      0) return 0 ;;
+    esac
   done
 }
 panel_adguard_menu() {
