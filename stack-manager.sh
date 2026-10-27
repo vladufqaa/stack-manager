@@ -7131,10 +7131,10 @@ stack_full_audit() {
     [[ -n "$id" ]] || continue
     if [[ "$en" != 1 ]]; then warn "#${id} $proto:$port — disabled"; continue; fi
     [[ "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || { err "#${id}: некорректный порт $port"; issues=$((issues+1)); continue; }
-    # Публичные UDP-туннели (Hysteria и встроенные qwdtt/csqtt) должны
+    # Публичные UDP-туннели (Hysteria, qwdtt/csqtt, Awg/WireGuard) должны
     # принимать трафик не только с loopback. Для них внешний listen — норма.
     case "$proto" in
-      hysteria|hysteria2|qwdtt|csqtt) ;;
+      hysteria|hysteria2|qwdtt|csqtt|awg|wireguard|amnezia|amneziawg) ;;
       *)
         if [[ "$port" != 443 && "$listen" != 127.0.0.1 ]]; then
           warn "#${id} $proto:$port — слушает не loopback"; issues=$((issues+1))
@@ -7172,7 +7172,14 @@ stack_full_audit() {
     # иначе здоровый UDP-инбаунд помечается «не слушает».
     _ss="-ltnup"; is_udp_proto "$proto" && _ss="-lnup"
     if ! ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
-      warn "#${id} $proto:$port — сокет не слушает"; issues=$((issues+1))
+      # Порт мог попасть в момент перезапуска xray («то слушает, то нет»):
+      # одна перепроверка через 2 с перед тем, как ставить замечание.
+      sleep 2
+      if ! ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
+        warn "#${id} $proto:$port — сокет не слушает"; issues=$((issues+1))
+        continue
+      fi
+      log "#${id} $proto:$port — socket OK (поднялся при перепроверке)"
     else
       log "#${id} $proto:$port — socket OK"
     fi
@@ -7222,6 +7229,34 @@ stack_full_audit() {
   log "Полный аудит: критических проблем не найдено"
 }
 
+# Ждём, пока ВСЕ включённые инбаунды начнут слушать (deadline сек, полл 3 с).
+# Возвращает 0 — всё слушает, 1 — дедлайн истёк. Нужен после рестарта x-ui:
+# перепривязываются не только «мёртвые» порты, но и живые, поэтому сразу
+# после рестарта контрольный аудит ловит сокеты в моменте.
+stack_wait_ports() {   # [deadline_sec]
+  # LucX в стартовом окне пересоздаёт обработчики инбаундов через xray API:
+  # порт может подняться и снова исчезнуть (ядро xray при этом не рестартует,
+  # в journal это не видно). Поэтому сходимость = ДВА чистых прохода ПОДРЯД.
+  local deadline="${1:-90}" waited=0 miss streak=0 _pid _proto _port _wss
+  while :; do
+    miss=0
+    while IFS='|' read -r _pid _proto _port; do
+      [[ -n "$_pid" ]] || continue
+      [[ "$_port" =~ ^[0-9]+$ && "$_port" != 0 ]] || continue
+      _wss="-ltnup"; is_udp_proto "$_proto" && _wss="-lnup"
+      ss "$_wss" 2>/dev/null | grep -Eq ":${_port}[[:space:]]" || { miss=1; break; }
+    done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
+    if (( miss == 0 )); then
+      (( streak >= 1 )) && return 0
+      streak=$((streak+1))
+    else
+      streak=0
+    fi
+    (( waited >= deadline )) && return 1
+    sleep 3; waited=$((waited+3))
+  done
+}
+
 # ⚡ ПРОВЕРКА И ПОЧИНКА одним действием: полный read-only аудит → безопасная
 # автопочинка найденного → контрольный аудит с дельтой. Принципы:
 #   • чиним только детерминированное: упавшие сервисы, серты/decoy инбаундов
@@ -7237,7 +7272,9 @@ stack_check_fix() {
   log "Этап 1/3: полная проверка стека (read-only)…"
   stack_full_audit > "$_a1" 2>&1 || true
   cat "$_a1"
-  before=$(grep -cE '\[!\]|\[x\]' "$_a1" 2>/dev/null || true)
+  # Исключаем итоговую строку аудита «[x] Полный аудит: проблем N» —
+  # иначе счётчик завышен на 1 («было 5 → осталось 4» при 4 реальных).
+  before=$(grep -E '\[!\]|\[x\]' "$_a1" 2>/dev/null | grep -vc 'Полный аудит: проблем' || true)
   before="${before:-0}"
   if (( before == 0 )); then
     rm -f "$_a1" "$_a2"
@@ -7245,16 +7282,12 @@ stack_check_fix() {
     return 0
   fi
   echo
-  local do_fix=false
-  askyn do_fix "Найдено замечаний: $before. Применить безопасную автопочинку?" "y"
-  if [[ "$do_fix" != true ]]; then
-    rm -f "$_a1" "$_a2"
-    warn "Отменено. Ручная починка: разделы 1–4 и 6"
-    return 0
-  fi
+  # Без промежуточных вопросов: сам пункт меню называется «проверить и починить»,
+  # выбор пункта — уже согласие на безопасную автопочинку.
+  log "Найдено замечаний: $before — применяю безопасную автопочинку"
 
   log "Этап 2/3: починка…"
-  local svc id proto port row dports="" _ss waited=0
+  local svc id proto port row dports="" _ss waited=0 restarted=0
   # 1) Упавшие сервисы
   for svc in nginx x-ui; do
     if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -7268,8 +7301,9 @@ stack_check_fix() {
   done
   # 2) Серты/decoy инбаундов (молчит, если чинить нечего)
   sync_inbound_certs || true
-  # 3) CDN-дрейф (SNI-маршрут, http-блок, hosts, путь; сам делает reload)
-  cdn_repair 0 0 || true
+  # 3) CDN-дрейф (SNI-маршрут, http-блок, hosts, путь; сам делает reload);
+  #    quiet=1 — без интерактивных вопросов внутри одноразовой починки
+  cdn_repair 1 0 || true
   # 4) UDP-порты без правил UFW
   while IFS='|' read -r id proto port; do
     [[ -n "$id" && "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || continue
@@ -7290,11 +7324,13 @@ stack_check_fix() {
   if (( ${#dead[@]} )); then
     for row in "${dead[@]}"; do dports+="${row##*|} "; done
     log "  не слушаются порты: ${dports% } — пересобираю конфиг xray (рестарт x-ui)"
+    restarted=1
     systemctl restart x-ui 2>/dev/null || true
-    # xray с Reality/туннелями поднимает сокеты дольше 3 секунд: фикс sleep 3
-    # ловил момент «раздевания» и давал ложные «сокет не слушает». Ждём до 30 с.
+    # xray с Reality/туннелями поднимает сокеты долго (trusttunnel — до ~15 с):
+    # фиксированный sleep 3 ловил момент «раздевания» и давал ложные
+    # «сокет не слушает». Ждём до 60 с.
     still=("${dead[@]}")
-    while (( ${#still[@]} )) && (( waited < 30 )); do
+    while (( ${#still[@]} )) && (( waited < 60 )); do
       sleep 3; waited=$((waited+3))
       pending=()
       for row in "${still[@]}"; do
@@ -7316,6 +7352,13 @@ stack_check_fix() {
       done
     fi
   fi
+  # 5b) Рестарт перекидывает ВСЕ сокеты, включая живые: ждём сходимости всех
+  #     включённых портов, иначе контрольный аудит ловит порт в моменте
+  #     («то слушает, то не слушает» между соседними проверками).
+  if (( restarted )); then
+    log "  жду сходимости всех сокетов (до 90 с, 2 стабильных прохода)…"
+    stack_wait_ports 90 || warn "  часть сокетов не поднялась за 90 с — см. контрольный аудит"
+  fi
   # 6) Битый nginx-конфиг не чиним вслепую
   if ! nginx -t >/dev/null 2>&1; then
     err "  nginx -t: FAIL — конфиг битый, правится вручную (nginx -T покажет место)"
@@ -7324,7 +7367,7 @@ stack_check_fix() {
   log "Этап 3/3: контрольная проверка…"
   stack_full_audit > "$_a2" 2>&1 || true
   cat "$_a2"
-  after=$(grep -cE '\[!\]|\[x\]' "$_a2" 2>/dev/null || true)
+  after=$(grep -E '\[!\]|\[x\]' "$_a2" 2>/dev/null | grep -vc 'Полный аудит: проблем' || true)
   after="${after:-0}"
   rm -f "$_a1" "$_a2"
   echo
