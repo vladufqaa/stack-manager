@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.25"
+STACK_MANAGER_VERSION="1.0.26"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -712,9 +712,17 @@ check_domain_points_to_server() {
 }
 
 # Определяем вариант панели: LucX-форк vs оригинальный 3x-ui.
-#   LucX имеет уникальные маркеры: триггеры lucx_shareonly_*, таблицу
-#   client_inbounds, фикс-теги sidecar-инбаундов (inbound-qwdtt/csqtt/tproxy).
-#   Если ни одного маркера нет — считаем оригинальным 3x-ui.
+#   Маркеры в БД: триггеры lucx_shareonly_*, таблица client_inbounds,
+#   фикс-теги sidecar-инбаундов (inbound-qwdtt/csqtt/tproxy).
+#   Маркеры самой установки: строка «lucx» в бинарнике панели и в её
+#   менеджер-скрипте x-ui.sh (у оригинального 3x-ui таких строк нет).
+#   Они нужны для свежей установки LucX, где в БД ещё нет ни одного маркера:
+#   триггеры/таблицы создаются миграциями панели, а sqlite3 при первом запуске
+#   скрипта может быть ещё не установлен — без них мастер показывал
+#   «оригинальный 3x-ui» и не предлагал LucX-протоколы.
+#   XUI_BIN — тестовая точка подмены пути бинарника (по умолчанию путь
+#   ExecStart юнита x-ui, затем /usr/local/x-ui/x-ui).
+# Если ни одного маркера нет — считаем оригинальным 3x-ui.
 # Печатает: lucx | 3x-ui | none
 detect_panel_flavor() {
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && { echo "none"; return 0; }
@@ -725,6 +733,21 @@ detect_panel_flavor() {
   [[ -n "$v" ]] && { echo "lucx"; return 0; }
   v=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT 1 FROM inbounds WHERE tag IN ('inbound-qwdtt','inbound-csqtt','inbound-tproxy') LIMIT 1;" 2>/dev/null || true)
   [[ "$v" == "1" ]] && { echo "lucx"; return 0; }
+  # В БД маркеров нет — смотрим саму установку панели. Работает и тогда,
+  # когда sqlite3 недоступен: grep бинарника от него не зависит.
+  local bin="${XUI_BIN:-}" sh=""
+  if [[ -z "$bin" ]]; then
+    bin=$(systemctl show x-ui -p ExecStart --no-pager 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -1 || true)
+  fi
+  [[ -z "$bin" || ! -f "$bin" ]] && bin="/usr/local/x-ui/x-ui"
+  if [[ -f "$bin" ]] && grep -aqi lucx "$bin" 2>/dev/null; then
+    echo "lucx"; return 0
+  fi
+  for sh in "$(dirname "$bin")/x-ui.sh" "/usr/local/x-ui/x-ui.sh"; do
+    if [[ -f "$sh" ]] && grep -aqi lucx "$sh" 2>/dev/null; then
+      echo "lucx"; return 0
+    fi
+  done
   echo "3x-ui"
 }
 
