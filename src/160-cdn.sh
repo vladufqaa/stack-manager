@@ -272,9 +272,9 @@ stack_full_audit() {
         fi
       fi
     fi
-    if ! sqlite3 "$XUI_DB" "SELECT 1 FROM hosts WHERE inbound_id=$id LIMIT 1;" 2>/dev/null | grep -q 1 && [[ "$proto" == vless || "$proto" == naive || "$proto" == anytls || "$proto" == trusttunnel ]]; then
-      warn "#${id} $proto:$port — hosts отсутствует"; issues=$((issues+1))
-    fi
+    # hosts-строки в панели — генератор ссылок подписок, НЕ маршрутизация
+    # (она живёт в sni-router.conf + stream_settings). Модель пользователя:
+    # минимум hosts (одна строка) — отсутствие строки инбаунда не проблема.
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port,COALESCE(listen,''),enable,COALESCE(stream_settings,'') FROM inbounds ORDER BY id;" 2>/dev/null || true)
   echo "[ SNI / nginx ]"
   if command -v nginx >/dev/null 2>&1; then nginx -t >/dev/null 2>&1 && log "nginx -t: OK" || { err "nginx -t: FAIL"; issues=$((issues+1)); }; fi

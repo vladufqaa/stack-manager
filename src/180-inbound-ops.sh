@@ -296,16 +296,8 @@ add_inbound() {
            xhttp_cdn_setup "$id" "$proto" "$port" || true
          fi
         log "#$id ($proto/$port) → SNI: $existing ✓"
-        # hosts-починка: адрес = домен панели; SNI = цель reality (если это
-        # чужой реалити), иначе сам домен
-        local hsni="${panel_domain:-$existing}"
-        if [[ "$proto" == "vless" ]]; then
-          local dhost=""
-          dhost=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-          dhost="${dhost%%:*}"
-          [[ -n "$dhost" && "$dhost" != "127.0.0.1" ]] && hsni="$dhost"
-        fi
-        hosts_upsert "$id" "${panel_domain:-$existing}" "$hsni"
+        # hosts-строку НЕ создаём: модель «минимум hosts» — строки нужны
+        # только генератору ссылок подписок, на маршрутизацию не влияют
       else
         warn "#$id ($proto/$port) → НЕ в SNI"
         askyn do_it "Настроить #$id сейчас?" "y"

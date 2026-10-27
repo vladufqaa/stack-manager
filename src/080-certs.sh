@@ -409,17 +409,10 @@ for iid, proto, setts_s, stream_s in rows:
     print(f"{iid}\x1f{proto}\x1f{dom}\x1f{json.dumps(st, ensure_ascii=False)}")
 PYROWS
   )
-  # hosts: страховка на случай выключенных триггеров — вернём из тени, если
-  # строка всё ещё отсутствует (мгновенный возврат делает sm_hosts_del);
-  # x-ui ещё остановлен — окно для правок; тень живёт даже при suspend
-  if [[ -n "$(sqlite3 "$XUI_DB" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts_shadow' LIMIT 1;" 2>/dev/null)" ]]; then
-    local hid haddr hsni
-    while IFS='|' read -r hid haddr hsni; do
-      [[ -z "$hid" || -z "$haddr" ]] && continue
-      hosts_upsert "$hid" "$haddr" "$hsni"
-      log "  #$hid: hosts-строка восстановлена из тени → $haddr:443"
-    done < <(sqlite3 "$XUI_DB" "SELECT s.inbound_id, s.address, COALESCE(s.sni,'') FROM hosts_shadow s LEFT JOIN hosts h ON h.inbound_id=s.inbound_id AND h.port=s.port JOIN inbounds i ON i.id=s.inbound_id AND i.enable=1 AND i.port>0 WHERE s.port=443 AND h.id IS NULL;" 2>/dev/null || true)
-  fi
+  # hosts из тени НЕ восстанавливаем: строки hosts — генератор ссылок подписок
+  # и на маршрутизацию не влияют. Модель пользователя — «минимум hosts»:
+  # вручную удалённые строки не воскресаем. Защита БД/триггеры выведены
+  # из архитектуры — эта страховка больше не нужна.
   if [[ $cnt -gt 0 ]]; then
     systemctl start x-ui 2>/dev/null || true
     sleep 3

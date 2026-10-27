@@ -3756,17 +3756,10 @@ for iid, proto, setts_s, stream_s in rows:
     print(f"{iid}\x1f{proto}\x1f{dom}\x1f{json.dumps(st, ensure_ascii=False)}")
 PYROWS
   )
-  # hosts: страховка на случай выключенных триггеров — вернём из тени, если
-  # строка всё ещё отсутствует (мгновенный возврат делает sm_hosts_del);
-  # x-ui ещё остановлен — окно для правок; тень живёт даже при suspend
-  if [[ -n "$(sqlite3 "$XUI_DB" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosts_shadow' LIMIT 1;" 2>/dev/null)" ]]; then
-    local hid haddr hsni
-    while IFS='|' read -r hid haddr hsni; do
-      [[ -z "$hid" || -z "$haddr" ]] && continue
-      hosts_upsert "$hid" "$haddr" "$hsni"
-      log "  #$hid: hosts-строка восстановлена из тени → $haddr:443"
-    done < <(sqlite3 "$XUI_DB" "SELECT s.inbound_id, s.address, COALESCE(s.sni,'') FROM hosts_shadow s LEFT JOIN hosts h ON h.inbound_id=s.inbound_id AND h.port=s.port JOIN inbounds i ON i.id=s.inbound_id AND i.enable=1 AND i.port>0 WHERE s.port=443 AND h.id IS NULL;" 2>/dev/null || true)
-  fi
+  # hosts из тени НЕ восстанавливаем: строки hosts — генератор ссылок подписок
+  # и на маршрутизацию не влияют. Модель пользователя — «минимум hosts»:
+  # вручную удалённые строки не воскресаем. Защита БД/триггеры выведены
+  # из архитектуры — эта страховка больше не нужна.
   if [[ $cnt -gt 0 ]]; then
     systemctl start x-ui 2>/dev/null || true
     sleep 3
@@ -7154,9 +7147,9 @@ stack_full_audit() {
         fi
       fi
     fi
-    if ! sqlite3 "$XUI_DB" "SELECT 1 FROM hosts WHERE inbound_id=$id LIMIT 1;" 2>/dev/null | grep -q 1 && [[ "$proto" == vless || "$proto" == naive || "$proto" == anytls || "$proto" == trusttunnel ]]; then
-      warn "#${id} $proto:$port — hosts отсутствует"; issues=$((issues+1))
-    fi
+    # hosts-строки в панели — генератор ссылок подписок, НЕ маршрутизация
+    # (она живёт в sni-router.conf + stream_settings). Модель пользователя:
+    # минимум hosts (одна строка) — отсутствие строки инбаунда не проблема.
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port,COALESCE(listen,''),enable,COALESCE(stream_settings,'') FROM inbounds ORDER BY id;" 2>/dev/null || true)
   echo "[ SNI / nginx ]"
   if command -v nginx >/dev/null 2>&1; then nginx -t >/dev/null 2>&1 && log "nginx -t: OK" || { err "nginx -t: FAIL"; issues=$((issues+1)); }; fi
@@ -9537,16 +9530,8 @@ add_inbound() {
            xhttp_cdn_setup "$id" "$proto" "$port" || true
          fi
         log "#$id ($proto/$port) → SNI: $existing ✓"
-        # hosts-починка: адрес = домен панели; SNI = цель reality (если это
-        # чужой реалити), иначе сам домен
-        local hsni="${panel_domain:-$existing}"
-        if [[ "$proto" == "vless" ]]; then
-          local dhost=""
-          dhost=$(sqlite3 "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-          dhost="${dhost%%:*}"
-          [[ -n "$dhost" && "$dhost" != "127.0.0.1" ]] && hsni="$dhost"
-        fi
-        hosts_upsert "$id" "${panel_domain:-$existing}" "$hsni"
+        # hosts-строку НЕ создаём: модель «минимум hosts» — строки нужны
+        # только генератору ссылок подписок, на маршрутизацию не влияют
       else
         warn "#$id ($proto/$port) → НЕ в SNI"
         askyn do_it "Настроить #$id сейчас?" "y"
