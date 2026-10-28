@@ -198,41 +198,10 @@ awg_status() {
     echo "  #$id  UDP/$port  AWG v$ver  $addr"
     n=$((n+1))
   done < <(awg_inbounds_list)
-  (( n == 0 )) && echo "  (нет — создай через п.6.3 → «AMNEZIAWG»)"
+  (( n == 0 )) && echo "  (нет — создай через раздел 1 → 2, мастер инбаундов: «AMNEZIAWG 3.1/2.0»)"
   echo
   echo -e "${B}Kernel-интерфейсы (awg show):${N}"
   command -v awg >/dev/null 2>&1 && awg show 2>/dev/null | sed -n '1,80p' || warn "  awg не найден"
   return 0
 }
 
-awg_menu() {
-  line; echo -e "${B}   AMNEZIAWG (LUCX SIDECAR)${N}"; line
-  echo "  1) Создать инбаунд AWG 3.1 (Premium-профиль)"
-  echo "  2) Создать инбаунд AWG 2.0 (Premium-профиль)"
-  echo "  3) Статус (инбаунды + интерфейсы)"
-  echo "  0) Назад"
-  local m=""
-  ask m "Выбор" "0" '^[0-9]$'
-  case "$m" in
-    1|2)
-      local ver="31"; [[ "$m" == "2" ]] && ver="20"
-      local port; port=$(awg_port_next)
-      [[ -z "$port" ]] && { err "Не нашёл свободный UDP-порт"; return 1; }
-      local name="AMNEZIAWG $([[ "$ver" == 31 ]] && echo 3.1 || echo 2.0) (UDP, Premium)"
-      local transport="awg$ver"
-      local proto="awg" security="-" flow="-" net="udp" sni_domain="" vk=""
-      local remark; remark=$(inbound_remark_next "$proto" "$transport" "$security")
-      log "Создаю: $name (port=$port)"
-      local new_id
-      new_id=$(create_inbound_db "$proto" "$transport" "$security" "$flow" "$port" "$remark" "$net" "$sni_domain" "$vk") || return 1
-      [[ -z "$new_id" ]] && return 1
-      ufwd_allow_udp "$port"
-      systemctl restart x-ui >/dev/null 2>&1 || true
-      sleep 3
-      log "  → id=$new_id (UDP/$port). Интерфейс поднимет панель (awg$ver-профиль)."
-      log "  Клиенты: панель → инбаунд #$new_id → «Сгенерировать» (QR/конфиг)."
-      ;;
-    3) awg_status ;;
-  esac
-  return 0
-}
