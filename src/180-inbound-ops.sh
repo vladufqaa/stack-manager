@@ -142,22 +142,9 @@ fix_inbound() {
    # XHTTP TLS остаётся TLS passthrough через SNI в Xray.
    # HTTP-frontend и decoy для этого режима не создаются.
 
-   # hosts (подписки): address=домен панели, sni=домен инбаунда
-  local has_hosts cols remark fields vals
-  has_hosts=$(sqlite3 "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
-  if [[ -n "$has_hosts" ]]; then
-    cols=$(sqlite3 "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ' || true)
-    remark=$(proto_remark "$proto" "$stream")
-    sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
-    fields="inbound_id,address,port"; vals="$id,'$panel_domain',443"
-    grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'$remark'"; }
-    # SNI («безопасность») не заполняем — панель на заполненное поле ругается
-    grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",''"; }
-    grep -qw fingerprint <<<"$cols" && { fields+=",fingerprint"; vals+=",'firefox'"; }
-    grep -qw is_disabled <<<"$cols" && { fields+=",is_disabled"; vals+=",0"; }
-    grep -qw enable      <<<"$cols" && { fields+=",enable";      vals+=",1"; }
-    sqlite3 "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null || true
-  fi
+   # hosts (подписки): строка в общей группе «один хост» (адрес=домен панели).
+   # hosts_upsert сам определяет группу/SNI (чужой reality) и идемпотентен.
+  hosts_upsert "$id" "$panel_domain"
 
   # --- каноническая перезапись stream_settings ---
   local new_stream=""

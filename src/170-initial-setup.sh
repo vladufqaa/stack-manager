@@ -762,8 +762,6 @@ EOF
   has_hosts=$(sqlite3 "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
   if [[ -n "$has_hosts" ]]; then
     cdn_profiles_load   # CDN-инбаунды исключаются из стандартной перезаписи hosts
-    local cols=""
-    cols=$(sqlite3 "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ' || true)
     # SNI не занят инбаундом (не скрываем за 443) — hosts-запись («SNI включён») не нужна
     for id in "${INB_IDS[@]}"; do
       [[ "${HIDE[$id]}" == true ]] && continue
@@ -777,18 +775,8 @@ EOF
       # CDN-инбаунд: hosts ведёт hosts_cdn_upsert (адрес/SNI = CDN-домен,
       # security=tls) — стандартная запись панели затёрла бы его
       [[ " ${CDN_PROFILE_IDS[*]:-} " == *" $id "* ]] && continue
-      local dom="${DOMAIN[$id]}"
-      local remark
-      remark=$(proto_remark "${INB_PROTO[$id]}" "${INB_STREAM[$id]}")
-      sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
-      local fields="inbound_id,address,port" vals="$id,'$PANEL_DOMAIN',443"
-      grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'$remark'"; }
-      # SNI («безопасность») не заполняем — панель на заполненное поле ругается
-      grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",''"; }
-      grep -qw fingerprint <<<"$cols" && { fields+=",fingerprint"; vals+=",'firefox'"; }
-      grep -qw is_disabled <<<"$cols" && { fields+=",is_disabled"; vals+=",0"; }
-      grep -qw enable      <<<"$cols" && { fields+=",enable";      vals+=",1"; }
-      sqlite3 "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null || true
+      # общая группа «один хост»: адрес = домен панели, security=same
+      hosts_upsert "$id" "$PANEL_DOMAIN"
     done
   fi
 

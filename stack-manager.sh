@@ -6717,14 +6717,18 @@ tls_decoy_ensure_existing() {   # <id> <domain>
 }
 
 # Вставить/обновить запись hosts в панели для TCP-инбаунда (адрес=домен, порт 443).
+# МОДЕЛЬ «ОДИН ХОСТ»: одна запись панели — много входящих. В LucX это несколько
+# строк hosts с ОБЩИМ group_id (панель склеивает их в одну карточку). Строка
+# инбаунда кладётся в общую группу; если группы ещё нет — создаём
+# (group_id = 16 символов [a-z0-9], как генерирует панель).
 # Нужна ВСЕМ TCP-инбаундам (vless, naive, anytls, trusttunnel, tproxy…) — иначе
 # в подписках панели нет ссылок через 443. Таблицы может не быть — пропускаем.
-#   $1 = inbound_id, $2 = адрес (домен панели/IP), $3 = SNI (СТАРЫЙ смысл).
-# ПОЛЕ SNI («безопасность» в hosts) БОЛЬШЕ НЕ ЗАПОЛНЯЕМ — панель на него ругается.
-# Исключение: чужой reality (dest = внешняя цель ≠ 127.0.0.1) — там SNI=цель
-# обязателен, иначе подписочная ссылка теряет нужный serverName.
-# Учёт владения hosts: скрипт удаляет только свои строки, чужие строки
-# панели или пользователя не затрагиваются.
+#   $1 = inbound_id, $2 = адрес (домен панели/IP), $3 = SNI (необязателен:
+#        нужен ТОЛЬКО чужому reality — dest = внешняя цель ≠ 127.0.0.1; вычисляем
+#        сами, такая строка живёт ВНЕ общей группы). У своего reality/decoy и
+#        TLS поле SNI пустое — панель на заполненное ругается.
+# CDN-инбаунды hosts ведёт hosts_cdn_upsert (адрес/SNI = CDN, security=tls).
+# Учёт владения hosts: sm_hosts_owned — реестр строк, созданных скриптом.
 hosts_ownership_ensure() {
   [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 1
   sqlite3 -cmd ".timeout 3000" "$XUI_DB" "CREATE TABLE IF NOT EXISTS sm_hosts_owned (inbound_id INTEGER NOT NULL, port INTEGER NOT NULL, address TEXT NOT NULL, sni TEXT NOT NULL DEFAULT '', PRIMARY KEY(inbound_id,port,address,sni));" 2>/dev/null
@@ -6734,41 +6738,111 @@ hosts_owned_delete() {
   hosts_ownership_ensure || return 0
   sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=$port AND EXISTS (SELECT 1 FROM sm_hosts_owned o WHERE o.inbound_id=hosts.inbound_id AND o.port=hosts.port AND o.address=COALESCE(hosts.address,'') AND o.sni=COALESCE(hosts.sni,'')); DELETE FROM sm_hosts_owned WHERE inbound_id=$id AND port=$port;" 2>/dev/null || true
 }
+hosts_group_pick() {   # <address> → group_id самой большой группы-хоста | ''
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
+  local _d; _d=$(printf '%s' "$1" | sed "s/'/''/g")
+  sqlite3 -cmd ".timeout 3000" -noheader "$XUI_DB" \
+    "SELECT COALESCE(group_id,'') FROM hosts WHERE port=443 AND COALESCE(group_id,'')<>'' AND COALESCE(security,'same')='same' AND address='$_d' AND COALESCE(is_disabled,0)=0 GROUP BY group_id ORDER BY COUNT(*) DESC, MIN(id) ASC LIMIT 1;" 2>/dev/null | head -1 || true
+}
+
 hosts_upsert() {   # <inbound_id> <address> [sni]
   [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
   local id="$1" dom="$2" sni="${3:-}"
   [[ -z "$id" || -z "$dom" || "$dom" == "null" ]] && return 0
-  if [[ -n "$sni" ]]; then
-    local _dest=""
-    _dest=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-            "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$id;" 2>/dev/null | tr -d '[:space:]') || true
-    if [[ -z "$_dest" || "$_dest" == 127.0.0.1:* ]]; then
-      sni=""   # своё reality (decoy) или не-reality — поле SNI оставляем пустым
-    fi
-    # чужой reality: sni = переданная цель — оставляем как есть
-  fi
   local has_hosts
   has_hosts=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
   [[ -z "$has_hosts" ]] && return 0
+  # Чужой reality: SNI = домен цели обязателен, иначе подписка теряет serverName.
+  # Определяем по dest независимо от того, передали ли третий аргумент.
+  local _dest=""
+  _dest=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+          "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.dest'),'') FROM inbounds WHERE id=$id;" 2>/dev/null | tr -d '[:space:]') || true
+  if [[ -n "$_dest" && "$_dest" != 127.0.0.1:* ]]; then
+    sni="${sni:-${_dest%%:*}}"
+  else
+    sni=""   # своё reality (decoy) или не-reality — SNI оставляем пустым
+  fi
   local cols
   cols=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ')
+  db_protect_suspend   # триггеры защиты БД (если включены): пишем осознанно
   hosts_ownership_ensure
+  local _dqm; _dqm=$(printf '%s' "$dom" | sed "s/'/''/g")
+  local _sqm; _sqm=$(printf '%s' "$sni" | sed "s/'/''/g")
+  # Группа-хост только для строк без собственного SNI (чужой reality — вне)
+  local gid=""
+  if [[ -z "$sni" ]]; then
+    gid=$(hosts_group_pick "$dom")
+    if [[ -z "$gid" ]]; then
+      gid=$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 16)
+      [[ -z "$gid" ]] && gid="grp$(date +%s)"
+    fi
+  fi
+  local _gqm; _gqm=$(printf '%s' "$gid" | sed "s/'/''/g")
+  # Идемпотентность: строка уже в нужном виде (группа/адрес/SNI/same) — не трогаем
+  local cur
+  cur=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+    "SELECT COUNT(*) FROM hosts WHERE inbound_id=$id AND port=443 AND address='$_dqm' AND COALESCE(sni,'')='$_sqm' AND COALESCE(security,'same')='same' AND COALESCE(group_id,'')='$_gqm' AND COALESCE(is_disabled,0)=0;" 2>/dev/null || echo 0)
+  if [[ "$cur" =~ ^[0-9]+$ ]] && (( cur >= 1 )); then
+    log "  hosts: #$id → $dom:443 ✓ (группа ${gid:-своя}, уже на месте)"
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT OR REPLACE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES($id,443,'$_dqm','$_sqm');" 2>/dev/null || true
+    return 0
+  fi
   local remark
   remark=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT remark FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+  # В общей группе remark единый (имя «хоста», напр. «443») — наследуем от группы
+  if [[ -n "$gid" ]]; then
+    local _gremark
+    _gremark=$(sqlite3 -cmd ".timeout 3000" -noheader "$XUI_DB" "SELECT COALESCE(remark,'') FROM hosts WHERE group_id='$_gqm' AND COALESCE(remark,'')<>'' ORDER BY id LIMIT 1;" 2>/dev/null | head -1)
+    [[ -n "$_gremark" ]] && remark="$_gremark"
+  fi
   panel_journal_capture_row hosts "$id"   # снимок строки для отката (п.2/п.3)
   hosts_owned_delete "$id" 443
-  local fields="inbound_id,address,port" vals="$id,'$dom',443"
-  grep -qw remark       <<<"$cols" && { fields+=",remark";       vals+=",'$(printf '%s' "$remark" | sed "s/'/''/g")'"; }
-  grep -qw sni          <<<"$cols" && { fields+=",sni";          vals+=",'$sni'"; }
-  grep -qw fingerprint  <<<"$cols" && { fields+=",fingerprint";  vals+=",'firefox'"; }
-  grep -qw is_disabled  <<<"$cols" && { fields+=",is_disabled";  vals+=",0"; }
-  grep -qw enable       <<<"$cols" && { fields+=",enable";       vals+=",1"; }
+  # Ровно одна строка на инбаунд: прежние (в т.ч. вне группы) заменяем
+  sqlite3 -cmd ".timeout 3000" "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
+  local fields="inbound_id,address,port" vals="$id,'$_dqm',443"
+  grep -qw group_id    <<<"$cols" && [[ -n "$gid" ]] && { fields+=",group_id";    vals+=",'$_gqm'"; }
+  grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'$(printf '%s' "$remark" | sed "s/'/''/g")'"; }
+  grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",'$_sqm'"; }
+  grep -qw security    <<<"$cols" && { fields+=",security";    vals+=",'same'"; }
+  grep -qw fingerprint <<<"$cols" && { fields+=",fingerprint"; vals+=",'firefox'"; }
+  grep -qw alpn        <<<"$cols" && { fields+=",alpn";        vals+=",'[]'"; }
+  grep -qw sort_order  <<<"$cols" && { fields+=",sort_order";  vals+=",0"; }
+  grep -qw is_disabled <<<"$cols" && { fields+=",is_disabled"; vals+=",0"; }
   if sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null; then
-    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT OR REPLACE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES($id,443,'$(printf '%s' "$dom" | sed "s/'/''/g")','$(printf '%s' "$sni" | sed "s/'/''/g")');" 2>/dev/null || true
-    log "  hosts: #$id → $dom:443 ✓"
+    sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT OR REPLACE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES($id,443,'$_dqm','$_sqm');" 2>/dev/null || true
+    log "  hosts: #$id → $dom:443 ✓${gid:+ (группа $gid)}${sni:+, SNI=$sni (чужой reality)}"
   else
     warn "  hosts: вставка для #$id не прошла — проверь схему таблицы hosts"
   fi
+  return 0
+}
+
+# Починка hosts (п.6.1): каждый включённый TCP-инбаунд, КРОМЕ CDN-профилей
+# (их ведёт hosts_cdn_upsert через cdn_repair), UDP (подписка без hosts) и
+# tproxy (его hosts ведёт setup_tproxy_web), получает строку в общей группе
+# «один хост» с адресом = домен панели. Нет домена панели — пропуск с warn.
+hosts_repair_stack() {
+  [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]] && return 0
+  local has_hosts
+  has_hosts=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
+  [[ -z "$has_hosts" ]] && return 0
+  local pd="${PANEL_DOMAIN:-}"
+  [[ -z "$pd" ]] && pd=$(xui_get subDomain 2>/dev/null || true)
+  if [[ -z "$pd" ]]; then
+    warn "  hosts: домен панели неизвестен — hosts-записи не проверял"
+    return 0
+  fi
+  cdn_profiles_load || true
+  local id proto n=0
+  while IFS='|' read -r id proto; do
+    [[ -z "$id" || -z "$proto" ]] && continue
+    is_udp_proto "$proto" && continue                            # UDP/hysteria
+    [[ "$proto" == "tproxy" ]] && continue                       # tg web proxy
+    [[ " ${CDN_PROFILE_IDS[*]:-} " == *" $id "* ]] && continue   # CDN — отдельно
+    hosts_upsert "$id" "$pd" || true
+    n=$((n+1))
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
+  (( n > 0 )) && log "  hosts: проверено инбаундов: $n (общая группа «один хост», CDN исключён)"
   return 0
 }
 
@@ -7352,6 +7426,10 @@ stack_check_fix() {
     log "  жду сходимости всех сокетов (до 90 с, 2 стабильных прохода)…"
     stack_wait_ports 90 || warn "  часть сокетов не поднялась за 90 с — см. контрольный аудит"
   fi
+  # 5c) hosts (кроме CDN): общая группа «один хост» — строка есть у каждого
+  #     TCP-инбаунда; отсутствующие/оторванные от группы пересоздаются.
+  #     CDN-строки не трогаем — их уже починил cdn_repair (шаг 3).
+  hosts_repair_stack || true
   # 6) Битый nginx-конфиг не чиним вслепую
   if ! nginx -t >/dev/null 2>&1; then
     err "  nginx -t: FAIL — конфиг битый, правится вручную (nginx -T покажет место)"
@@ -8922,8 +9000,6 @@ EOF
   has_hosts=$(sqlite3 "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
   if [[ -n "$has_hosts" ]]; then
     cdn_profiles_load   # CDN-инбаунды исключаются из стандартной перезаписи hosts
-    local cols=""
-    cols=$(sqlite3 "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ' || true)
     # SNI не занят инбаундом (не скрываем за 443) — hosts-запись («SNI включён») не нужна
     for id in "${INB_IDS[@]}"; do
       [[ "${HIDE[$id]}" == true ]] && continue
@@ -8937,18 +9013,8 @@ EOF
       # CDN-инбаунд: hosts ведёт hosts_cdn_upsert (адрес/SNI = CDN-домен,
       # security=tls) — стандартная запись панели затёрла бы его
       [[ " ${CDN_PROFILE_IDS[*]:-} " == *" $id "* ]] && continue
-      local dom="${DOMAIN[$id]}"
-      local remark
-      remark=$(proto_remark "${INB_PROTO[$id]}" "${INB_STREAM[$id]}")
-      sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
-      local fields="inbound_id,address,port" vals="$id,'$PANEL_DOMAIN',443"
-      grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'$remark'"; }
-      # SNI («безопасность») не заполняем — панель на заполненное поле ругается
-      grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",''"; }
-      grep -qw fingerprint <<<"$cols" && { fields+=",fingerprint"; vals+=",'firefox'"; }
-      grep -qw is_disabled <<<"$cols" && { fields+=",is_disabled"; vals+=",0"; }
-      grep -qw enable      <<<"$cols" && { fields+=",enable";      vals+=",1"; }
-      sqlite3 "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null || true
+      # общая группа «один хост»: адрес = домен панели, security=same
+      hosts_upsert "$id" "$PANEL_DOMAIN"
     done
   fi
 
@@ -9376,22 +9442,9 @@ fix_inbound() {
    # XHTTP TLS остаётся TLS passthrough через SNI в Xray.
    # HTTP-frontend и decoy для этого режима не создаются.
 
-   # hosts (подписки): address=домен панели, sni=домен инбаунда
-  local has_hosts cols remark fields vals
-  has_hosts=$(sqlite3 "$XUI_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='hosts';" 2>/dev/null || true)
-  if [[ -n "$has_hosts" ]]; then
-    cols=$(sqlite3 "$XUI_DB" "PRAGMA table_info(hosts);" 2>/dev/null | awk -F'|' '{print $2}' | tr '\n' ' ' || true)
-    remark=$(proto_remark "$proto" "$stream")
-    sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$id AND port=443;" 2>/dev/null || true
-    fields="inbound_id,address,port"; vals="$id,'$panel_domain',443"
-    grep -qw remark      <<<"$cols" && { fields+=",remark";      vals+=",'$remark'"; }
-    # SNI («безопасность») не заполняем — панель на заполненное поле ругается
-    grep -qw sni         <<<"$cols" && { fields+=",sni";         vals+=",''"; }
-    grep -qw fingerprint <<<"$cols" && { fields+=",fingerprint"; vals+=",'firefox'"; }
-    grep -qw is_disabled <<<"$cols" && { fields+=",is_disabled"; vals+=",0"; }
-    grep -qw enable      <<<"$cols" && { fields+=",enable";      vals+=",1"; }
-    sqlite3 "$XUI_DB" "INSERT INTO hosts ($fields) VALUES ($vals);" 2>/dev/null || true
-  fi
+   # hosts (подписки): строка в общей группе «один хост» (адрес=домен панели).
+   # hosts_upsert сам определяет группу/SNI (чужой reality) и идемпотентен.
+  hosts_upsert "$id" "$panel_domain"
 
   # --- каноническая перезапись stream_settings ---
   local new_stream=""
