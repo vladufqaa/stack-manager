@@ -253,18 +253,26 @@ ask_panel_creds() {
     _bp=$(xui_get webBasePath); _sp=$(xui_get subPath)
     if [[ -n "$_wp" && -n "$_bp" && -n "$_sp" && -n "$_ws" ]]; then
       U_PANEL_PASS="${U_PANEL_PASS:-}"   # пароль не спрашиваем и не меняем
-      U_PANEL_PORT="$_wp"; U_PANEL_PATH="$_bp"
-      U_SUB_PORT="$_ws";   U_SUB_PATH="$_sp"
-      log "Панель уже установлена — беру её настройки без изменений:"
-      log "  панель   : $_wp $_bp"
-      log "  подписки : $_ws $_sp"
+      # Если креды/порты уже собраны в этой сессии (спросили ДО установки —
+      # единый путь первого запуска) — сохраняем их; иначе берём фактические
+      # значения установленной панели (повторный п.1 на живом стеке).
+      if [[ -n "${U_PANEL_PORT}${U_PANEL_PATH}${U_SUB_PORT}${U_SUB_PATH}" ]]; then
+        log "Панель установлена — порты/пути из анкеты этой сессии сохраняю:"
+        log "  панель   : $U_PANEL_PORT $U_PANEL_PATH"
+        log "  подписки : $U_SUB_PORT $U_SUB_PATH"
+      else
+        U_PANEL_PORT="$_wp"; U_PANEL_PATH="$_bp"
+        U_SUB_PORT="$_ws";   U_SUB_PATH="$_sp"
+        log "Панель уже установлена — беру её настройки без изменений:"
+        log "  панель   : $_wp $_bp"
+        log "  подписки : $_ws $_sp"
+      fi
       return 0
     fi
   fi
-  # свежая панель (или п.17 удалил): обычный путь — вопросы
-  if [[ -n "${U_PANEL_PASS:-}" && -n "$XUI_DB" && -f "$XUI_DB" ]]; then
-    :
-  else
+  # свежая панель (или п.17 удалил): обычный путь — вопросы.
+  # Пароль уже задан (собран раньше в этой сессии) → не перегенерируем.
+  if [[ -z "${U_PANEL_PASS:-}" ]]; then
     U_PANEL_USER="${U_PANEL_USER:-admin}"
     U_PANEL_PASS=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
     if [[ -t 0 ]]; then
