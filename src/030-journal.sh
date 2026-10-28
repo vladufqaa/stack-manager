@@ -290,6 +290,11 @@ inbound_remark_base() {
     qwdtt:*)           label="QWDT" ;;
     csqtt:*)           label="CSQTT" ;;
     tproxy:*)          label="TG Web Proxy" ;;
+    # AWG: версия берём из transport (awg31/awg20) — имя инбаунда обязано
+    # показывать версию AmneziaWG, а не просто «Awg».
+    awg:awg31:*)       label="AmneziaWG 3.1" ;;
+    awg:awg20:*)       label="AmneziaWG 2.0" ;;
+    awg:*)             label="AmneziaWG" ;;
     *)                 label="${proto^}" ;;
   esac
   printf '%s' "$label"
