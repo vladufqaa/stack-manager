@@ -2825,7 +2825,7 @@ create_inbounds_menu() {
           # AmneziaWG (LucX sidecar): панель сама напишет /etc/amnezia/amneziawg/
           # awg<id>.conf и поднимет kernel-интерфейс при рестарте x-ui.
           log "  → id=$new_id (UDP $port, AWG $([[ "$transport" == awg31 ]] && echo 3.1 || echo 2.0), Premium-профиль)"
-          ufwd_allow_udp "$port"
+          fw_allow "$port" udp "AmneziaWG awg${new_id}"
           systemctl restart x-ui >/dev/null 2>&1 || true
           sleep 3
           if ip link show "awg${new_id}" >/dev/null 2>&1; then
