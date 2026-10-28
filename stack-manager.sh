@@ -2248,8 +2248,14 @@ install_lucx_panel() {
       ask lucx_pass "Пароль панели admin (Enter — случайный)" "$lucx_pass" '^.{6,}$'
     fi
   fi
-  lucx_port=$(make_port)
-  lucx_wbp=$(gen_random_string 12)
+  # Порт/путь установщику: собранные ранее в этой сессии (ask_panel_creds ДО
+  # установки — единый путь первого запуска), иначе случайные. Без этого
+  # установщик ставит панель на свой случайный порт/путь, а собранные значения
+  # «догоняют» только в самом конце (initial_setup) — панель живёт пол-установки
+  # не на том адресе. Установщик LucX ждёт путь БЕЗ слэшей (U_PANEL_PATH = /путь/).
+  lucx_port="${U_PANEL_PORT:-$(make_port)}"
+  lucx_wbp="${U_PANEL_PATH:-/$(gen_random_string 12)/}"
+  lucx_wbp="${lucx_wbp#/}"; lucx_wbp="${lucx_wbp%/}"
   log "Запуск установщика LucX UI (XUI_NONINTERACTIVE=1 + XUI_SSL_MODE=none — без вопросов и без SSL)..."
   XUI_NONINTERACTIVE=1 XUI_SSL_MODE=none XUI_DB_TYPE=sqlite \
     XUI_USERNAME="$lucx_user" XUI_PASSWORD="$lucx_pass" \
@@ -13102,7 +13108,9 @@ ask_panel_creds() {
     local _wp _ws _bp _sp
     _wp=$(xui_get webPort);     _ws=$(xui_get subPort)
     _bp=$(xui_get webBasePath); _sp=$(xui_get subPath)
-    if [[ -n "$_wp" && -n "$_bp" && -n "$_sp" && -n "$_ws" ]]; then
+    # Существенные — только порт/путь ПАНЕЛИ. Подписки у свежего LucX пустые
+    # (установщик их не задаёт) — это не повод уходить в переспрашивание.
+    if [[ -n "$_wp" && -n "$_bp" ]]; then
       U_PANEL_PASS="${U_PANEL_PASS:-}"   # пароль не спрашиваем и не меняем
       # Если креды/порты уже собраны в этой сессии (спросили ДО установки —
       # единый путь первого запуска) — сохраняем их; иначе берём фактические
@@ -13114,9 +13122,14 @@ ask_panel_creds() {
       else
         U_PANEL_PORT="$_wp"; U_PANEL_PATH="$_bp"
         U_SUB_PORT="$_ws";   U_SUB_PATH="$_sp"
+        # Свежий LucX: подписочных настроек нет — генерируем случайные (та же
+        # семантика «Enter — случайный»), иначе initial_setup получит пустые
+        # SUB_PORT/SUB_PATH и запишет пустоту в настройки панели.
+        [[ -z "$U_SUB_PORT" ]] && U_SUB_PORT=$(make_port)
+        [[ -z "$U_SUB_PATH" ]] && U_SUB_PATH="/$(gen_random_string 10)/"
         log "Панель уже установлена — беру её настройки без изменений:"
         log "  панель   : $_wp $_bp"
-        log "  подписки : $_ws $_sp"
+        log "  подписки : $U_SUB_PORT $U_SUB_PATH"
       fi
       return 0
     fi
@@ -13131,11 +13144,19 @@ ask_panel_creds() {
       ask U_PANEL_PASS "Пароль панели (Enter — случайный)" "$U_PANEL_PASS" '^.{6,}$'
     fi
   fi
-  U_PANEL_PORT=""; U_SUB_PORT=""; U_PANEL_PATH=""; U_SUB_PATH=""
-  ask U_PANEL_PORT "Порт панели (Enter — случайный)"       "" '^[0-9]*$'
-  ask U_PANEL_PATH "Путь панели (Enter — случайный)"       "/$(gen_random_string 12)/" '^[a-zA-Z0-9/_-]*$'
-  ask U_SUB_PORT  "Порт подписок (Enter — случайный)"     "" '^[0-9]*$'
-  ask U_SUB_PATH  "Путь подписок (Enter — случайный)"     "/$(gen_random_string 10)/" '^[a-zA-Z0-9/_-]*$'
+  # Уже собраны в этой сессии (первый ask_panel_creds до установки панели —
+  # единый путь первого запуска) → второй раз НЕ спрашиваем и НЕ чистим.
+  if [[ -n "${U_PANEL_PORT}${U_PANEL_PATH}${U_SUB_PORT}${U_SUB_PATH}" ]]; then
+    log "Порты/пути уже собраны в этой сессии — повторно не спрашиваю:"
+    log "  панель   : ${U_PANEL_PORT:-случайный} ${U_PANEL_PATH:-случайный}"
+    log "  подписки : ${U_SUB_PORT:-случайный} ${U_SUB_PATH:-случайный}"
+  else
+    U_PANEL_PORT=""; U_SUB_PORT=""; U_PANEL_PATH=""; U_SUB_PATH=""
+    ask U_PANEL_PORT "Порт панели (Enter — случайный)"       "" '^[0-9]*$'
+    ask U_PANEL_PATH "Путь панели (Enter — случайный)"       "/$(gen_random_string 12)/" '^[a-zA-Z0-9/_-]*$'
+    ask U_SUB_PORT  "Порт подписок (Enter — случайный)"     "" '^[0-9]*$'
+    ask U_SUB_PATH  "Путь подписок (Enter — случайный)"     "/$(gen_random_string 10)/" '^[a-zA-Z0-9/_-]*$'
+  fi
   [[ "$U_PANEL_PATH" != /* ]] && U_PANEL_PATH="/$U_PANEL_PATH"
   [[ "$U_PANEL_PATH" != */ ]] && U_PANEL_PATH="$U_PANEL_PATH/"
   [[ "$U_SUB_PATH"  != /* ]] && U_SUB_PATH="/$U_SUB_PATH"

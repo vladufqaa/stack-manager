@@ -326,8 +326,14 @@ install_lucx_panel() {
       ask lucx_pass "Пароль панели admin (Enter — случайный)" "$lucx_pass" '^.{6,}$'
     fi
   fi
-  lucx_port=$(make_port)
-  lucx_wbp=$(gen_random_string 12)
+  # Порт/путь установщику: собранные ранее в этой сессии (ask_panel_creds ДО
+  # установки — единый путь первого запуска), иначе случайные. Без этого
+  # установщик ставит панель на свой случайный порт/путь, а собранные значения
+  # «догоняют» только в самом конце (initial_setup) — панель живёт пол-установки
+  # не на том адресе. Установщик LucX ждёт путь БЕЗ слэшей (U_PANEL_PATH = /путь/).
+  lucx_port="${U_PANEL_PORT:-$(make_port)}"
+  lucx_wbp="${U_PANEL_PATH:-/$(gen_random_string 12)/}"
+  lucx_wbp="${lucx_wbp#/}"; lucx_wbp="${lucx_wbp%/}"
   log "Запуск установщика LucX UI (XUI_NONINTERACTIVE=1 + XUI_SSL_MODE=none — без вопросов и без SSL)..."
   XUI_NONINTERACTIVE=1 XUI_SSL_MODE=none XUI_DB_TYPE=sqlite \
     XUI_USERNAME="$lucx_user" XUI_PASSWORD="$lucx_pass" \
