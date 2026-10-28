@@ -283,7 +283,6 @@ RECOMMENDED_INBOUNDS=(
   "VLESS TCP REALITY|vless|tcp|reality|xtls-rprx-vision|tcp"
   "VLESS TCP TLS|vless|tcp|tls||tcp"
   "VLESS XHTTP (через CDN)|vless|xhttp|none||tcp"
-  "VLESS XHTTP TLS|vless|xhttp|tls||tcp"
   "VLESS XHTTP REALITY|vless|xhttp|reality||tcp"
   "NAIVE (TLS, за 443)|naive|naive|tls|-|tcp"
   "TRUSTTUNNEL (TLS, за 443)|trusttunnel|trusttunnel|tls|-|tcp"
@@ -291,8 +290,8 @@ RECOMMENDED_INBOUNDS=(
   "HYSTERIA2 (UDP)|hysteria|hysteria|tls|-|udp"
   "QWDTT (UDP 56000)|qwdtt|qwdtt|-|-|udp"
   "CSQTT (UDP 46000)|csqtt|csqtt|-|-|udp"
-  "AMNEZIAWG 3.1 (UDP, Premium)|awg|awg31|-|-|udp"
-  "AMNEZIAWG 2.0 (UDP, Premium)|awg|awg20|-|-|udp"
+  "AMNEZIAWG 3.1|awg|awg31|-|-|udp"
+  "AMNEZIAWG 2.0|awg|awg20|-|-|udp"
   "TG WEB-PROXY (443→11443)|tproxy|tproxy|-|-|tcp"
 )
 
@@ -8904,9 +8903,40 @@ initial_setup() {
 
     echo; echo -e "${Y}── #$id $proto на $port ──${N}"
     local h_hide=""
-    askyn h_hide "Скрыть за 443?" "y"
+    local _auto_ans=false
+    if [[ -t 0 ]]; then
+      askyn h_hide "Скрыть за 443?" "y"
+    else
+      # Не-TTY (автоподъём → initial_setup < ansf): НЕ читаем позиции анс-файла.
+      # Позиционный файл разъезжается с фактическими вопросами (мастер и здесь
+      # спрашивают разное: режим Reality, decoy) — линии сдвигаются, каскад
+      # «Авто-ответ не распознан» и вечный EOF-цикл на decoy-выборе. Мастер уже
+      # собрал ответы в A_DOM/REALITY_DECOY_TPL_BYID — берём их.
+      if [[ -n "${A_DOM[$id]:-}" ]]; then h_hide=true; else h_hide=false; fi
+      _auto_ans=true
+      log "  авто: скрыть=$h_hide${A_DOM[$id]:+ домен=${A_DOM[$id]}}"
+    fi
     HIDE[$id]="$h_hide"
     [[ "${HIDE[$id]}" == true ]] || continue
+
+    # Авто-ответ мастера: домен уже выбран → свой SNI (для Reality — режим 2),
+    # decoy-шаблон тоже из выбора мастера. Вопросы здесь не задаём вовсе.
+    if [[ "$_auto_ans" == true ]]; then
+      DOMAIN[$id]="${A_DOM[$id]}"
+      local _m_is_rel=false
+      grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"${INB_STREAM[$id]}" && _m_is_rel=true
+      if [[ "$_m_is_rel" == true ]]; then
+        REALITY_MODE["$id"]="2"
+        local _m_tpl="${REALITY_DECOY_TPL_BYID[$id]:-$(decoy_tpl_current "${A_DOM[$id]}")}"
+        DECOY_TPL[$id]="$_m_tpl"
+        decoy_tpl_store_set "${A_DOM[$id]}" "$_m_tpl" >/dev/null 2>&1 || true
+        TLS_PORT[$id]=$(decoy_port_for_id "$id")   # канонический порт decoy
+      else
+        DECOY_TPL[$id]=""
+        TLS_PORT[$id]=""
+      fi
+      continue
+    fi
 
     local def="svc-$id.example.com"
     local is_reality=false
@@ -15717,32 +15747,10 @@ auto_full_setup() {
       return 1
     fi
     echo "$EMAIL"                              # EMAIL
-                                                # PANEL_DOMAIN уже задан
-    # AdGuard/заглушка/порты: в не-TTY initial_setup вопросов НЕ задаёт —
-    # всё берётся из глобальных (заданы вопросами авто-подъёма выше), строк не пишем
-    local id idproto idport dom stream_s
-    while IFS='|' read -r id idproto idport stream_s; do
-      [[ -z "$id" ]] && continue
-      is_udp_proto "$idproto" && continue       # UDP — без вопросов в initial_setup
-      [[ "$idproto" == "tproxy" || "$idproto" == "naive" || "$idproto" == "anytls" || "$idproto" == "trusttunnel" || "$idproto" == "trust-tunnel" ]] && continue # sidecar/TG уже настроены своим SNI-механизмом
-      # уже привязан к SNI — initial_setup вопросов по нему не задаёт, строк не пишем
-      grep -Eq "^[[:space:]]*[^[:space:]]+[[:space:]]+inb_${id}_backend" "$SNI_CONF" 2>/dev/null && continue
-      # CDN-профиль назначен в мастере: xhttp_cdn_setup ответит сам (CDN_PRE_*),
-      # initial_setup вопросов по нему НЕ задаёт — строк в анкету не пишем
-      if [[ "${CDN_PRE_ANSWER:-}" == "true" && -n "${CDN_PRE_ORIGIN:-}" ]]; then
-        continue
-      fi
-      dom="${A_DOM[$id]:-}"
-      if [[ -z "$dom" ]]; then
-        echo "n"                                # домен не задан → не скрывать
-      else
-        echo "y"; echo "$dom"
-        if grep -qi '"security": *"reality"' <<<"$stream_s" || grep -qi '"network": *"xhttp"' <<<"$stream_s"; then
-          echo "${REALITY_DECOY_TPL_BYID[$id]:-corporate}"   # своя заглушка/страница
-        fi
-      fi
-    done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null)
-    INBOUND_CREATE_MODE=""
+    # Остальные ответы НЕ позиционные и сюда не пишем: initial_setup в не-TTY
+    # берёт их из глобальных мастера (A_DOM/REALITY_DECOY_TPL_BYID) и дефолтов.
+    # Раньше здесь писались строки «скрыть/домен/шаблон» по инбаундам — бюджет
+    # строк разъезжался с фактическими вопросами и рвал поток на EOF.
     # Завершающий Enter не даёт EOF превратить последний вопрос в цикл.
     echo ""
   } > "$ansf"

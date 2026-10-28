@@ -283,7 +283,6 @@ RECOMMENDED_INBOUNDS=(
   "VLESS TCP REALITY|vless|tcp|reality|xtls-rprx-vision|tcp"
   "VLESS TCP TLS|vless|tcp|tls||tcp"
   "VLESS XHTTP (через CDN)|vless|xhttp|none||tcp"
-  "VLESS XHTTP TLS|vless|xhttp|tls||tcp"
   "VLESS XHTTP REALITY|vless|xhttp|reality||tcp"
   "NAIVE (TLS, за 443)|naive|naive|tls|-|tcp"
   "TRUSTTUNNEL (TLS, за 443)|trusttunnel|trusttunnel|tls|-|tcp"
@@ -291,8 +290,8 @@ RECOMMENDED_INBOUNDS=(
   "HYSTERIA2 (UDP)|hysteria|hysteria|tls|-|udp"
   "QWDTT (UDP 56000)|qwdtt|qwdtt|-|-|udp"
   "CSQTT (UDP 46000)|csqtt|csqtt|-|-|udp"
-  "AMNEZIAWG 3.1 (UDP, Premium)|awg|awg31|-|-|udp"
-  "AMNEZIAWG 2.0 (UDP, Premium)|awg|awg20|-|-|udp"
+  "AMNEZIAWG 3.1|awg|awg31|-|-|udp"
+  "AMNEZIAWG 2.0|awg|awg20|-|-|udp"
   "TG WEB-PROXY (443→11443)|tproxy|tproxy|-|-|tcp"
 )
 

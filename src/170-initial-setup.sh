@@ -323,9 +323,40 @@ initial_setup() {
 
     echo; echo -e "${Y}── #$id $proto на $port ──${N}"
     local h_hide=""
-    askyn h_hide "Скрыть за 443?" "y"
+    local _auto_ans=false
+    if [[ -t 0 ]]; then
+      askyn h_hide "Скрыть за 443?" "y"
+    else
+      # Не-TTY (автоподъём → initial_setup < ansf): НЕ читаем позиции анс-файла.
+      # Позиционный файл разъезжается с фактическими вопросами (мастер и здесь
+      # спрашивают разное: режим Reality, decoy) — линии сдвигаются, каскад
+      # «Авто-ответ не распознан» и вечный EOF-цикл на decoy-выборе. Мастер уже
+      # собрал ответы в A_DOM/REALITY_DECOY_TPL_BYID — берём их.
+      if [[ -n "${A_DOM[$id]:-}" ]]; then h_hide=true; else h_hide=false; fi
+      _auto_ans=true
+      log "  авто: скрыть=$h_hide${A_DOM[$id]:+ домен=${A_DOM[$id]}}"
+    fi
     HIDE[$id]="$h_hide"
     [[ "${HIDE[$id]}" == true ]] || continue
+
+    # Авто-ответ мастера: домен уже выбран → свой SNI (для Reality — режим 2),
+    # decoy-шаблон тоже из выбора мастера. Вопросы здесь не задаём вовсе.
+    if [[ "$_auto_ans" == true ]]; then
+      DOMAIN[$id]="${A_DOM[$id]}"
+      local _m_is_rel=false
+      grep -qi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"${INB_STREAM[$id]}" && _m_is_rel=true
+      if [[ "$_m_is_rel" == true ]]; then
+        REALITY_MODE["$id"]="2"
+        local _m_tpl="${REALITY_DECOY_TPL_BYID[$id]:-$(decoy_tpl_current "${A_DOM[$id]}")}"
+        DECOY_TPL[$id]="$_m_tpl"
+        decoy_tpl_store_set "${A_DOM[$id]}" "$_m_tpl" >/dev/null 2>&1 || true
+        TLS_PORT[$id]=$(decoy_port_for_id "$id")   # канонический порт decoy
+      else
+        DECOY_TPL[$id]=""
+        TLS_PORT[$id]=""
+      fi
+      continue
+    fi
 
     local def="svc-$id.example.com"
     local is_reality=false

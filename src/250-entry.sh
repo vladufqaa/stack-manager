@@ -281,32 +281,10 @@ auto_full_setup() {
       return 1
     fi
     echo "$EMAIL"                              # EMAIL
-                                                # PANEL_DOMAIN уже задан
-    # AdGuard/заглушка/порты: в не-TTY initial_setup вопросов НЕ задаёт —
-    # всё берётся из глобальных (заданы вопросами авто-подъёма выше), строк не пишем
-    local id idproto idport dom stream_s
-    while IFS='|' read -r id idproto idport stream_s; do
-      [[ -z "$id" ]] && continue
-      is_udp_proto "$idproto" && continue       # UDP — без вопросов в initial_setup
-      [[ "$idproto" == "tproxy" || "$idproto" == "naive" || "$idproto" == "anytls" || "$idproto" == "trusttunnel" || "$idproto" == "trust-tunnel" ]] && continue # sidecar/TG уже настроены своим SNI-механизмом
-      # уже привязан к SNI — initial_setup вопросов по нему не задаёт, строк не пишем
-      grep -Eq "^[[:space:]]*[^[:space:]]+[[:space:]]+inb_${id}_backend" "$SNI_CONF" 2>/dev/null && continue
-      # CDN-профиль назначен в мастере: xhttp_cdn_setup ответит сам (CDN_PRE_*),
-      # initial_setup вопросов по нему НЕ задаёт — строк в анкету не пишем
-      if [[ "${CDN_PRE_ANSWER:-}" == "true" && -n "${CDN_PRE_ORIGIN:-}" ]]; then
-        continue
-      fi
-      dom="${A_DOM[$id]:-}"
-      if [[ -z "$dom" ]]; then
-        echo "n"                                # домен не задан → не скрывать
-      else
-        echo "y"; echo "$dom"
-        if grep -qi '"security": *"reality"' <<<"$stream_s" || grep -qi '"network": *"xhttp"' <<<"$stream_s"; then
-          echo "${REALITY_DECOY_TPL_BYID[$id]:-corporate}"   # своя заглушка/страница
-        fi
-      fi
-    done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null)
-    INBOUND_CREATE_MODE=""
+    # Остальные ответы НЕ позиционные и сюда не пишем: initial_setup в не-TTY
+    # берёт их из глобальных мастера (A_DOM/REALITY_DECOY_TPL_BYID) и дефолтов.
+    # Раньше здесь писались строки «скрыть/домен/шаблон» по инбаундам — бюджет
+    # строк разъезжался с фактическими вопросами и рвал поток на EOF.
     # Завершающий Enter не даёт EOF превратить последний вопрос в цикл.
     echo ""
   } > "$ansf"
