@@ -27,6 +27,18 @@ find_covering_cert() {
   return 1
 }
 
+# Свежий (>30 дн) установленный сертификат, покрывающий домен, — для пропуска
+# избыточных персональных выпусков при живом wildcard/SAN. Печатает hit
+# find_covering_cert ("<live-dir>|<wcbase>"); 1 — если ничего свежего нет.
+cert_fresh_cover() {
+  local d="$1" hit dir
+  hit=$(find_covering_cert "$d") || return 1
+  dir="${hit%%|*}"
+  openssl x509 -noout -checkend 2592000 -in "$dir/cert.pem" >/dev/null 2>&1 || return 1
+  printf '%s' "$hit"
+  return 0
+}
+
 # Печатает "fullchain privkey" для домена: wildcard (если покрывает) → персональный
 cert_paths() {
   local d="$1"

@@ -214,6 +214,34 @@ cert_issue_line() {
     fi
   fi
 
+  # Прикрытие wildcard/SAN: если ВСЕ домены линии уже покрыты одним живым
+  # (>30 дн) сертификатом — например wildcard'ом зоны — персональный выпуск
+  # избыточен (история 28.10: батч из старого реестра линий навыпускал
+  # персональные серты поверх wildcard). Пропускаем и восстанавливаем флаг.
+  if [[ "${_wc_fix:-false}" != true && "${_cf_extra:-false}" != true && ${#CERT_LINE_DOMAINS[@]} -gt 0 ]]; then
+    local _cover_hit="" _cover_cd _cover_ch
+    for _cover_cd in "${CERT_LINE_DOMAINS[@]}"; do
+      _cover_ch=$(cert_fresh_cover "$_cover_cd") || { _cover_hit=""; break; }
+      if [[ -z "$_cover_hit" ]]; then
+        _cover_hit="$_cover_ch"
+      elif [[ "$_cover_ch" != "$_cover_hit" ]]; then
+        _cover_hit=""; break   # домены покрыты РАЗНЫМИ сертами — прикрытием не считаем
+      fi
+    done
+    if [[ -n "$_cover_hit" ]]; then
+      local _cover_dir="${_cover_hit%%|*}" _cover_base="${_cover_hit#*|}"
+      if [[ "$_cover_dir" != "$ldir" ]]; then
+        log "Линия «$line»: домены уже покрыты сертификатом $(basename "$_cover_dir") — выпуск не нужен"
+        if [[ -n "$_cover_base" ]]; then
+          printf '%s' "$_cover_base" > "$WILDCARD_STATE" 2>/dev/null || true
+          WILDCARD_DOMAIN="$_cover_base"
+          log "  флаг wildcard восстановлен: *.$_cover_base"
+        fi
+        return 0
+      fi
+    fi
+  fi
+
   # Аргументы -d: CN первым
   local -a cargs=()
   cargs+=(-d "$cn")
