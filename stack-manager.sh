@@ -6648,13 +6648,38 @@ decoy_template_choose_impl() {
   echo >&2
   local __c=""
   while :; do
-    ask __c "$prompt" "$default" '^[0-9]+$|^[a-z:_/.-]+$' || { printf -v "$__result" '%s' "$default"; return 0; }
+    if ! ask __c "$prompt" "$default" '^[0-9]+$|^[a-z:_/.-]+$'; then
+      # EOF (анс-файл кончился): возвращаем дефолт, но если это не валидное
+      # имя шаблона и не custom:* — глобальный дефолтный шаблон, иначе ниже
+      # по потоку decoy применит несуществующий шаблон.
+      local __eof_default="$default"
+      if [[ "$__eof_default" != custom:* ]] && ! decoy_tpl_valid "$__eof_default"; then
+        __eof_default="$(decoy_default_tpl)"
+        warn "Дефолт «$default» не валиден — использую шаблон «$__eof_default»" >&2
+      fi
+      printf -v "$__result" '%s' "$__eof_default"
+      return 0
+    fi
     if [[ "$__c" =~ ^[0-9]+$ ]] && (( __c < 1 || __c > __custom_num )); then
       err "Выбор вне списка. Укажите номер от 1 до $__custom_num."
       continue
     fi
+    # Имя шаблона (decoy_tpl_current/дефолт при EOF — всегда ИМЯ, не номер):
+    # валидное имя из списка принимаем сразу, иначе ask() на EOF вернёт дефолт-
+    # имя, проверка ниже его отвергнет и цикл «EOF → имя → вне списка» станет
+    # бесконечным. Заодно чинится Enter на имени-по-умолчанию в интерактиве.
+    local __found=""
+    local __k
+    for __k in "${!NAMES[@]}"; do
+      [[ "${NAMES[$__k]}" == "$__c" ]] && { __found=1; break; }
+    done
+    if [[ -n "$__found" ]]; then
+      log "Выбран decoy-шаблон: $__c" >&2
+      printf -v "$__result" '%s' "$__c"
+      return 0
+    fi
     if [[ "$__c" =~ ^[a-z:_/.-]+$ ]] && [[ "$__c" != custom && "$__c" != custom:* ]]; then
-      err "Выбор вне списка. Укажите номер шаблона или custom."
+      err "Выбор вне списка. Укажите номер шаблона, его имя или custom."
       continue
     fi
     break
