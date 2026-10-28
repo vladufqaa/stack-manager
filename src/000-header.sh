@@ -291,6 +291,8 @@ RECOMMENDED_INBOUNDS=(
   "HYSTERIA2 (UDP)|hysteria|hysteria|tls|-|udp"
   "QWDTT (UDP 56000)|qwdtt|qwdtt|-|-|udp"
   "CSQTT (UDP 46000)|csqtt|csqtt|-|-|udp"
+  "AMNEZIAWG 3.1 (UDP, Premium)|awg|awg31|-|-|udp"
+  "AMNEZIAWG 2.0 (UDP, Premium)|awg|awg20|-|-|udp"
   "TG WEB-PROXY (443→11443)|tproxy|tproxy|-|-|tcp"
 )
 

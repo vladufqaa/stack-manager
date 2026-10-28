@@ -107,7 +107,9 @@ EOF
 EOF
 ) ;;
     awg|amneziawg|wireguard)
-      settings_json="{\"secretKey\":\"$(openssl rand -base64 32 | tr -d '/+=' | head -c 43)\",\"address\":[\"10.8.1.1/24\"],\"peers\":[{\"publicKey\":\"$(openssl rand -base64 32 | tr -d '/+=' | head -c 43)\",\"allowedIPs\":[\"0.0.0.0/0\"]}],\"mtu\":1280}" ;;
+      # LucX sidecar: settings генерирует awg_settings_json (версия в transport:
+      # awg31 → AmneziaWG 3.1, awg20 → 2.0; профиль обфускации Amnezia Premium)
+      settings_json=$(awg_settings_json "${transport#awg}" "$port") ;;
     *)
       settings_json="{\"clients\":[{\"id\":\"$uuid\",\"email\":\"user@$port\",\"enable\":true}]}" ;;
   esac
@@ -190,6 +192,10 @@ EOF
       # tunnel-протоколы LucX: БЕЗ network-блока (иначе xray падает "unknown transport")
       stream_json='{"security":"none"}'
       ;;
+    awg)
+      # kernel-инбаунд панели: stream_settings пустая строка (как у созданных в UI)
+      stream_json=''
+      ;;
     udp)
       stream_json='{"network":"udp","security":"none","udpSettings":{}}'
       ;;
@@ -202,11 +208,14 @@ EOF
   case "$proto" in
     qwdtt|csqtt|tproxy|hysteria)
       sniffing_json='{"enabled":true,"destOverride":["http","tls","quic","fakedns"],"metadataOnly":false,"routeOnly":false}' ;;
+    awg)
+      sniffing_json='' ;;   # kernel-инбаунд: без sniffing (как у созданных в UI)
   esac
   local listen
   case "$proto" in
     qwdtt|csqtt|hysteria) listen="" ;;          # порт живёт в settings.listenAddr
     tproxy)               listen="127.0.0.1" ;; # наружу только через nginx 443
+    awg)                  listen="" ;;          # порт живёт в settings (ListenPort конфига)
     *) [[ "$net" == "udp" ]] && listen="0.0.0.0" || listen="127.0.0.1" ;;
   esac
   local tag_name="inbound-$port"
@@ -214,6 +223,7 @@ EOF
     qwdtt) tag_name="inbound-qwdtt" ;;
     csqtt) tag_name="inbound-csqtt" ;;
     tproxy) tag_name="inbound-tproxy" ;;
+    awg)   tag_name="in-$port-tcp" ;;   # панель LucX именует теги AWG так
   esac
 
   # --- экранируем одинарные кавычки ---
@@ -298,7 +308,7 @@ EOF2
     umask 022
   fi
   case "$proto" in
-    qwdtt|csqtt|tproxy) ensure_shareonly_triggers ;;
+    qwdtt|csqtt|tproxy|awg) ensure_shareonly_triggers ;;
   esac
 
   echo "$new_id"
@@ -396,6 +406,7 @@ create_inbounds_menu() {
       tproxy) port=11443 ;;
       qwdtt)  port=56000; while port_in_use "$port"; do port=$((port+100)); done ;;
       csqtt)  port=46000; while port_in_use "$port"; do port=$((port+100)); done ;;
+      awg)    port=$(awg_port_next); [[ -z "$port" ]] && port=$(make_port) ;;
       *)      port=$(make_port) ;;
     esac
     local remark
@@ -526,6 +537,19 @@ create_inbounds_menu() {
         qwdtt|csqtt)
           log "  → id=$new_id (UDP $port). Клиенты добавляйте в панели: инбаунд → клиент (синк настроен)"
           ufwd_allow_udp 56000 56001 56003 46000
+          ;;
+        awg)
+          # AmneziaWG (LucX sidecar): панель сама напишет /etc/amnezia/amneziawg/
+          # awg<id>.conf и поднимет kernel-интерфейс при рестарте x-ui.
+          log "  → id=$new_id (UDP $port, AWG $([[ "$transport" == awg31 ]] && echo 3.1 || echo 2.0), Premium-профиль)"
+          ufwd_allow_udp "$port"
+          systemctl restart x-ui >/dev/null 2>&1 || true
+          sleep 3
+          if ip link show "awg${new_id}" >/dev/null 2>&1; then
+            log "  → интерфейс awg${new_id} поднят, клиенты: панель → инбаунд → «Сгенерировать»"
+          else
+            warn "  интерфейс awg${new_id} ещё не поднялся — смотри журнал панели (до 30 с)"
+          fi
           ;;
         hysteria)
           log "  → id=$new_id (UDP $port, SNI $sni_domain)"

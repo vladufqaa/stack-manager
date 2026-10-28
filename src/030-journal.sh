@@ -364,12 +364,12 @@ SET settings = json_set(
        THEN json_extract(settings, '$.clients')
        ELSE json('[]') END
 )
-WHERE protocol IN ('qwdtt','csqtt','tproxy');
+WHERE protocol IN ('qwdtt','csqtt','tproxy','awg');
 DROP TRIGGER IF EXISTS lucx_shareonly_clients_ins;
 DROP TRIGGER IF EXISTS lucx_shareonly_clients_del;
 CREATE TRIGGER lucx_shareonly_clients_ins
 AFTER INSERT ON client_inbounds
-WHEN EXISTS (SELECT 1 FROM inbounds WHERE id = NEW.inbound_id AND protocol IN ('qwdtt','csqtt','tproxy'))
+WHEN EXISTS (SELECT 1 FROM inbounds WHERE id = NEW.inbound_id AND protocol IN ('qwdtt','csqtt','tproxy','awg'))
 BEGIN
   UPDATE inbounds SET settings = json_insert(
     json_set(
@@ -398,7 +398,7 @@ BEGIN
 END;
 CREATE TRIGGER lucx_shareonly_clients_del
 AFTER DELETE ON client_inbounds
-WHEN EXISTS (SELECT 1 FROM inbounds WHERE id = OLD.inbound_id AND protocol IN ('qwdtt','csqtt','tproxy'))
+WHEN EXISTS (SELECT 1 FROM inbounds WHERE id = OLD.inbound_id AND protocol IN ('qwdtt','csqtt','tproxy','awg'))
 BEGIN
   UPDATE inbounds SET settings = json_set(
     settings,
