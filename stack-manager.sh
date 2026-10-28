@@ -3034,6 +3034,71 @@ awg_inbounds_list() {
     "SELECT id, port, COALESCE(json_extract(settings,'\$.awgVersion'),'?'), COALESCE(json_extract(settings,'\$.address'),'') FROM inbounds WHERE protocol='awg' AND enable=1 ORDER BY id;" 2>/dev/null || true
 }
 
+# __awg_ufw_has <порт> → 0, если правило UDP есть (и UFW активен); 1 — нет/выключен
+__awg_ufw_has() {
+  command -v ufw >/dev/null 2>&1 || return 1
+  ufw status 2>/dev/null | grep -q "Status: active" || return 1
+  ufw status 2>/dev/null | awk -v p="$1" \
+    '$0 ~ ("(^|[[:space:]])" p "/udp([[:space:]]|$)") || $0 ~ ("(^|[[:space:]])" p "([[:space:]]|$)") {found=1} END{exit !found}'
+}
+
+# Секция аудита для stack_full_audit (п.4). Число проблем — в $AWG_AUDIT_ISSUES.
+awg_audit() {
+  AWG_AUDIT_ISSUES=0
+  local row id port ver addr n=0 cfg ifc
+  while IFS='|' read -r id port ver addr; do
+    [[ -z "$id" ]] && continue
+    n=$((n+1))
+    cfg="нет"; [[ -f "/etc/amnezia/amneziawg/awg${id}.conf" ]] && cfg="да"
+    ifc="нет"; ip link show "awg${id}" >/dev/null 2>&1 && ifc="да"
+    local msg="  #$id AWG v$ver UDP/$port $addr — конфиг: $cfg, интерфейс: $ifc"
+    if [[ "$cfg" == "нет" || "$ifc" == "нет" ]]; then
+      warn "$msg"; AWG_AUDIT_ISSUES=$((AWG_AUDIT_ISSUES+1))
+    else
+      log "$msg"
+    fi
+    if __awg_ufw_has "$port"; then
+      log "  #$id: UFW UDP/$port — есть"
+    elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+      warn "  #$id: UFW UDP/$port — правила нет"; AWG_AUDIT_ISSUES=$((AWG_AUDIT_ISSUES+1))
+    fi   # UFW выключен — не замечание
+  done < <(awg_inbounds_list)
+  (( n == 0 )) && echo "  (AWG-инбаундов нет)"
+  return 0
+}
+
+# Починка AWG для п.6.1: отсутствующие UFW-правила + не поднятые интерфейсы.
+# Конфиги awg<id>.conf НЕ пишем — их генерирует панель; если интерфейсов нет,
+# рестарт x-ui заставляет панель пересоздать их из БД.
+awg_repair() {
+  local any=0 missing=0 id port ver addr
+  while IFS='|' read -r id port ver addr; do
+    [[ -z "$id" ]] && continue
+    any=$((any+1))
+    ip link show "awg${id}" >/dev/null 2>&1 || missing=$((missing+1))
+    if ! __awg_ufw_has "$port"; then
+      fw_allow "$port" udp "AmneziaWG awg${id}"
+      log "  AWG #$id: UDP/$port открыт в UFW"
+    fi
+  done < <(awg_inbounds_list)
+  (( any == 0 )) && return 0
+  if (( missing > 0 )); then
+    warn "  AWG: интерфейсов нет у $missing из $any — рестарт x-ui (панель поднимает их сама)"
+    systemctl restart x-ui >/dev/null 2>&1 || true
+    sleep 4
+    local still=0
+    while IFS='|' read -r id port ver addr; do
+      [[ -z "$id" ]] && continue
+      if ! ip link show "awg${id}" >/dev/null 2>&1; then
+        still=$((still+1))
+        warn "  AWG #$id: интерфейс awg${id} не поднялся — journalctl -u x-ui | tail -30"
+      fi
+    done < <(awg_inbounds_list)
+    (( still == 0 )) && log "  AWG: все интерфейсы подняты"
+  fi
+  return 0
+}
+
 # Статус AWG: инбаунды панели + живые kernel-интерфейсы
 awg_status() {
   line; echo -e "${B}   AMNEZIAWG: СТАТУС${N}"; line
@@ -7461,6 +7526,9 @@ stack_full_audit() {
       fi
     done < "$CDN_PROFILES"
   fi
+  echo "[ AmneziaWG ]"
+  awg_audit
+  (( ${AWG_AUDIT_ISSUES:-0} > 0 )) && issues=$((issues+AWG_AUDIT_ISSUES))
   echo "[ Certificates ]"
   if [[ -d /etc/letsencrypt/live ]]; then
     certn=0
@@ -7629,6 +7697,9 @@ stack_check_fix() {
   #     TCP-инбаунда; отсутствующие/оторванные от группы пересоздаются.
   #     CDN-строки не трогаем — их уже починил cdn_repair (шаг 3).
   hosts_repair_stack || true
+  # 5d) AmneziaWG: UFW-правила портов; не поднятые kernel-интерфейсы awg<id>
+  #     лечатся рестартом x-ui (панель пересоздаёт их из БД сама).
+  awg_repair || true
   # 6) Битый nginx-конфиг не чиним вслепую
   if ! nginx -t >/dev/null 2>&1; then
     err "  nginx -t: FAIL — конфиг битый, правится вручную (nginx -T покажет место)"

@@ -313,6 +313,9 @@ stack_full_audit() {
       fi
     done < "$CDN_PROFILES"
   fi
+  echo "[ AmneziaWG ]"
+  awg_audit
+  (( ${AWG_AUDIT_ISSUES:-0} > 0 )) && issues=$((issues+AWG_AUDIT_ISSUES))
   echo "[ Certificates ]"
   if [[ -d /etc/letsencrypt/live ]]; then
     certn=0
@@ -481,6 +484,9 @@ stack_check_fix() {
   #     TCP-инбаунда; отсутствующие/оторванные от группы пересоздаются.
   #     CDN-строки не трогаем — их уже починил cdn_repair (шаг 3).
   hosts_repair_stack || true
+  # 5d) AmneziaWG: UFW-правила портов; не поднятые kernel-интерфейсы awg<id>
+  #     лечатся рестартом x-ui (панель пересоздаёт их из БД сама).
+  awg_repair || true
   # 6) Битый nginx-конфиг не чиним вслепую
   if ! nginx -t >/dev/null 2>&1; then
     err "  nginx -t: FAIL — конфиг битый, правится вручную (nginx -T покажет место)"
