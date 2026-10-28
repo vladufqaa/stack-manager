@@ -54,9 +54,8 @@ auto_full_setup() {
     done
   fi
   [[ ${#SEL[@]} -eq 0 ]] && { warn "Ничего не выбрано — инбаунды не создаются"; }
-  # VK call hashes запрашиваются в цикле создания отдельно для каждого
-  # qwdtt/csqtt, рядом с его портом и остальными параметрами.
-  local vk=""
+  # VK call hashes спрашиваются в цикле создания — отдельно для каждого
+  # qwdtt/csqtt, рядом с его портом (см. шаг 5 ниже).
 
   # Тип сертификатов уже выбран до мастера инбаундов — здесь повторно не спрашиваем.
 
@@ -230,7 +229,13 @@ auto_full_setup() {
       sn="$dom"
     fi
     local vkn=""
-    [[ "$proto" == "qwdtt" || "$proto" == "csqtt" ]] && vkn="$vk"
+    if [[ "$proto" == "qwdtt" || "$proto" == "csqtt" ]]; then
+      # VK call hashes: раньше переменная был пустой, а вопрос отсутствовал —
+      # инбаунды создавались с пустыми hash. Спрашиваем явно, как в п.2.
+      if [[ -t 0 ]]; then
+        ask vkn "VK call hashes для $name (через запятую, БЕЗ пробелов; Enter — пропустить)" "" '^[a-zA-Z0-9,_-]*$'
+      fi
+    fi
     # CDN-XHTTP не получает отдельный SNI/decoy: его домены и decoy
     # запрашиваются только в CDN-профиле ниже.
     # Сертификат нужен TLS-инбаундам и собственному SNI Reality:
@@ -302,7 +307,6 @@ auto_full_setup() {
       fi
     done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(stream_settings,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null)
     INBOUND_CREATE_MODE=""
-    echo "n"                                    # файрвол: настроим сами ниже
     # Завершающий Enter не даёт EOF превратить последний вопрос в цикл.
     echo ""
   } > "$ansf"
