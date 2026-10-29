@@ -669,7 +669,7 @@ cert_issue() {
   # ВАЖНО: базу отрезаем только если остаётся ещё точка — иначе для домена
   # вида zone.ru (две метки) получаем admin@ru и отказ ACME-сервера.
   le_email_load || true
-  if [[ -z "$EMAIL" && -t 0 ]]; then
+  if [[ -z "$EMAIL" && -t 0 && "${STACK_AUTOPILOT:-0}" != 1 ]]; then
     ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
     le_email_save "$EMAIL"
   fi
@@ -740,7 +740,7 @@ cert_issue() {
           security="tls"
           INBOUND_CREATE_MODE="tls"
           _is_cdn=false
-        elif [[ -t 0 && "$security" != "tls" ]]; then
+        elif [[ -t 0 && "${STACK_AUTOPILOT:-0}" != 1 && "$security" != "tls" ]]; then
     echo "  Какой сертификат выпустить для $d?"
     echo "   1) Wildcard *.$wbase — Cloudflare DNS-01, покроет $wbase и все поддомены"
     echo "   2) Обычный персональный — только $d (HTTP-01)"
@@ -759,7 +759,11 @@ cert_issue() {
       log "  cert $d: используется wildcard *.${WILDCARD_DOMAIN:-$wbase}"
       return 0
     fi
-    err "  ОШИБКА: wildcard для $d не установлен. Нажмите Enter для продолжения."
+    if [[ "${STACK_AUTOPILOT:-0}" == 1 ]]; then
+      err "  ОШИБКА: wildcard для $d не установлен — фолбэк на персональный"
+    else
+      err "  ОШИБКА: wildcard для $d не установлен. Нажмите Enter для продолжения."
+    fi
     cert_error_pause
     warn "  wildcard НЕ выпущен (токен Cloudflare / DNS-01?) — для $d выпускаю персональный"
     warn "  ВАЖНО: остальные серты этой установки тоже пойдут персональными (фолбэк сессии)."

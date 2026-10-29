@@ -346,6 +346,7 @@ stack_full_audit() {
     while (( _tries < 8 )); do
       if ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then _up=true; break; fi
       _tries=$((_tries+1))
+      (( _tries == 1 )) && echo "  … #$id $proto:$port пока не отвечает, перепроверяю (до 16 с)…"
       (( _tries < 8 )) && sleep 2
     done
     if [[ "$_up" != true ]]; then
@@ -429,6 +430,8 @@ stack_wait_ports() {   # [deadline_sec]
       streak=0
     fi
     (( waited >= deadline )) && return 1
+    # Живой прогресс: тишина до 60 с выглядит как зависание (28.10).
+    (( waited > 0 && waited % 10 == 0 )) && log "  … всё ещё жду сходимости сокетов (${waited}/${deadline} с)…"
     sleep 1; waited=$((waited+1))
   done
 }
@@ -463,6 +466,11 @@ stack_check_fix() {
   log "Найдено замечаний: $before — применяю безопасную автопочинку"
 
   log "Этап 2/3: починка…"
+  # Автопилот на время починки (динамическая область видимости: видят все
+  # вызываемые функции, на выходе снимается сам). Гарантия: одноразовый поток
+  # «проверить и починить» НИКОГДА не останавливается вопросом/Enter —
+  # certify-путь (cert_issue/cert_error_pause) молча деградирует в warn.
+  local STACK_AUTOPILOT=1
   local svc id proto port row dports="" _ss waited=0 restarted=0
   # 1) Упавшие сервисы
   for svc in nginx x-ui; do
