@@ -142,6 +142,48 @@ stack_cdn_del() {
 # путь уходят в xray (голый xhttp), всё остальное — в decoy ORIGIN-домена.
 stack_cdn_upsert() {   # <origin> <cdn> <path> <inb_port> <decoy_port> <cert> <key>
   local origin="$1" cdn="$2" path="$3" inb_port="$4" decoy_port="$5" cert="$6" key="$7"
+  # Панель/подписки на том же домене, что и CDN-origin: SNI-карта ведёт домен
+  # панели на cdn_frontend (этот блок), поэтому path-локации панели ОБЯЗАНЫ
+  # жить здесь. Если их оставить только в panel-блоке 4443, панель станет
+  # недостижимой по имени — location / отдаст decoy-заглушку (баг 28.10:
+  # «https://vladufqaa.online/vladufqa/ открылась заглушка»).
+  local _panel_locs=""
+  if [[ -n "${PANEL_DOMAIN:-}" && "$origin" == "$PANEL_DOMAIN" && -n "${PANEL_PORT:-}" && -n "${PANEL_PATH:-}" ]]; then
+    _panel_locs=$(cat <<PLOCEOF
+    # --- панель/подписки: путь панели на CDN-origin (см. комментарий выше) ---
+    location ${PANEL_PATH} {
+        proxy_pass https://127.0.0.1:${PANEL_PORT};
+        proxy_ssl_verify off;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+    }
+PLOCEOF
+)
+    if [[ -n "${SUB_PORT:-}" && -n "${SUB_PATH:-}" ]]; then
+      _panel_locs+=$(cat <<SLOCEOF
+    location ${SUB_PATH} {
+        proxy_pass https://127.0.0.1:${SUB_PORT};
+        proxy_ssl_verify off;
+        proxy_ssl_server_name on;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+    }
+SLOCEOF
+)
+    fi
+  fi
   # префикс для сессионных запросов: xhttp при sessionIDPlacement=path просит
   # $path/<sessionID>?... — ловим префиксом, «$path/» без добавления, если путь
   # сам заканчивается на /
@@ -187,6 +229,7 @@ server {
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
     }
+$_panel_locs
     location / {
         proxy_pass https://127.0.0.1:$decoy_port;
         proxy_ssl_verify off;
