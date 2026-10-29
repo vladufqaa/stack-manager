@@ -43,11 +43,25 @@ ask_sni_domain() {
   while :; do
     d_val=""
     ask d_val "$__label" "$__def" '^[a-zA-Z0-9.-]+$'
+    # Не-TTY: пустой ответ → дефолт (EOF-петля невозможна).
+    [[ -z "$d_val" && ! -t 0 ]] && d_val="$__def"
     [[ -z "$d_val" ]] && { err "Пустой домен."; continue; }
     owner=$(sni_domain_owner "$d_val" "$__id")
     if [[ -n "$owner" ]]; then
-      err "Домен $d_val уже занят ($owner). Укажите другой SNI-домен — у двух инбаундов не может быть один SNI."
-      continue
+      if [[ ! -t 0 ]]; then
+        # Не-TTY: переспрашивание бесполезно — EOF каждый раз вернёт тот же
+        # дефолт, и валидация зациклится («уже занят» до бесконечности).
+        # Подбираем свободный вариант автоматически (суффикс 2,3,…).
+        local __base="${d_val%%.*}" __rest="${d_val#*.}" __n=2
+        while [[ -n "$(sni_domain_owner "${__base}${__n}.${__rest}" "$__id")" && "$__n" -le 50 ]]; do
+          __n=$((__n+1))
+        done
+        d_val="${__base}${__n}.${__rest}"
+        warn "Не-TTY: домен занят ($owner) — подобран свободный: $d_val"
+      else
+        err "Домен $d_val уже занят ($owner). Укажите другой SNI-домен — у двух инбаундов не может быть один SNI."
+        continue
+      fi
     fi
     printf -v "$__v" '%s' "$d_val"
     SNI_USED["$d_val"]="inb_${__id}_backend"
