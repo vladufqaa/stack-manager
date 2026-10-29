@@ -401,14 +401,15 @@ stack_wait_ports() {   # [deadline_sec]
   # LucX в стартовом окне пересоздаёт обработчики инбаундов через xray API:
   # порт может подняться и снова исчезнуть (ядро xray при этом не рестартует,
   # в journal это не видно). Поэтому сходимость = ДВА чистых прохода ПОДРЯД.
-  local deadline="${1:-90}" waited=0 miss streak=0 _pid _proto _port _wss
+  # Быстро: полл 1 с, один общий снимок ss на проход (вместо ss на порт).
+  local deadline="${1:-60}" waited=0 miss streak=0 _pid _proto _port _snap
   while :; do
     miss=0
+    _snap="$(ss -ltnp 2>/dev/null; ss -lnup 2>/dev/null)"
     while IFS='|' read -r _pid _proto _port; do
       [[ -n "$_pid" ]] || continue
       [[ "$_port" =~ ^[0-9]+$ && "$_port" != 0 ]] || continue
-      _wss="-ltnup"; is_udp_proto "$_proto" && _wss="-lnup"
-      ss "$_wss" 2>/dev/null | grep -Eq ":${_port}[[:space:]]" || { miss=1; break; }
+      grep -Eq ":${_port}[[:space:]]" <<<"$_snap" || { miss=1; break; }
     done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
     if (( miss == 0 )); then
       (( streak >= 1 )) && return 0
@@ -417,7 +418,7 @@ stack_wait_ports() {   # [deadline_sec]
       streak=0
     fi
     (( waited >= deadline )) && return 1
-    sleep 3; waited=$((waited+3))
+    sleep 1; waited=$((waited+1))
   done
 }
 
@@ -520,8 +521,8 @@ stack_check_fix() {
   #     включённых портов, иначе контрольный аудит ловит порт в моменте
   #     («то слушает, то не слушает» между соседними проверками).
   if (( restarted )); then
-    log "  жду сходимости всех сокетов (до 90 с, 2 стабильных прохода)…"
-    stack_wait_ports 90 || warn "  часть сокетов не поднялась за 90 с — см. контрольный аудит"
+    log "  жду сходимости всех сокетов (до 60 с, 2 стабильных прохода)…"
+    stack_wait_ports 60 || warn "  часть сокетов не поднялась за 60 с — см. контрольный аудит"
   fi
   # 5c) hosts (кроме CDN): общая группа «один хост» — строка есть у каждого
   #     TCP-инбаунда; отсутствующие/оторванные от группы пересоздаются.
