@@ -61,6 +61,7 @@
 | 🎯 **SNI multiplexing** | TCP services behind a single external `443` via nginx stream |
 | 🛰 **VLESS Reality & TLS** | External target or your own SNI + HTTPS decoy |
 | 🌐 **XHTTP via CDN** | CDN domain, ORIGIN, path, hosts and the nginx frontend — one wizard keeps them consistent |
+| 🧩 **AmneziaWG 3.1 / 2.0** | UDP panel-sidecar inbounds with obfuscation (Premium profile), audit and UFW repair |
 | 🎭 **Decoy templates** | Camouflage for domains, Reality and TLS routes + your own `index.html` |
 | 🔒 **Certificates** | Let's Encrypt, Cloudflare DNS-01 wildcard, custom certs, A/B cert lines, audit and renewal |
 | 🩺 **Audit & self-repair** | Full read-only health/drift audit + "⚡ Check everything and fix" with a before → after delta |
@@ -164,17 +165,18 @@ A single pass from section 6: **read-only audit → safe auto-repair of what was
 | 1 | VLESS TCP REALITY | TCP behind 443 | `xtls-rprx-vision`, external target or own SNI |
 | 2 | VLESS TCP TLS | TCP behind 443 | with HTTPS decoy |
 | 3 | VLESS XHTTP (via CDN) | TCP behind 443 | TLS terminated by nginx, full CDN profile |
-| 4 | VLESS XHTTP TLS | TCP behind 443 | with HTTPS decoy |
-| 5 | VLESS XHTTP REALITY | TCP behind 443 | |
-| 6 | NAIVE | TCP behind 443 | panel sidecar |
-| 7 | TRUSTTUNNEL | TCP behind 443 | panel sidecar |
-| 8 | ANYTLS | TCP behind 443 | panel sidecar |
-| 9 | HYSTERIA2 | UDP | direct + UFW rule |
-| 10 | QWDTT | UDP 56000 | direct + UFW rule |
-| 11 | CSQTT | UDP 46000 | direct + UFW rule |
-| 12 | TG WEB-PROXY | 443 → 11443 | proxies a live target, no decoy needed |
+| 4 | VLESS XHTTP REALITY | TCP behind 443 | |
+| 5 | NAIVE | TCP behind 443 | panel sidecar |
+| 6 | TRUSTTUNNEL | TCP behind 443 | panel sidecar |
+| 7 | ANYTLS | TCP behind 443 | panel sidecar |
+| 8 | HYSTERIA2 | UDP | direct + UFW rule |
+| 9 | QWDTT | UDP 56000 | direct + UFW rule |
+| 10 | CSQTT | UDP 46000 | direct + UFW rule |
+| 11 | AMNEZIAWG 3.1 | UDP | LucX sidecar, Premium profile, obfuscation |
+| 12 | AMNEZIAWG 2.0 | UDP | LucX sidecar, Premium profile, obfuscation |
+| 13 | TG WEB-PROXY | 443 → 11443 | proxies a live target, no decoy needed |
 
-TCP inbounds are routed by nginx via SNI; UDP inbounds run directly and are checked separately against the firewall.
+TCP inbounds are routed by nginx via SNI; UDP inbounds run directly and are checked separately against the firewall. All TCP inbounds (except CDN) share a single "one host" subscription group: the default group name is "443", editable in the panel; a CDN inbound gets its own hosts entry.
 
 ## 🛰 Reality: two modes
 

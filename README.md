@@ -58,6 +58,7 @@
 | 🎯 **SNI-мультиплексирование** | TCP-сервисы за единым внешним `443` через nginx stream |
 | 🛰 **VLESS Reality и TLS** | Внешняя цель или собственный SNI + HTTPS-decoy |
 | 🌐 **XHTTP через CDN** | CDN-домен, ORIGIN, path, hosts и nginx-фронтенд — один мастер, всё согласовано |
+| 🧩 **AmneziaWG 3.1 / 2.0** | UDP-инбаунды LucX sidecar с обфускацией (Premium-профиль), аудит и починка UFW |
 | 🎭 **Decoy-шаблоны** | Камуфляж для доменов, Reality и TLS-маршрутов + свои `index.html` |
 | 🔒 **Сертификаты** | Let's Encrypt, wildcard Cloudflare DNS-01, персональные, линии A/B, аудит и продление |
 | 🩺 **Аудит и самопочинка** | Полный read-only health/drift-аудит + «⚡ Проверить всё и починить» с дельтой «было → осталось» |
@@ -159,17 +160,18 @@ curl -4 -fsSL "https://raw.githubusercontent.com/vladufqaa/stack-manager/main/st
 | 1 | VLESS TCP REALITY | TCP за 443 | `xtls-rprx-vision`, внешняя цель или свой SNI |
 | 2 | VLESS TCP TLS | TCP за 443 | с HTTPS-decoy |
 | 3 | VLESS XHTTP (через CDN) | TCP за 443 | TLS терминирует nginx, полный CDN-профиль |
-| 4 | VLESS XHTTP TLS | TCP за 443 | с HTTPS-decoy |
-| 5 | VLESS XHTTP REALITY | TCP за 443 | |
-| 6 | NAIVE | TCP за 443 | sidecar панели |
-| 7 | TRUSTTUNNEL | TCP за 443 | sidecar панели |
-| 8 | ANYTLS | TCP за 443 | sidecar панели |
-| 9 | HYSTERIA2 | UDP | напрямую + правило UFW |
-| 10 | QWDTT | UDP 56000 | напрямую + правило UFW |
-| 11 | CSQTT | UDP 46000 | напрямую + правило UFW |
-| 12 | TG WEB-PROXY | 443 → 11443 | проксирует живую цель, decoy не нужен |
+| 4 | VLESS XHTTP REALITY | TCP за 443 | |
+| 5 | NAIVE | TCP за 443 | sidecar панели |
+| 6 | TRUSTTUNNEL | TCP за 443 | sidecar панели |
+| 7 | ANYTLS | TCP за 443 | sidecar панели |
+| 8 | HYSTERIA2 | UDP | напрямую + правило UFW |
+| 9 | QWDTT | UDP 56000 | напрямую + правило UFW |
+| 10 | CSQTT | UDP 46000 | напрямую + правило UFW |
+| 11 | AMNEZIAWG 3.1 | UDP | LucX sidecar, Premium-профиль, обфускация |
+| 12 | AMNEZIAWG 2.0 | UDP | LucX sidecar, Premium-профиль, обфускация |
+| 13 | TG WEB-PROXY | 443 → 11443 | проксирует живую цель, decoy не нужен |
 
-TCP-инбаунды маршрутизируются через nginx по SNI; UDP — работают напрямую и проверяются отдельно правилами firewall.
+TCP-инбаунды маршрутизируются через nginx по SNI; UDP — работают напрямую и проверяются отдельно правилами firewall. Все TCP-инбаунды (кроме CDN) делят одну hosts-группу «один хост»: имя группы в подписке по умолчанию — «443», меняется в панели; у CDN-инбаунда собственная hosts-запись.
 
 ## 🛰 Reality: два режима
 
