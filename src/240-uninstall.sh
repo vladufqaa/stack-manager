@@ -1071,9 +1071,8 @@ diagnostics_maintenance_menu() {
     echo "  4) Полный read-only аудит стека (вкл. CDN и drift)"
     echo "  5) Сменить пароли LucX UI / AdGuard Home"
     echo "  6) Обновить скрипт"
-    echo "  7) AmneziaWG: статус (инбаунды + kernel-интерфейсы)"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-7]$'
+    local c=""; ask c "Выбор" "1" '^[0-6]$'
     case "$c" in
       1) stack_check_fix; pause ;;
       2) show_status ;;
@@ -1081,7 +1080,6 @@ diagnostics_maintenance_menu() {
       4) stack_full_audit; pause ;;
       5) change_admin_passwords ;;
       6) update_self ;;
-      7) awg_status; pause ;;
       0) return 0 ;;
     esac
   done

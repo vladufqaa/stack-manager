@@ -188,20 +188,3 @@ awg_repair() {
   return 0
 }
 
-# Статус AWG: инбаунды панели + живые kernel-интерфейсы
-awg_status() {
-  line; echo -e "${B}   AMNEZIAWG: СТАТУС${N}"; line
-  echo -e "${B}Инбаунды панели:${N}"
-  local row n=0
-  while IFS='|' read -r id port ver addr; do
-    [[ -z "$id" ]] && continue
-    echo "  #$id  UDP/$port  AWG v$ver  $addr"
-    n=$((n+1))
-  done < <(awg_inbounds_list)
-  (( n == 0 )) && echo "  (нет — создай через раздел 1 → 2, мастер инбаундов: «AMNEZIAWG 3.1/2.0»)"
-  echo
-  echo -e "${B}Kernel-интерфейсы (awg show):${N}"
-  command -v awg >/dev/null 2>&1 && awg show 2>/dev/null | sed -n '1,80p' || warn "  awg не найден"
-  return 0
-}
-
