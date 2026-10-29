@@ -387,7 +387,7 @@ udp_inbound_firewall_check() {
     if [[ -z "$rule" ]]; then
       closed+=("#$id|$proto|$port|$remark|$listen_state")
     else
-      ok "UDP #$id $proto/$port: правило UFW есть, слушает: $listen_state"
+      : # рутина: правило UFW есть — молча
     fi
   done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(remark,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null || true)
   [[ ${#closed[@]} -gt 0 ]] || return 0

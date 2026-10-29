@@ -3746,7 +3746,7 @@ PYTP
       warn "tg web proxy: не удалось очистить старые SNI-записи для $tdom"
     }
     sni_map_add "$tdom" "tg_backend" || warn "tg web proxy: не удалось добавить SNI-запись $tdom"
-    log "tg web proxy: мап обновлён → $tdom → tg_backend"
+    : # рутина: мап tg на месте — молча
   fi
   # доктрина «всё за 443»: 11443 наружу не открываем (и закрываем, если было);
   # UDP-порт здесь — HTTP/3 caddy, наружу не нужен и палится сканерами
@@ -4818,13 +4818,13 @@ cert_issue_line() {
     if [[ "$_wc_missing" == false && "$_cf_extra" == false && "${cur_san%,}" == "${want_san%,}" ]]; then
       left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
       if (( left > 30 )); then
-        log "Линия «$line» актуальна (${#CERT_LINE_DOMAINS[@]} дм., ~$left дн)"
+        : # рутина: линия актуальна — молча
         return 0
       fi
     elif [[ "$_cf_extra" == false ]] && cert_san_set_covers "$ldir/fullchain.pem" "${CERT_LINE_DOMAINS[@]}"; then
       left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
       if (( left > 30 )); then
-        log "Линия «$line» покрыта текущим сертом (wildcard/SAN), ~$left дн — перевыпуск не нужен"
+        : # рутина: покрыта текущим сертом — молча
         return 0
       fi
     fi
@@ -4847,7 +4847,7 @@ cert_issue_line() {
     if [[ -n "$_cover_hit" ]]; then
       local _cover_dir="${_cover_hit%%|*}" _cover_base="${_cover_hit#*|}"
       if [[ "$_cover_dir" != "$ldir" ]]; then
-        log "Линия «$line»: домены уже покрыты сертификатом $(basename "$_cover_dir") — выпуск не нужен"
+        : # рутина: домены уже покрыты чужим сертом — молча
         if [[ -n "$_cover_base" ]]; then
           printf '%s' "$_cover_base" > "$WILDCARD_STATE" 2>/dev/null || true
           WILDCARD_DOMAIN="$_cover_base"
@@ -5122,8 +5122,7 @@ cert_batch_flush() {
       if [[ "${cur_san%,}" == "${want_san%,}" ]]; then
         left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
         if (( left > 30 )); then
-          log "Линия «$CERT_MULTI_NAME» актуальна: ${#CERT_DOMAINS[@]} дом., ~$left дн — перевыпуск не нужен"
-          echo "      SAN: ${cur_san%,}"
+          : # рутина: линия актуальна — молча
           return 0
         fi
         warn "Линия «$CERT_MULTI_NAME»: срок ~$left дн (<=30) — обновляю"
@@ -5133,8 +5132,7 @@ cert_batch_flush() {
         elif cert_san_set_covers "$ldir/fullchain.pem" "${CERT_DOMAINS[@]}"; then
           left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
           if (( left > 30 )); then
-            log "Линия «$CERT_MULTI_NAME» полностью покрыта текущим сертом (wildcard/SAN), ~$left дн — перевыпуск не нужен"
-            echo "      SAN серта: ${cur_san%,}"
+            : # рутина: полностью покрыта текущим сертом — молча
             return 0
           fi
         fi
@@ -5298,7 +5296,7 @@ cert_issue() {
   if [[ "$in_wc_zone" == true ]]; then
     local wdir="/etc/letsencrypt/live/$WILDCARD_DOMAIN"
     if [[ -f "$wdir/fullchain.pem" && -f "$wdir/privkey.pem" ]]; then
-      log "  cert $d: уже есть wildcard *.$WILDCARD_DOMAIN — используется он"
+      : # рутина: wildcard уже установлен — молча
       return 0
     fi
   fi
@@ -5309,7 +5307,7 @@ cert_issue() {
   hit=$(find_covering_cert "$d") || hit=""
   if [[ -n "$hit" ]]; then
     wcdir="${hit%%|*}"; wcbase="${hit#*|}"
-    log "  cert $d: найден установленный сертификат «$(basename "$wcdir")» — используется он"
+    : # рутина: найден установленный серт по SAN — молча
     cert_mirror_to_certroot "$wcdir" "$d" >/dev/null 2>&1 || true
     if [[ -n "$wcbase" ]]; then
       echo "$wcbase" > "$WILDCARD_STATE" 2>/dev/null || true
@@ -5319,7 +5317,7 @@ cert_issue() {
     return 0
   fi
   if [[ -f "$dir/fullchain.pem" && -f "$dir/privkey.pem" ]]; then
-    log "  cert $d уже установлен — переустановка не нужна"
+    : # рутина: персональный серт уже установлен — молча
     return 0
   fi
 
@@ -7166,7 +7164,7 @@ hosts_upsert() {   # <inbound_id> <address> [sni]
   cur=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
     "SELECT COUNT(*) FROM hosts WHERE inbound_id=$id AND port=443 AND address='$_dqm' AND COALESCE(sni,'')='$_sqm' AND COALESCE(security,'same')='same' AND COALESCE(group_id,'')='$_gqm' AND COALESCE(is_disabled,0)=0;" 2>/dev/null || echo 0)
   if [[ "$cur" =~ ^[0-9]+$ ]] && (( cur >= 1 )); then
-    log "  hosts: #$id → $dom:443 ✓ (группа ${gid:-своя}, уже на месте)"
+    : # рутина: hosts-запись уже на месте — молча
     sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT OR REPLACE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES($id,443,'$_dqm','$_sqm');" 2>/dev/null || true
     return 0
   fi
@@ -7983,7 +7981,7 @@ cdn_repair() {   # [quiet] [noreload]
         warn "     • в инбаунде #$id остался security=tls (должен быть none/пусто) — прогони п.2 → 2 (починить) или пункт 1"
         warn "     • x-ui/xray не активен, или инбаунд #$id не слушает порт"
       else
-        log "  CDN #$id: путь $path → $code (ответ xray — норма)"
+        : # рутина: путь отвечает xray — молча
       fi
       # ГЛАВНЫЙ тест: сессия $path/<sid> обязана уходить в xray, а не в decoy.
       # Если в ответ HTML (начинается с '<' = 60) — клиент увидит «unknown version: 60».
@@ -7998,13 +7996,13 @@ cdn_repair() {   # [quiet] [noreload]
       elif [[ "$_sess_code" == "000" || "$_sess_code" == "502" || "$_sess_code" == "503" ]]; then
         warn "  CDN #$id: сессия $path/<sid> → $_sess_code — xray не принял (проверь x-ui и порт инбаунда)"
       else
-        log "  CDN #$id: сессия $path/<sid> → $_sess_code (xray ответил — норма)"
+        : # рутина: сессия доходит до xray — молча
       fi
       code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 6 "https://127.0.0.1:$CDN_FE_PORT/ne-pyt" -H "Host: $origin" 2>/dev/null || true)
       code="${code:-000}"
       # 404 от decoy — норма: UA-блок отдаёт пустую 404 сканерам (curl/wget)
       if [[ "$code" == "200" || "$code" == "301" || "$code" == "302" || "$code" == "401" || "$code" == "403" || "$code" == "404" ]]; then
-        log "  CDN #$id: прочие пути → $code (decoy — норма; 404 = UA-блок для сканеров)"
+        : # рутина: прочие пути уходят в decoy — молча
       else
         warn "  CDN #$id: прочие пути → $code (ожидался decoy) — проверь decoy-блок $origin"
       fi
@@ -8929,7 +8927,7 @@ initial_setup() {
   for id in "${INB_IDS[@]}"; do
     proto="${INB_PROTO[$id]}"; port="${INB_PORT[$id]}"
     if is_udp_proto "$proto"; then
-      warn "#$id $proto (UDP/$port) — пропускаем"
+      : # UDP прячется своим механизмом — молча (не вопрос, а констатация)
       HIDE[$id]=false; continue
     fi
     if [[ "$proto" == "tproxy" ]]; then
@@ -13389,7 +13387,7 @@ udp_inbound_firewall_check() {
     if [[ -z "$rule" ]]; then
       closed+=("#$id|$proto|$port|$remark|$listen_state")
     else
-      ok "UDP #$id $proto/$port: правило UFW есть, слушает: $listen_state"
+      : # рутина: правило UFW есть — молча
     fi
   done < <(sqlite3 "$XUI_DB" "SELECT id, protocol, port, COALESCE(remark,'') FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;" 2>/dev/null || true)
   [[ ${#closed[@]} -gt 0 ]] || return 0

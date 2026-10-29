@@ -97,7 +97,7 @@ PYTP
       warn "tg web proxy: не удалось очистить старые SNI-записи для $tdom"
     }
     sni_map_add "$tdom" "tg_backend" || warn "tg web proxy: не удалось добавить SNI-запись $tdom"
-    log "tg web proxy: мап обновлён → $tdom → tg_backend"
+    : # рутина: мап tg на месте — молча
   fi
   # доктрина «всё за 443»: 11443 наружу не открываем (и закрываем, если было);
   # UDP-порт здесь — HTTP/3 caddy, наружу не нужен и палится сканерами

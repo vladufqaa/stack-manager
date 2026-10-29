@@ -189,7 +189,7 @@ hosts_upsert() {   # <inbound_id> <address> [sni]
   cur=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
     "SELECT COUNT(*) FROM hosts WHERE inbound_id=$id AND port=443 AND address='$_dqm' AND COALESCE(sni,'')='$_sqm' AND COALESCE(security,'same')='same' AND COALESCE(group_id,'')='$_gqm' AND COALESCE(is_disabled,0)=0;" 2>/dev/null || echo 0)
   if [[ "$cur" =~ ^[0-9]+$ ]] && (( cur >= 1 )); then
-    log "  hosts: #$id → $dom:443 ✓ (группа ${gid:-своя}, уже на месте)"
+    : # рутина: hosts-запись уже на месте — молча
     sqlite3 -cmd ".timeout 3000" "$XUI_DB" "INSERT OR REPLACE INTO sm_hosts_owned(inbound_id,port,address,sni) VALUES($id,443,'$_dqm','$_sqm');" 2>/dev/null || true
     return 0
   fi

@@ -259,7 +259,7 @@ initial_setup() {
   for id in "${INB_IDS[@]}"; do
     proto="${INB_PROTO[$id]}"; port="${INB_PORT[$id]}"
     if is_udp_proto "$proto"; then
-      warn "#$id $proto (UDP/$port) — пропускаем"
+      : # UDP прячется своим механизмом — молча (не вопрос, а констатация)
       HIDE[$id]=false; continue
     fi
     if [[ "$proto" == "tproxy" ]]; then

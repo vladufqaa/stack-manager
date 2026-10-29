@@ -651,7 +651,7 @@ cdn_repair() {   # [quiet] [noreload]
         warn "     • в инбаунде #$id остался security=tls (должен быть none/пусто) — прогони п.2 → 2 (починить) или пункт 1"
         warn "     • x-ui/xray не активен, или инбаунд #$id не слушает порт"
       else
-        log "  CDN #$id: путь $path → $code (ответ xray — норма)"
+        : # рутина: путь отвечает xray — молча
       fi
       # ГЛАВНЫЙ тест: сессия $path/<sid> обязана уходить в xray, а не в decoy.
       # Если в ответ HTML (начинается с '<' = 60) — клиент увидит «unknown version: 60».
@@ -666,13 +666,13 @@ cdn_repair() {   # [quiet] [noreload]
       elif [[ "$_sess_code" == "000" || "$_sess_code" == "502" || "$_sess_code" == "503" ]]; then
         warn "  CDN #$id: сессия $path/<sid> → $_sess_code — xray не принял (проверь x-ui и порт инбаунда)"
       else
-        log "  CDN #$id: сессия $path/<sid> → $_sess_code (xray ответил — норма)"
+        : # рутина: сессия доходит до xray — молча
       fi
       code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 6 "https://127.0.0.1:$CDN_FE_PORT/ne-pyt" -H "Host: $origin" 2>/dev/null || true)
       code="${code:-000}"
       # 404 от decoy — норма: UA-блок отдаёт пустую 404 сканерам (curl/wget)
       if [[ "$code" == "200" || "$code" == "301" || "$code" == "302" || "$code" == "401" || "$code" == "403" || "$code" == "404" ]]; then
-        log "  CDN #$id: прочие пути → $code (decoy — норма; 404 = UA-блок для сканеров)"
+        : # рутина: прочие пути уходят в decoy — молча
       else
         warn "  CDN #$id: прочие пути → $code (ожидался decoy) — проверь decoy-блок $origin"
       fi

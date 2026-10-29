@@ -202,13 +202,13 @@ cert_issue_line() {
     if [[ "$_wc_missing" == false && "$_cf_extra" == false && "${cur_san%,}" == "${want_san%,}" ]]; then
       left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
       if (( left > 30 )); then
-        log "Линия «$line» актуальна (${#CERT_LINE_DOMAINS[@]} дм., ~$left дн)"
+        : # рутина: линия актуальна — молча
         return 0
       fi
     elif [[ "$_cf_extra" == false ]] && cert_san_set_covers "$ldir/fullchain.pem" "${CERT_LINE_DOMAINS[@]}"; then
       left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
       if (( left > 30 )); then
-        log "Линия «$line» покрыта текущим сертом (wildcard/SAN), ~$left дн — перевыпуск не нужен"
+        : # рутина: покрыта текущим сертом — молча
         return 0
       fi
     fi
@@ -231,7 +231,7 @@ cert_issue_line() {
     if [[ -n "$_cover_hit" ]]; then
       local _cover_dir="${_cover_hit%%|*}" _cover_base="${_cover_hit#*|}"
       if [[ "$_cover_dir" != "$ldir" ]]; then
-        log "Линия «$line»: домены уже покрыты сертификатом $(basename "$_cover_dir") — выпуск не нужен"
+        : # рутина: домены уже покрыты чужим сертом — молча
         if [[ -n "$_cover_base" ]]; then
           printf '%s' "$_cover_base" > "$WILDCARD_STATE" 2>/dev/null || true
           WILDCARD_DOMAIN="$_cover_base"
@@ -506,8 +506,7 @@ cert_batch_flush() {
       if [[ "${cur_san%,}" == "${want_san%,}" ]]; then
         left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
         if (( left > 30 )); then
-          log "Линия «$CERT_MULTI_NAME» актуальна: ${#CERT_DOMAINS[@]} дом., ~$left дн — перевыпуск не нужен"
-          echo "      SAN: ${cur_san%,}"
+          : # рутина: линия актуальна — молча
           return 0
         fi
         warn "Линия «$CERT_MULTI_NAME»: срок ~$left дн (<=30) — обновляю"
@@ -517,8 +516,7 @@ cert_batch_flush() {
         elif cert_san_set_covers "$ldir/fullchain.pem" "${CERT_DOMAINS[@]}"; then
           left=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$ldir/fullchain.pem" 2>/dev/null | cut -d= -f2)" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
           if (( left > 30 )); then
-            log "Линия «$CERT_MULTI_NAME» полностью покрыта текущим сертом (wildcard/SAN), ~$left дн — перевыпуск не нужен"
-            echo "      SAN серта: ${cur_san%,}"
+            : # рутина: полностью покрыта текущим сертом — молча
             return 0
           fi
         fi
@@ -682,7 +680,7 @@ cert_issue() {
   if [[ "$in_wc_zone" == true ]]; then
     local wdir="/etc/letsencrypt/live/$WILDCARD_DOMAIN"
     if [[ -f "$wdir/fullchain.pem" && -f "$wdir/privkey.pem" ]]; then
-      log "  cert $d: уже есть wildcard *.$WILDCARD_DOMAIN — используется он"
+      : # рутина: wildcard уже установлен — молча
       return 0
     fi
   fi
@@ -693,7 +691,7 @@ cert_issue() {
   hit=$(find_covering_cert "$d") || hit=""
   if [[ -n "$hit" ]]; then
     wcdir="${hit%%|*}"; wcbase="${hit#*|}"
-    log "  cert $d: найден установленный сертификат «$(basename "$wcdir")» — используется он"
+    : # рутина: найден установленный серт по SAN — молча
     cert_mirror_to_certroot "$wcdir" "$d" >/dev/null 2>&1 || true
     if [[ -n "$wcbase" ]]; then
       echo "$wcbase" > "$WILDCARD_STATE" 2>/dev/null || true
@@ -703,7 +701,7 @@ cert_issue() {
     return 0
   fi
   if [[ -f "$dir/fullchain.pem" && -f "$dir/privkey.pem" ]]; then
-    log "  cert $d уже установлен — переустановка не нужна"
+    : # рутина: персональный серт уже установлен — молча
     return 0
   fi
 
