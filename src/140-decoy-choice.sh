@@ -189,7 +189,23 @@ decoy_template_choose_impl() {
     local __path=""
     [[ "$__c" == custom:* ]] && __path="${__c#custom:}"
     if [[ -z "$__path" ]]; then
+      # Не-TTY: папку выбрать нечем — EOF вернёт дефолт «/var/www/mysite»,
+      # которого нет → «Папка не существует → continue» навсегда.
+      # Возвращаем безопасный шаблон по умолчанию.
+      if [[ ! -t 0 ]]; then
+        warn "Не-TTY: custom-путь недоступен — использую шаблон по умолчанию" >&2
+        printf -v "$__result" '%s' "$(decoy_default_tpl)"
+        return 0
+      fi
+      local __path_tries=0
       while :; do
+        # 3 неудачи подряд (Ctrl+D возвращает тот же дефолт-путь) — не петлим.
+        __path_tries=$((__path_tries+1))
+        [[ "$__path_tries" -ge 3 ]] && {
+          warn "Путь не выбран — использую шаблон по умолчанию" >&2
+          printf -v "$__result" '%s' "$(decoy_default_tpl)"
+          return 0
+        }
         __path=""
         ask __path "Путь к папке сайта (index.html обязателен)" "/var/www/mysite" '^/.+'
         [[ -d "$__path" ]] || { err "Папка $__path не существует"; continue; }

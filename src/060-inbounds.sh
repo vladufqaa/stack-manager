@@ -463,10 +463,15 @@ create_inbounds_menu() {
         trusttunnel|trust-tunnel) def2="tt.example.com";;
         tproxy) def2="tg.example.com";;
       esac
-      local d_new="" owner2=""
+      local d_new="" owner2="" __dom_tries=0
       while :; do
         d_new=""
         ask d_new "Домен для $name (нужен сертификат + decoy)" "$def2" '^[a-zA-Z0-9.-]+$'
+        # EOF/залипший дефолт не должен крутить петлю: 3 неудачи подряд —
+        # инбаунд пропускается (в не-TTY повтор бесполезен: вернётся тот же
+        # дефолт-плейсхолдер, и «шаблон-плейсхолдер → continue» вечен).
+        __dom_tries=$((__dom_tries+1))
+        [[ "$__dom_tries" -ge 3 ]] && { d_new=""; break; }
         [[ -z "$d_new" ]] && continue
         if [[ "$d_new" == *.example.com ]]; then
           err "Это шаблон-плейсхолдер. Введи НАСТОЯЩИЙ домен (поддомен своего base-домена)"
@@ -479,6 +484,10 @@ create_inbounds_menu() {
         fi
         break
       done
+      if [[ -z "$d_new" ]]; then
+        warn "$name пропущен — валидный SNI-домен не задан (EOF/отказ)"
+        continue
+      fi
       sni_domain="$d_new"
       if [[ "$security" == "reality" && "$rmode" != "1" ]]; then
         # Свой SNI у Reality использует только настройки Reality.
@@ -493,8 +502,12 @@ create_inbounds_menu() {
     # (протоколы без SNI — например wireguard — создаются как есть)
 
     # --- Порт: запрет 443/80 + занятость (как в авто-установке) ---
-    local port_ok=false
+    local port_ok=false __port_tries=0
     while [[ "$port_ok" != true ]]; do
+      # 3 неудачи подряд (EOF/Ctrl+D возвращает тот же дефолт) → выходим,
+      # инбаунд будет пропущен ниже — петля невозможна.
+      __port_tries=$((__port_tries+1))
+      [[ "$__port_tries" -ge 3 ]] && break
       ask port "Порт для $name (Enter — $port)" "$port" '^[0-9]{2,5}$'
       if [[ "$port" == "443" ]]; then
 
@@ -520,6 +533,10 @@ create_inbounds_menu() {
       fi
       port_ok=true
     done
+    if [[ "$port_ok" != true ]]; then
+      warn "$name пропущен — валидный порт не подобран (EOF/отказ)"
+      continue
+    fi
     used_ports+=("$port")
 
     echo
