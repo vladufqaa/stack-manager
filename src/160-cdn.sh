@@ -296,6 +296,10 @@ stack_full_audit() {
     # принимать трафик не только с loopback. Для них внешний listen — норма.
     case "$proto" in
       hysteria|hysteria2|qwdtt|csqtt|awg|wireguard|amnezia|amneziawg) ;;
+      # tproxy: caddy tg web proxy слушает *:11443 ПО ДИЗАЙНУ; снаружи порт
+      # закрыт UFW (доктрина «всё за 443»), внутрь ходит nginx по loopback —
+      # не замечание (история 28.10: фальшивые «слушает не loopback»).
+      tproxy) ;;
       *)
         if [[ "$port" != 443 && "$listen" != 127.0.0.1 ]]; then
           warn "#${id} $proto:$port — слушает не loopback"; issues=$((issues+1))
@@ -332,14 +336,17 @@ stack_full_audit() {
     # ss -t видит только TCP: для UDP-протоколов слушателя ищем через -u,
     # иначе здоровый UDP-инбаунд помечается «не слушает».
     _ss="-ltnup"; is_udp_proto "$proto" && _ss="-lnup"
-    if ! ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
-      # Порт мог попасть в момент перезапуска xray («то слушает, то нет»):
-      # одна перепроверка через 2 с перед тем, как ставить замечание.
-      sleep 2
-      if ! ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
-        warn "#${id} $proto:$port — сокет не слушает"; issues=$((issues+1))
-        continue
-      fi
+    # До 3 попыток с паузой 2 с: после рестарта x-ui caddy/xray перепривязывают
+    # порты не мгновенно (история 28.10: tproxy 11443 успевал «не слушает»).
+    local _tries=0 _up=false
+    while (( _tries < 3 )); do
+      if ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then _up=true; break; fi
+      _tries=$((_tries+1))
+      (( _tries < 3 )) && sleep 2
+    done
+    if [[ "$_up" != true ]]; then
+      warn "#${id} $proto:$port — сокет не слушает"; issues=$((issues+1))
+    elif (( _tries > 0 )); then
       log "#${id} $proto:$port — socket OK (поднялся при перепроверке)"
     else
       log "#${id} $proto:$port — socket OK"
