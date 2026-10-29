@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.26"
+STACK_MANAGER_VERSION="1.0.27"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -388,8 +388,10 @@ pause() { read_safe "Нажмите Enter" _; }
 # Ошибка сертификата не должна исчезать среди последующих сообщений.
 # В интерактивном мастере обязательно ждём Enter; в автоматическом запуске
 # не блокируем stdin, но полный текст ошибки всё равно остаётся в логе.
+# STACK_AUTOPILOT=1 (динамическая область stack_check_fix) — автопоток
+# «проверить и починить» никогда не останавливается до Enter (28.10).
 cert_error_pause() {
-  if [[ -t 0 && "${ERROR_PAUSED:-0}" != 1 ]]; then
+  if [[ -t 0 && "${ERROR_PAUSED:-0}" != 1 && "${STACK_AUTOPILOT:-0}" != 1 ]]; then
     pause
   fi
   ERROR_PAUSED=0
@@ -3168,23 +3170,6 @@ awg_repair() {
   return 0
 }
 
-# Статус AWG: инбаунды панели + живые kernel-интерфейсы
-awg_status() {
-  line; echo -e "${B}   AMNEZIAWG: СТАТУС${N}"; line
-  echo -e "${B}Инбаунды панели:${N}"
-  local row n=0
-  while IFS='|' read -r id port ver addr; do
-    [[ -z "$id" ]] && continue
-    echo "  #$id  UDP/$port  AWG v$ver  $addr"
-    n=$((n+1))
-  done < <(awg_inbounds_list)
-  (( n == 0 )) && echo "  (нет — создай через раздел 1 → 2, мастер инбаундов: «AMNEZIAWG 3.1/2.0»)"
-  echo
-  echo -e "${B}Kernel-интерфейсы (awg show):${N}"
-  command -v awg >/dev/null 2>&1 && awg show 2>/dev/null | sed -n '1,80p' || warn "  awg не найден"
-  return 0
-}
-
 # DECOY: СТАТИЧЕСКИЕ ШАБЛОНЫ
 # =====================================================================
 # записать шаблон, только если его ещё нет — повторные запуски ничего не перезаписывают
@@ -5285,7 +5270,7 @@ cert_issue() {
   # ВАЖНО: базу отрезаем только если остаётся ещё точка — иначе для домена
   # вида zone.ru (две метки) получаем admin@ru и отказ ACME-сервера.
   le_email_load || true
-  if [[ -z "$EMAIL" && -t 0 ]]; then
+  if [[ -z "$EMAIL" && -t 0 && "${STACK_AUTOPILOT:-0}" != 1 ]]; then
     ask EMAIL "Email для Let's Encrypt" "" '^[^@]+@[^@]+\.[^@]+$'
     le_email_save "$EMAIL"
   fi
@@ -5356,7 +5341,7 @@ cert_issue() {
           security="tls"
           INBOUND_CREATE_MODE="tls"
           _is_cdn=false
-        elif [[ -t 0 && "$security" != "tls" ]]; then
+        elif [[ -t 0 && "${STACK_AUTOPILOT:-0}" != 1 && "$security" != "tls" ]]; then
     echo "  Какой сертификат выпустить для $d?"
     echo "   1) Wildcard *.$wbase — Cloudflare DNS-01, покроет $wbase и все поддомены"
     echo "   2) Обычный персональный — только $d (HTTP-01)"
@@ -5375,7 +5360,11 @@ cert_issue() {
       log "  cert $d: используется wildcard *.${WILDCARD_DOMAIN:-$wbase}"
       return 0
     fi
-    err "  ОШИБКА: wildcard для $d не установлен. Нажмите Enter для продолжения."
+    if [[ "${STACK_AUTOPILOT:-0}" == 1 ]]; then
+      err "  ОШИБКА: wildcard для $d не установлен — фолбэк на персональный"
+    else
+      err "  ОШИБКА: wildcard для $d не установлен. Нажмите Enter для продолжения."
+    fi
     cert_error_pause
     warn "  wildcard НЕ выпущен (токен Cloudflare / DNS-01?) — для $d выпускаю персональный"
     warn "  ВАЖНО: остальные серты этой установки тоже пойдут персональными (фолбэк сессии)."
@@ -7150,12 +7139,13 @@ hosts_upsert() {   # <inbound_id> <address> [sni]
   local _dqm; _dqm=$(printf '%s' "$dom" | sed "s/'/''/g")
   local _sqm; _sqm=$(printf '%s' "$sni" | sed "s/'/''/g")
   # Группа-хост только для строк без собственного SNI (чужой reality — вне)
-  local gid=""
+  local gid="" _gid_new=false
   if [[ -z "$sni" ]]; then
     gid=$(hosts_group_pick "$dom")
     if [[ -z "$gid" ]]; then
       gid=$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 16)
       [[ -z "$gid" ]] && gid="grp$(date +%s)"
+      _gid_new=true
     fi
   fi
   local _gqm; _gqm=$(printf '%s' "$gid" | sed "s/'/''/g")
@@ -7170,11 +7160,16 @@ hosts_upsert() {   # <inbound_id> <address> [sni]
   fi
   local remark
   remark=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT remark FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-  # В общей группе remark единый (имя «хоста», напр. «443») — наследуем от группы
+  # В общей группе remark единый (имя «хоста», напр. «443») — наследуем от группы.
+  # НОВАЯ группа: имя хоста — «443» (внешний вход стека), НЕ имя первого инбаунда.
   if [[ -n "$gid" ]]; then
-    local _gremark
-    _gremark=$(sqlite3 -cmd ".timeout 3000" -noheader "$XUI_DB" "SELECT COALESCE(remark,'') FROM hosts WHERE group_id='$_gqm' AND COALESCE(remark,'')<>'' ORDER BY id LIMIT 1;" 2>/dev/null | head -1)
-    [[ -n "$_gremark" ]] && remark="$_gremark"
+    if [[ "$_gid_new" == true ]]; then
+      remark="443"
+    else
+      local _gremark
+      _gremark=$(sqlite3 -cmd ".timeout 3000" -noheader "$XUI_DB" "SELECT COALESCE(remark,'') FROM hosts WHERE group_id='$_gqm' AND COALESCE(remark,'')<>'' ORDER BY id LIMIT 1;" 2>/dev/null | head -1)
+      [[ -n "$_gremark" ]] && remark="$_gremark"
+    fi
   fi
   panel_journal_capture_row hosts "$id"   # снимок строки для отката (п.2/п.3)
   hosts_owned_delete "$id" 443
@@ -7666,13 +7661,18 @@ stack_full_audit() {
     # ss -t видит только TCP: для UDP-протоколов слушателя ищем через -u,
     # иначе здоровый UDP-инбаунд помечается «не слушает».
     _ss="-ltnup"; is_udp_proto "$proto" && _ss="-lnup"
-    # До 3 попыток с паузой 2 с: после рестарта x-ui caddy/xray перепривязывают
-    # порты не мгновенно (история 28.10: tproxy 11443 успевал «не слушает»).
+    # До 8 попыток с паузой 2 с (макс. 16 с) — ТОЛЬКО для провалившихся
+    # портов: здоровый слушатель находится с первой попытки, прогоны
+    # не замедляются. После рестарта x-ui LucX в стартовом окне пересоздаёт
+    # хендлеры инбаундов: caddy-sidecar tproxy (11443) и TLS-инбаунды
+    # привязываются дольше 6 с (история 28.10: 3×2 с ловили «сокет не
+    # слушает» на живых портах 37039/11443; фактически оба слушали).
     local _tries=0 _up=false
-    while (( _tries < 3 )); do
+    while (( _tries < 8 )); do
       if ss "$_ss" 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then _up=true; break; fi
       _tries=$((_tries+1))
-      (( _tries < 3 )) && sleep 2
+      (( _tries == 1 )) && echo "  … #$id $proto:$port пока не отвечает, перепроверяю (до 16 с)…"
+      (( _tries < 8 )) && sleep 2
     done
     if [[ "$_up" != true ]]; then
       warn "#${id} $proto:$port — сокет не слушает"; issues=$((issues+1))
@@ -7755,6 +7755,8 @@ stack_wait_ports() {   # [deadline_sec]
       streak=0
     fi
     (( waited >= deadline )) && return 1
+    # Живой прогресс: тишина до 60 с выглядит как зависание (28.10).
+    (( waited > 0 && waited % 10 == 0 )) && log "  … всё ещё жду сходимости сокетов (${waited}/${deadline} с)…"
     sleep 1; waited=$((waited+1))
   done
 }
@@ -7789,6 +7791,11 @@ stack_check_fix() {
   log "Найдено замечаний: $before — применяю безопасную автопочинку"
 
   log "Этап 2/3: починка…"
+  # Автопилот на время починки (динамическая область видимости: видят все
+  # вызываемые функции, на выходе снимается сам). Гарантия: одноразовый поток
+  # «проверить и починить» НИКОГДА не останавливается вопросом/Enter —
+  # certify-путь (cert_issue/cert_error_pause) молча деградирует в warn.
+  local STACK_AUTOPILOT=1
   local svc id proto port row dports="" _ss waited=0 restarted=0
   # 1) Упавшие сервисы
   for svc in nginx x-ui; do
@@ -15409,9 +15416,8 @@ diagnostics_maintenance_menu() {
     echo "  4) Полный read-only аудит стека (вкл. CDN и drift)"
     echo "  5) Сменить пароли LucX UI / AdGuard Home"
     echo "  6) Обновить скрипт"
-    echo "  7) AmneziaWG: статус (инбаунды + kernel-интерфейсы)"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-7]$'
+    local c=""; ask c "Выбор" "1" '^[0-6]$'
     case "$c" in
       1) stack_check_fix; pause ;;
       2) show_status ;;
@@ -15419,7 +15425,6 @@ diagnostics_maintenance_menu() {
       4) stack_full_audit; pause ;;
       5) change_admin_passwords ;;
       6) update_self ;;
-      7) awg_status; pause ;;
       0) return 0 ;;
     esac
   done

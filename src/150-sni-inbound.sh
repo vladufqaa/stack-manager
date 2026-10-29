@@ -175,12 +175,13 @@ hosts_upsert() {   # <inbound_id> <address> [sni]
   local _dqm; _dqm=$(printf '%s' "$dom" | sed "s/'/''/g")
   local _sqm; _sqm=$(printf '%s' "$sni" | sed "s/'/''/g")
   # Группа-хост только для строк без собственного SNI (чужой reality — вне)
-  local gid=""
+  local gid="" _gid_new=false
   if [[ -z "$sni" ]]; then
     gid=$(hosts_group_pick "$dom")
     if [[ -z "$gid" ]]; then
       gid=$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 16)
       [[ -z "$gid" ]] && gid="grp$(date +%s)"
+      _gid_new=true
     fi
   fi
   local _gqm; _gqm=$(printf '%s' "$gid" | sed "s/'/''/g")
@@ -195,11 +196,16 @@ hosts_upsert() {   # <inbound_id> <address> [sni]
   fi
   local remark
   remark=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT remark FROM inbounds WHERE id=$id;" 2>/dev/null || true)
-  # В общей группе remark единый (имя «хоста», напр. «443») — наследуем от группы
+  # В общей группе remark единый (имя «хоста», напр. «443») — наследуем от группы.
+  # НОВАЯ группа: имя хоста — «443» (внешний вход стека), НЕ имя первого инбаунда.
   if [[ -n "$gid" ]]; then
-    local _gremark
-    _gremark=$(sqlite3 -cmd ".timeout 3000" -noheader "$XUI_DB" "SELECT COALESCE(remark,'') FROM hosts WHERE group_id='$_gqm' AND COALESCE(remark,'')<>'' ORDER BY id LIMIT 1;" 2>/dev/null | head -1)
-    [[ -n "$_gremark" ]] && remark="$_gremark"
+    if [[ "$_gid_new" == true ]]; then
+      remark="443"
+    else
+      local _gremark
+      _gremark=$(sqlite3 -cmd ".timeout 3000" -noheader "$XUI_DB" "SELECT COALESCE(remark,'') FROM hosts WHERE group_id='$_gqm' AND COALESCE(remark,'')<>'' ORDER BY id LIMIT 1;" 2>/dev/null | head -1)
+      [[ -n "$_gremark" ]] && remark="$_gremark"
+    fi
   fi
   panel_journal_capture_row hosts "$id"   # снимок строки для отката (п.2/п.3)
   hosts_owned_delete "$id" 443
