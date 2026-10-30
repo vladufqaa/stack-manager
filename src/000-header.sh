@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.29"
+STACK_MANAGER_VERSION="1.0.30"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)

@@ -9,6 +9,7 @@
 # после живой проверки (HTTP 204 через локальный socks), иначе полный откат.
 # ─────────────────────────────────────────────────────────────────────────────
 BOT_OUT_FILE="/root/.tg-stack-bot-out.env"
+BOT_ENV_FILE="/root/.tg-stack-bot.env"   # env-файл юнита бота: BOT_TOKEN/ADMIN_CHAT_ID (EnvironmentFile)
 BOT_SVC="tg-stack-bot"
 BOT_SOCKS_IN="tgbot-in"
 BOT_SOCKS_OUT="tgbot-out"
@@ -158,6 +159,7 @@ bot_toggle() { # вкл/выкл самого бота: enable --now / disable -
     for i in 1 2 3 4 5; do systemctl is-active --quiet "$BOT_SVC" 2>/dev/null && break; sleep 1; done
     if systemctl is-active --quiet "$BOT_SVC" 2>/dev/null; then
       ok "Бот запущен (start + enable)"
+      botenv_test_msg || true
       botout_bot_note
     else
       warn "Юнит стартовал и сразу упал — последние строки журнала:"
@@ -165,6 +167,137 @@ bot_toggle() { # вкл/выкл самого бота: enable --now / disable -
       return 1
     fi
   fi
+}
+# ── Токен бота и ID владельца ────────────────────────────────────────────────
+# Юнит бота читает BOT_TOKEN/ADMIN_CHAT_ID из EnvironmentFile=/root/.tg-stack-bot.env
+# только при старте, поэтому после записи нужен рестарт бота. Токен проверяется
+# живым getMe через тот же TG-выход, что использует бот (state BOT_OUT_FILE);
+# на экран токен показывается замаскированным, в бэкапах — только до правки.
+botenv_load() { # BE_TOK/BE_CHAT из env-файла юнита
+  BE_TOK=""; BE_CHAT=""
+  [[ -f "$BOT_ENV_FILE" ]] || return 0
+  BE_TOK=$(grep -a '^BOT_TOKEN=' "$BOT_ENV_FILE" | tail -1 | cut -d= -f2-)
+  BE_CHAT=$(grep -a '^ADMIN_CHAT_ID=' "$BOT_ENV_FILE" | tail -1 | cut -d= -f2-)
+}
+botenv_mask_tok() { # 123456789:AA••••x4yz — полный токен наружу не печатаем
+  local t=$1 id sfx
+  [[ -z "$t" ]] && { printf '<не задан>'; return; }
+  id=${t%%:*}; sfx=${t#*:}
+  (( ${#sfx} > 6 )) && sfx="••••${sfx: -4}" || sfx="••••"
+  printf '%s:%s' "$id" "$sfx"
+}
+botenv_tg_api() { # curl к api.telegram.org через текущий TG-выход бота (как у самого бота)
+  local pa=() u
+  botout_state_load
+  case "$BO_MODE" in
+    outbound) [[ -n "$BO_PORT" ]] && pa=(--proxy "socks5h://127.0.0.1:${BO_PORT}") ;;
+    socks)    u=$(printf '%s' "$BO_SOCKS" | base64 -d 2>/dev/null); [[ -n "$u" ]] && pa=(--proxy "$u") ;;
+  esac
+  curl -s --max-time 14 "${pa[@]}" "$@"
+}
+botenv_write() { # атомарно, 600; чужие строки/комментарии сохраняем, токен/ID переписываем
+  local tok=$1 chat=$2 tmp="${BOT_ENV_FILE}.tmp" line k
+  : > "$tmp"
+  if [[ -f "$BOT_ENV_FILE" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      k=${line%%=*}
+      [[ "$k" == "BOT_TOKEN" || "$k" == "ADMIN_CHAT_ID" ]] && continue
+      printf '%s\n' "$line" >> "$tmp"
+    done < "$BOT_ENV_FILE"
+  fi
+  [[ -n "$tok" ]]  && printf 'BOT_TOKEN=%s\n' "$tok" >> "$tmp"
+  [[ -n "$chat" ]] && printf 'ADMIN_CHAT_ID=%s\n' "$chat" >> "$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$BOT_ENV_FILE"
+}
+botenv_restart_note() { # env читается только при старте — предложить рестарт
+  systemctl is-active --quiet "$BOT_SVC" 2>/dev/null || return 0
+  local yn="n" i
+  askyn yn "Перезапустить бота сейчас, чтобы он прочитал новые значения? (env юнита применяется только при старте)" "y"
+  [[ "$yn" == "true" ]] || { warn "Бот работает со старыми значениями до следующего рестарта"; return 0; }
+  systemctl restart "$BOT_SVC" >/dev/null 2>&1 || true
+  for i in 1 2 3 4 5; do systemctl is-active --quiet "$BOT_SVC" 2>/dev/null && break; sleep 1; done
+  if systemctl is-active --quiet "$BOT_SVC" 2>/dev/null; then
+    ok "Бот перезапущен с новыми значениями"
+  else
+    warn "Бот не поднялся — последние строки журнала:"
+    journalctl -u "$BOT_SVC" -n 10 --no-pager 2>/dev/null | sed 's/^/    /'
+  fi
+}
+botenv_test_msg() { # тестовое сообщение владельцу (creds из env юнита) — вызывается после включения бота
+  local r desc
+  botenv_load
+  if [[ -z "$BE_TOK" || -z "$BE_CHAT" ]]; then
+    warn "Токен/ID владельца не заданы — тест не отправлен (настрой в п.6 «Токен и ID владельца»)"
+    return 1
+  fi
+  r=$(botenv_tg_api "https://api.telegram.org/bot${BE_TOK}/sendMessage" \
+    --data-urlencode "chat_id=${BE_CHAT}" \
+    --data-urlencode "text=✅ tg-stack-bot запущен — тестовое сообщение из stack-manager") || r=""
+  if printf '%s' "$r" | jq -e '.ok == true' >/dev/null 2>&1; then
+    ok "Тестовое сообщение доставлено владельцу (${BE_CHAT})"
+  else
+    desc=$(printf '%s' "$r" | jq -r '.description // "нет ответа"' 2>/dev/null)
+    warn "Тест не доставлен (${desc}). Частая причина: владелец не нажал /start у бота или не задан ID"
+    return 1
+  fi
+}
+botenv_creds_set() { # просмотр/ввод токена бота и ID владельца
+  local newtok="" newchat="" r desc bname yn="n" fin_tok fin_chat ts
+  botenv_load
+  echo
+  echo -e "${B}Текущие значения (${BOT_ENV_FILE}):${N}"
+  echo "  Токен бота:    $(botenv_mask_tok "$BE_TOK")"
+  echo "  ID владельца:  ${BE_CHAT:-<не задан — бот в режиме обучения>}"
+  echo
+  echo "Вставь новое значение или просто Enter — оставить как есть."
+  ask newtok "Токен бота (вида 123456789:AA…)" "" ''
+  if [[ -n "$newtok" ]]; then
+    [[ "$newtok" =~ ^[0-9]{6,12}:[A-Za-z0-9_-]{30,}$ ]] \
+      || { err "Не похоже на токен (цифры, двоеточие, ~35 символов) — отмена"; return 1; }
+    log "Проверяю токен через Telegram (getMe, тем же выходом, что и бот)…"
+    r=$(botenv_tg_api "https://api.telegram.org/bot${newtok}/getMe") || r=""
+    if printf '%s' "$r" | jq -e '.ok == true' >/dev/null 2>&1; then
+      bname=$(printf '%s' "$r" | jq -r '.result.username // "?"' 2>/dev/null)
+      ok "Токен валиден — это бот @${bname}"
+    elif printf '%s' "$r" | grep -q '"ok":false'; then
+      desc=$(printf '%s' "$r" | jq -r '.description // "отклонён"' 2>/dev/null)
+      askyn yn "Telegram отклонил токен (${desc}). Всё равно сохранить?" "n"
+      [[ "$yn" == "true" ]] || { warn "Отменено"; return 1; }
+    else
+      askyn yn "До Telegram не достучались (сеть/выход бота). Сохранить без проверки?" "n"
+      [[ "$yn" == "true" ]] || { warn "Отменено"; return 1; }
+    fi
+  fi
+  while :; do
+    ask newchat "ID владельца (число, узнать: @userinfobot; Enter — оставить)" "" ''
+    [[ -z "$newchat" || "$newchat" =~ ^[0-9]{3,}$ ]] && break
+    err "ID должен быть числом (например 123456789)"
+  done
+  [[ -z "$newtok" && -z "$newchat" ]] && { warn "Ничего не менял"; return 0; }
+  fin_tok=${newtok:-$BE_TOK}; fin_chat=${newchat:-$BE_CHAT}
+  if [[ -n "$fin_tok" && -n "$fin_chat" ]]; then
+    askyn yn "Отправить тестовое сообщение владельцу? (нужно, чтобы владелец нажал /start у бота)" "y"
+    if [[ "$yn" == "true" ]]; then
+      r=$(botenv_tg_api "https://api.telegram.org/bot${fin_tok}/sendMessage" \
+        --data-urlencode "chat_id=${fin_chat}" \
+        --data-urlencode "text=✅ Проверка связи из stack-manager: токен и ID владельца применены.") || r=""
+      if printf '%s' "$r" | jq -e '.ok == true' >/dev/null 2>&1; then
+        ok "Тестовое сообщение доставлено"
+      else
+        desc=$(printf '%s' "$r" | jq -r '.description // "нет ответа"' 2>/dev/null)
+        warn "Не доставлено (${desc}). Частая причина: владелец не нажал /start — значения всё равно сохранятся"
+      fi
+    fi
+  fi
+  askyn yn "Записать в ${BOT_ENV_FILE}? (текущий файл будет забэкаплен в ${BACKUP_DIR})" "y"
+  [[ "$yn" == "true" ]] || { warn "Отменено — ничего не записано"; return 1; }
+  ts=$(date +%Y%m%d-%H%M%S)
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+  [[ -f "$BOT_ENV_FILE" ]] && cp -a "$BOT_ENV_FILE" "$BACKUP_DIR/tg-bot-env.pre-creds-$ts"
+  botenv_write "$fin_tok" "$fin_chat"
+  ok "Сохранено: токен $(botenv_mask_tok "$fin_tok"), ID ${fin_chat:-не задан}"
+  botenv_restart_note
 }
 botout_enable_outbound() { # $1=tag $2=outboundJSON(""=существующий тег) — вкл только после проверки 204
   local tag=$1 ob=${2:-} port
@@ -275,8 +408,9 @@ bot_out_menu() {
     else
       echo "  5) 🟢 Включить бота (start + enable)"
     fi
+    echo "  6) 🔑 Токен бота и ID владельца (ввод/смена)"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-5]$'
+    local c=""; ask c "Выбор" "1" '^[0-6]$'
     case "$c" in
       1)
         if botout_pick_existing; then
@@ -293,6 +427,7 @@ bot_out_menu() {
         [[ "$yn" == "true" ]] && botout_disable
         pause ;;
       5) bot_toggle; pause ;;
+      6) botenv_creds_set; pause ;;
       0) return 0 ;;
     esac
   done
