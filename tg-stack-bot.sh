@@ -73,8 +73,9 @@ KB_HIDE='[[{"text":"🗑 Скрыть","callback_data":"hide"}]]'
 hesc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<<"$1"; }
 
 # ── источник истины: stack-manager ──────────────────────────────────────────
-run_stack() { timeout 300 bash -c "source '$STACK_SCRIPT'; detect_env; $1" 2>&1; }
-run_check()  { timeout 300 bash "$STACK_SCRIPT" --check 2>&1; }
+strip_ansi() { sed -r 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'; } # Telegram не понимает ANSI из stack-manager
+run_stack() { timeout 300 bash -c "source '$STACK_SCRIPT'; detect_env; $1" 2>&1 | strip_ansi; }
+run_check()  { timeout 300 bash "$STACK_SCRIPT" --check 2>&1 | strip_ansi; }
 
 # ── форматирование ──────────────────────────────────────────────────────────
 fmt_bytes() { awk -v b="${1:-0}" 'BEGIN{u=b;s="Б";if(b>=1073741824){u=b/1073741824;s="ГБ"}else if(b>=1048576){u=b/1048576;s="МБ"}else if(b>=1024){u=b/1024;s="КБ"}printf "%.1f %s",u,s}'; }
