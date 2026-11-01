@@ -11042,6 +11042,8 @@ show_status() {
 BOT_OUT_FILE="/root/.tg-stack-bot-out.env"
 BOT_ENV_FILE="/root/.tg-stack-bot.env"   # env-файл юнита бота: BOT_TOKEN/ADMIN_CHAT_ID (EnvironmentFile)
 BOT_SVC="tg-stack-bot"
+BOT_DST="/root/tg-stack-bot.sh"          # куда кладём сам скрипт бота
+BOT_RAW_URL="https://raw.githubusercontent.com/vladufqaa/stack-manager/main/tg-stack-bot.sh"
 BOT_SOCKS_IN="tgbot-in"
 BOT_SOCKS_OUT="tgbot-out"
 BOT_XRAY_CFG="/usr/local/x-ui/bin/config.json"
@@ -11163,10 +11165,60 @@ botout_bot_note() { # бот забирает state сам (mtime); сообща
   fi
 }
 bot_svc_installed() { systemctl cat "$BOT_SVC" >/dev/null 2>&1; }
-bot_toggle() { # вкл/выкл самого бота: enable --now / disable --now
+bot_install() { # установка бота с нуля: скрипт + systemd-юнит + env-заготовка
+  local yn="n" have_src=0
+  askyn yn "Юнита $BOT_SVC нет на этом сервере. Установить бота? (скрипт с GitHub → systemd-юнит → пустой env; токен затем вводится в п.6)" "y"
+  [[ "$yn" == "true" ]] || { warn "Отменено — бот не установлен"; return 1; }
+  if [[ -f "$BOT_DST" ]]; then
+    if bash -n "$BOT_DST" >/dev/null 2>&1; then
+      log "Найден существующий $BOT_DST — использую его (при обновлении бота удали файл и повтори установку)"
+      have_src=1
+    else
+      warn "$BOT_DST есть, но не проходит bash -n — скачаю заново"
+    fi
+  fi
+  if [[ "$have_src" != "1" ]]; then
+    log "Скачиваю скрипт бота: $BOT_RAW_URL"
+    curl -fsSL --max-time 60 -o "${BOT_DST}.tmp" "$BOT_RAW_URL" \
+      || { err "Не удалось скачать tg-stack-bot.sh (нет доступа к GitHub?)"; rm -f "${BOT_DST}.tmp"; return 1; }
+    if ! bash -n "${BOT_DST}.tmp" >/dev/null 2>&1; then
+      err "Скачанный скрипт не проходит bash -n — установку отменяю"; rm -f "${BOT_DST}.tmp"; return 1
+    fi
+    mv "${BOT_DST}.tmp" "$BOT_DST"; chmod 755 "$BOT_DST"
+    ok "Скрипт бота установлен: $BOT_DST"
+  fi
+  if ! systemctl cat "$BOT_SVC" >/dev/null 2>&1; then
+    cat > "/etc/systemd/system/${BOT_SVC}.service" <<'UNIT'
+[Unit]
+Description=Stack Manager TG bot
+After=network-online.target
+
+[Service]
+ExecStart=/bin/bash /root/tg-stack-bot.sh
+EnvironmentFile=/root/.tg-stack-bot.env
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    ok "Юнит /etc/systemd/system/${BOT_SVC}.service создан"
+  else
+    log "Юнит $BOT_SVC уже существует — не трогаю"
+  fi
+  if [[ ! -f "$BOT_ENV_FILE" ]]; then
+    : > "$BOT_ENV_FILE"
+    chmod 600 "$BOT_ENV_FILE"
+    log "Создан пустой $BOT_ENV_FILE (600) — без токена бот в Telegram не пишет"
+  fi
+  ok "Бот установлен. Дальше: п.6 — токен и ID владельца, затем п.5 — включить"
+  return 0
+}
+bot_toggle() { # вкл/выкл самого бота: enable --now / disable --now; без юнита — предложение установки
   if ! bot_svc_installed; then
     err "Юнит $BOT_SVC.service не найден — бот не установлен"
-    return 1
+    bot_install || return 1
   fi
   local yn="n"
   if systemctl is-active --quiet "$BOT_SVC" 2>/dev/null; then
@@ -11179,6 +11231,11 @@ bot_toggle() { # вкл/выкл самого бота: enable --now / disable -
       return 1
     fi
   else
+    botenv_load
+    if [[ -z "$BE_TOK" ]]; then
+      askyn yn "Токен бота не задан (п.6 «Токен и ID владельца»). Всё равно включить? (без токена бот не сможет работать с Telegram)" "n"
+      [[ "$yn" == "true" ]] || { warn "Отменено — задай токен в п.6 и включай снова"; return 1; }
+    fi
     askyn yn "Включить бота? (systemctl enable --now $BOT_SVC — старт сейчас + автозапуск при ребуте)" "n"
     [[ "$yn" == "true" ]] || { warn "Отменено — бот остаётся выключенным"; return 1; }
     if ! systemctl enable --now "$BOT_SVC" >/dev/null 2>&1; then
