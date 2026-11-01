@@ -191,7 +191,16 @@ render_bksched() {
 kb_main='[[{"text":"🖥 Сервер","callback_data":"nav:server"},{"text":"👥 Клиенты","callback_data":"nav:clients"}],[{"text":"🚦 Трафик","callback_data":"nav:traffic"},{"text":"🛠 Обслуживание","callback_data":"nav:maint"}],[{"text":"🔄 Обновить","callback_data":"refresh"}]]'
 kb_server='[[{"text":"🔄 Обновить","callback_data":"refresh"},{"text":"⏯ Авто","callback_data":"auto"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]'
 kb_traffic='[[{"text":"🔄 Обновить","callback_data":"refresh"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]'
-kb_maint='[[{"text":"⚡ Починить","callback_data":"askfix"},{"text":"🔎 Аудит","callback_data":"doaudit"}],[{"text":"🔁 Перезагрузить AWG","callback_data":"askawg"},{"text":"🔁 Перезагрузить X-ui","callback_data":"askrestart:x-ui"}],[{"text":"🔁 Перезагрузить Nginx","callback_data":"askrestart:nginx"},{"text":"🔁 Перезагрузить Xray","callback_data":"askrestart:xray"}],[{"text":"📡 Инбаунды","callback_data":"doinb"},{"text":"💾 Бэкап БД","callback_data":"askbackup"}],[{"text":"⏰ Расписание","callback_data":"nav:bksched"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]'
+kb_maint_fn() { # динамическое меню обслуживания: AdGuard — только если юнит есть; кнопки журналов ошибок
+  # запятые ВКЛЮЧЕНЫ в вставки (ведущая у ряда, у кнопки — ведущая), чтобы пустой AdGuard не ломал JSON
+  local adg_row="," adg_err=""
+  if systemctl cat AdGuardHome.service >/dev/null 2>&1; then
+    adg_row=',[{"text":"🔁 Перезагрузить AdGuard","callback_data":"askrestart:AdGuardHome"}]'
+    adg_err=',{"text":"📜 adg","callback_data":"err:adg"}'
+  fi
+  printf '[[{"text":"⚡ Починить","callback_data":"askfix"},{"text":"🔎 Аудит","callback_data":"doaudit"}],[{"text":"🔁 Перезагрузить AWG","callback_data":"askawg"},{"text":"🔁 Перезагрузить X-ui","callback_data":"askrestart:x-ui"}],[{"text":"🔁 Перезагрузить Nginx","callback_data":"askrestart:nginx"},{"text":"🔁 Перезагрузить Xray","callback_data":"askrestart:xray"}]%s[{"text":"📡 Инбаунды","callback_data":"doinb"},{"text":"💾 Бэкап БД","callback_data":"askbackup"}],[{"text":"📜 Ошибки x-ui","callback_data":"err:xui"},{"text":"nginx","callback_data":"err:nginx"},{"text":"f2b","callback_data":"err:f2b"}%s],[{"text":"⏰ Расписание","callback_data":"nav:bksched"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]' \
+    "$adg_row" "$adg_err"
+}
 kb_sched() { # динамическая клавиатура расписания (мониторинг: ✅/❌ по состоянию)
   local o ou xr nd nu c r l sw
   (( EV_OUT   == 1 )) && o="✅ "   || o="❌ "
@@ -203,8 +212,14 @@ kb_sched() { # динамическая клавиатура расписани�
   (( EV_RAM   == 1 )) && r="✅ "   || r="❌ "
   (( EV_LOGIN == 1 )) && l="✅ "   || l="❌ "
   sw="▶️ Включить мониторинг"; (( MON_ON == 1 )) && sw="⏸ Выключить мониторинг"
-  printf '[[{"text":"⏰ Бэкап: каждый час","callback_data":"bkset:hourly"},{"text":"Каждые 6ч","callback_data":"bkset:6h"}],[{"text":"Каждые 12ч","callback_data":"bkset:12h"},{"text":"Раз в день (04:00)","callback_data":"bkset:daily"}],[{"text":"⏸ Бэкап выключить","callback_data":"bkset:off"}],[{"text":"%s","callback_data":"mon:sw"}],[{"text":"⏱ 1 мин","callback_data":"moniv:60"},{"text":"⏱ 5 мин","callback_data":"moniv:300"},{"text":"⏱ 15 мин","callback_data":"moniv:900"}],[{"text":"%sИсходящие ⛔","callback_data":"mon:out"},{"text":"%sИсходящие ↩️","callback_data":"mon:outup"}],[{"text":"%sСбой Xray","callback_data":"mon:xray"}],[{"text":"%sУзел недоступен","callback_data":"mon:node"},{"text":"%sУзел ↩️","callback_data":"mon:nodeup"}],[{"text":"%sCPU ≥%s%%","callback_data":"mon:cpu"},{"text":"%sRAM ≥%s%%","callback_data":"mon:ram"}],[{"text":"%sПопытка входа","callback_data":"mon:login"}],[{"text":"⬅️ Обслуживание","callback_data":"nav:maint"}]]' \
-    "$sw" "$o" "$ou" "$xr" "$nd" "$nu" "$c" "$CPU_TH" "$r" "$RAM_TH" "$l"
+  local n2="❌ " a2="❌ " d2="❌ " ce="❌ " bf="❌ "
+  (( EV_NGINX == 1 )) && n2="✅ "
+  (( EV_ADG   == 1 )) && a2="✅ "
+  (( EV_DISK  == 1 )) && d2="✅ "
+  (( EV_CERT  == 1 )) && ce="✅ "
+  (( EV_BKFAIL== 1 )) && bf="✅ "
+  printf '[[{"text":"⏰ Бэкап: каждый час","callback_data":"bkset:hourly"},{"text":"Каждые 6ч","callback_data":"bkset:6h"}],[{"text":"Каждые 12ч","callback_data":"bkset:12h"},{"text":"Раз в день (04:00)","callback_data":"bkset:daily"}],[{"text":"⏸ Бэкап выключить","callback_data":"bkset:off"}],[{"text":"%s","callback_data":"mon:sw"}],[{"text":"⏱ 1 мин","callback_data":"moniv:60"},{"text":"⏱ 5 мин","callback_data":"moniv:300"},{"text":"⏱ 15 мин","callback_data":"moniv:900"}],[{"text":"%sИсходящие ⛔","callback_data":"mon:out"},{"text":"%sИсходящие ↩️","callback_data":"mon:outup"}],[{"text":"%sСбой Xray","callback_data":"mon:xray"}],[{"text":"%sУзел недоступен","callback_data":"mon:node"},{"text":"%sУзел ↩️","callback_data":"mon:nodeup"}],[{"text":"%sCPU ≥%s%%","callback_data":"mon:cpu"},{"text":"%sRAM ≥%s%%","callback_data":"mon:ram"}],[{"text":"%sNginx упал","callback_data":"mon:nginx"},{"text":"%sAdGuard упал","callback_data":"mon:adg"}],[{"text":"%sДиск ≥%s%%","callback_data":"mon:disk"},{"text":"%sСерты ≤7д","callback_data":"mon:cert"},{"text":"%sБэкап упал","callback_data":"mon:bkfail"}],[{"text":"%sПопытка входа","callback_data":"mon:login"}],[{"text":"⬅️ Обслуживание","callback_data":"nav:maint"}]]' \
+    "$sw" "$o" "$ou" "$xr" "$nd" "$nu" "$c" "$CPU_TH" "$r" "$RAM_TH" "$n2" "$a2" "$d2" "$DISK_TH" "$ce" "$bf" "$l"
 }
 
 kb_clients() { # кнопки клиентов ТЕКУЩЕЙ страницы (по 2 в ряд) + пагинация + действия
@@ -254,7 +269,7 @@ screen_kb() { # $1=menu → inline_keyboard JSON
     server)  printf '%s' "$kb_server" ;;
     clients) kb_clients ;;
     traffic) printf '%s' "$kb_traffic" ;;
-    maint)   printf '%s' "$kb_maint" ;;
+    maint)   kb_maint_fn ;;
     bksched) printf '%s' "$(kb_sched)" ;;
     client)  kb_client_card ;;
     *)       printf '%s' "$kb_main" ;;
@@ -611,17 +626,35 @@ ecard_client_view() { # $1=chat — вернуться к карточке кл�
   ecard_close "$1"; show_screen "$1" "client"
 }
 
-do_confirmed() { # $1=chat $2=action (fix|awg|restart-xui|restart-nginx|restart-xray)
+do_confirmed() { # $1=chat $2=action (fix|awg|restart-xui|restart-nginx|restart-adg|restart-xray)
   case "$2" in
     fix)           tg_send "$1" "⚡ Автопочинка запущена (до 5 мин)…"; tg_send_kb "$1" "$(run_stack stack_check_fix | tail -60)" "$KB_HIDE" >/dev/null ;;
     awg)           tg_send "$1" "🔁 Перезапуск AWG…"; tg_send_kb "$1" "$(cmd_awg_restart)" "$KB_HIDE" >/dev/null ;;
     restart-xui)   systemctl restart x-ui && sleep 2 && tg_send "$1" "x-ui: $(systemctl is-active x-ui)" ;;
     restart-nginx) systemctl restart nginx && sleep 2 && tg_send "$1" "nginx: $(systemctl is-active nginx)" ;;
+    restart-adg)   systemctl restart AdGuardHome && sleep 2 && tg_send "$1" "AdGuardHome: $(systemctl is-active AdGuardHome 2>/dev/null)" ;;
     restart-xray)
       local res; res=$(api_call POST /panel/api/server/restartXrayService)
       if jq -re '.success == true' <<<"$res" >/dev/null 2>&1; then tg_send "$1" "xray: перезапущен ✓"
       else tg_send "$1" "xray: ошибка — $(jq -r '.msg // "нет ответа панели"' <<<"$res")"; fi ;;
   esac
+}
+
+# ── журнал ошибок сервисов (/err и кнопки 📜 в обслуживании) ────────────────
+err_unit() { # $1=алиас (xui|nginx|adg|f2b|bot) или имя юнита → имя юнита
+  local pair
+  for pair in xui:x-ui nginx:nginx adg:AdGuardHome f2b:fail2ban bot:tg-stack-bot; do
+    [[ "${pair%%:*}" == "$1" ]] && { printf '%s' "${pair#*:}"; return 0; }
+  done
+  [[ "$1" =~ ^[A-Za-z0-9_.@-]+$ ]] && { printf '%s' "$1"; return 0; }
+  return 1
+}
+err_tail() { # $1=юнит → последние ошибки журнала (HTML); нет ошибок — просто хвост
+  local u=$1 out
+  out=$(journalctl -u "$u" -n 200 --no-pager 2>/dev/null | grep -iaE "error|fail|fatal|crit|panic" | tail -10)
+  [[ -z "$out" ]] && out=$(journalctl -u "$u" -n 10 --no-pager 2>/dev/null)
+  [[ -z "$out" ]] && { printf '📜 <b>%s</b>: журнал пуст или юнит не найден.' "$(hesc "$u")"; return 0; }
+  printf '📜 <b>%s</b> — последние ошибки:\n<pre>%s</pre>' "$(hesc "$u")" "$(hesc "$(printf '%s' "$out" | head -c 2800)")"
 }
 
 bk_set_schedule() { # $1=пресет → текст результата
@@ -658,9 +691,11 @@ EV_XRAY=1                              # Сбой Xray
 EV_NODE=1; NODE_FAILS=1; EV_NODEUP=0   # Узел ⛔ / ↩️
 EV_CPU=0; CPU_TH=90; EV_RAM=0; RAM_TH=90  # Система (в панели по умолчанию выкл)
 EV_LOGIN=1                             # Попытка входа
+EV_NGINX=1; EV_ADG=1; EV_DISK=0; DISK_TH=85; EV_CERT=1; EV_BKFAIL=1  # nginx/adguard упал, диск, серты ≤7д, бэкап упал
 OUT_CNT=0; OUT_BAD=0; XRAY_BAD=0; XRAY_LAST=0
 NODE_CNT=0; NODE_BAD=0; NODE_LAST=0
 CPU_LAST=0; RAM_LAST=0
+NGX_BAD=0; NGX_LAST=0; ADG_BAD=0; ADG_LAST=0; DISK_LAST=0; CERT_LAST=0; CERT_CHK=-3600; BKF_LAST=0
 LOG_POS=0; LAST_MON=-1
 
 mon_load() {
@@ -675,6 +710,8 @@ mon_load() {
       EV_NODE) EV_NODE=$v ;; NODE_FAILS) NODE_FAILS=$v ;; EV_NODEUP) EV_NODEUP=$v ;;
       EV_CPU) EV_CPU=$v ;; CPU_TH) CPU_TH=$v ;; EV_RAM) EV_RAM=$v ;; RAM_TH) RAM_TH=$v ;;
       EV_LOGIN) EV_LOGIN=$v ;;
+      EV_NGINX) EV_NGINX=$v ;; EV_ADG) EV_ADG=$v ;; EV_DISK) EV_DISK=$v ;; DISK_TH) DISK_TH=$v ;;
+      EV_CERT) EV_CERT=$v ;; EV_BKFAIL) EV_BKFAIL=$v ;;
       OUT_CNT) OUT_CNT=$v ;; OUT_BAD) OUT_BAD=$v ;; XRAY_BAD) XRAY_BAD=$v ;; XRAY_LAST) XRAY_LAST=$v ;;
       NODE_CNT) NODE_CNT=$v ;; NODE_BAD) NODE_BAD=$v ;; NODE_LAST) NODE_LAST=$v ;;
       CPU_LAST) CPU_LAST=$v ;; RAM_LAST) RAM_LAST=$v ;;
@@ -701,6 +738,20 @@ CPU_TH=$CPU_TH
 EV_RAM=$EV_RAM
 RAM_TH=$RAM_TH
 EV_LOGIN=$EV_LOGIN
+EV_NGINX=$EV_NGINX
+EV_ADG=$EV_ADG
+EV_DISK=$EV_DISK
+DISK_TH=$DISK_TH
+EV_CERT=$EV_CERT
+EV_BKFAIL=$EV_BKFAIL
+NGX_BAD=$NGX_BAD
+NGX_LAST=$NGX_LAST
+ADG_BAD=$ADG_BAD
+ADG_LAST=$ADG_LAST
+DISK_LAST=$DISK_LAST
+CERT_LAST=$CERT_LAST
+CERT_CHK=$CERT_CHK
+BKF_LAST=$BKF_LAST
 OUT_CNT=$OUT_CNT
 OUT_BAD=$OUT_BAD
 XRAY_BAD=$XRAY_BAD
@@ -729,7 +780,7 @@ mon_tick() { # периодическая проверка (вызывается
   local now=$SECONDS
   (( LAST_MON >= 0 && now - LAST_MON < MON_IV )) && return 0
   LAST_MON=$now
-  local st cpu_pct mem_pct xr code pct bp logf sz
+  local st cpu_pct mem_pct xr code pct bp logf sz endd left bad cf
   bp=$(panel_base)
 
   # статус панели: CPU / RAM / Xray
@@ -784,6 +835,65 @@ mon_tick() { # периодическая проверка (вызывается
     OUT_CNT=$((OUT_CNT+1))
     if (( EV_OUT == 1 && OUT_CNT >= OUT_FAILS && OUT_BAD == 0 )); then
       mon_alert "⛔ <b>Исходящие недоступны</b>: ${OUT_CNT} неудачных проверок подряд"; OUT_BAD=1
+    fi
+  fi
+
+  # сервисы: nginx / AdGuardHome
+  if (( EV_NGINX == 1 )); then
+    st=$(systemctl is-active nginx 2>/dev/null)
+    if [[ "$st" == "active" ]]; then
+      if (( NGX_BAD == 1 )); then NGX_BAD=0; mon_alert "🟢 <b>nginx снова работает</b>"; fi
+    else
+      NGX_BAD=1
+      if (( now - NGX_LAST >= 1800 )); then
+        mon_alert "🌐 <b>nginx не работает</b>: состояние <code>${st:-unknown}</code>"; NGX_LAST=$now
+      fi
+    fi
+  fi
+  if (( EV_ADG == 1 )) && systemctl cat AdGuardHome.service >/dev/null 2>&1; then
+    st=$(systemctl is-active AdGuardHome 2>/dev/null)
+    if [[ "$st" == "active" ]]; then
+      if (( ADG_BAD == 1 )); then ADG_BAD=0; mon_alert "🟢 <b>AdGuardHome снова работает</b>"; fi
+    else
+      ADG_BAD=1
+      if (( now - ADG_LAST >= 1800 )); then
+        mon_alert "🛡 <b>AdGuardHome не работает</b>: состояние <code>${st:-unknown}</code>"; ADG_LAST=$now
+      fi
+    fi
+  fi
+
+  # диск: занято ≥ DISK_TH% (алерт не чаще раза в 6ч)
+  if (( EV_DISK == 1 )); then
+    pct=$(df -P / | awk 'NR==2{gsub("%","",$5);print $5+0}')
+    if (( pct >= DISK_TH && now - DISK_LAST >= 21600 )); then
+      mon_alert "💽 <b>Диск</b>: занято ${pct}% (порог ${DISK_TH}%)"; DISK_LAST=$now
+    fi
+  fi
+
+  # серты: certificateFile из TLS-инбаундов (проверка раз в час, алерт раз в 12ч)
+  if (( EV_CERT == 1 && now - CERT_CHK >= 3600 )); then
+    CERT_CHK=$now
+    bad=""
+    while IFS= read -r cf; do
+      [[ -r "$cf" ]] || continue
+      endd=$(openssl x509 -in "$cf" -noout -enddate 2>/dev/null | cut -d= -f2)
+      [[ -z "$endd" ]] && continue
+      left=$(( ( $(date -d "$endd" +%s 2>/dev/null || printf '0') - $(date +%s) ) / 86400 ))
+      if (( left <= 7 )); then bad+="• $(basename "$(dirname "$cf")"): осталось ${left} дн"$'\n'; fi
+    done < <(sqlite3 "$XUI_DB" "SELECT stream_settings FROM inbounds;" 2>/dev/null \
+      | jq -r '.tlsSettings.certificates[]?.certificateFile // empty' 2>/dev/null | sort -u)
+    if [[ -n "$bad" ]] && (( now - CERT_LAST >= 43200 )); then
+      mon_alert "🔐 <b>Серты истекают (≤7 дн)</b>:
+${bad}Перевыпусти через stack-manager › серты."
+      CERT_LAST=$now
+    fi
+  fi
+
+  # бэкап БД упал (алерт не чаще раза в 6ч, пока не починят)
+  if (( EV_BKFAIL == 1 )); then
+    st=$(systemctl is-failed xui-db-backup.service 2>/dev/null)
+    if [[ "$st" == "failed" ]] && (( now - BKF_LAST >= 21600 )); then
+      mon_alert "💾 <b>Бэкап БД упал</b> — детали: journalctl -u xui-db-backup"; BKF_LAST=$now
     fi
   fi
   mon_save
@@ -858,6 +968,10 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
       clpage:*)
         local p="${cbdata#clpage:}"
         if [[ "$p" =~ ^[0-9]+$ ]]; then CL_PAGE=$((10#$p)); show_screen "$chat" "clients"; fi ;;
+      err:*)
+        local eu; eu=$(err_unit "${cbdata#err:}") || eu=""
+        if [[ -z "$eu" ]]; then tg_send "$chat" "Не знаю такой сервис. Доступны: xui, nginx, adg, f2b, bot."
+        else tg_send_kb "$chat" "$(err_tail "$eu")" "$KB_HIDE" >/dev/null; fi ;;
       hide)
         tg_del "$chat" "$cbmid"
         [[ "$cbmid" == "$WINDOW_MID" ]] && WINDOW_MID=""
@@ -986,6 +1100,14 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
                   elif (( RAM_TH == 90 )); then RAM_TH=95
                   elif (( RAM_TH == 95 )); then RAM_TH=85
                   else EV_RAM=0; RAM_TH=90; fi ;;
+          nginx)  EV_NGINX=$(( 1 - EV_NGINX )) ;;
+          adg)    EV_ADG=$(( 1 - EV_ADG )) ;;
+          disk)   if (( EV_DISK == 0 )); then EV_DISK=1; DISK_TH=85
+                  elif (( DISK_TH == 85 )); then DISK_TH=90
+                  elif (( DISK_TH == 90 )); then DISK_TH=95
+                  else EV_DISK=0; DISK_TH=85; fi ;;
+          cert)   EV_CERT=$(( 1 - EV_CERT )) ;;
+          bkfail) EV_BKFAIL=$(( 1 - EV_BKFAIL )) ;;
         esac
         mon_save; show_screen "$chat" "bksched" ;;
       new:start)
@@ -1044,6 +1166,7 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
           x-ui)  PENDING="restart-xui" ;;
           nginx) PENDING="restart-nginx" ;;
           xray)  PENDING="restart-xray" ;;
+          AdGuardHome) PENDING="restart-adg" ;;
         esac
         PENDING_TS=$SECONDS; tg_confirm "$PENDING" "$chat" "Рестарт $svc?" ;;
       cancel) PENDING=""; tg_send "$chat" "Отменено." ;;
@@ -1060,7 +1183,7 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
             tg_send "$chat" "❌ $dr"
             show_screen "$chat" "client"
           fi
-        elif [[ "$PENDING" =~ ^(fix|awg|restart-xui|restart-nginx|restart-xray|backup)$ && "$cbdata" == "confirm:$PENDING" && $(( SECONDS - PENDING_TS )) -le 300 ]]; then
+        elif [[ "$PENDING" =~ ^(fix|awg|restart-xui|restart-nginx|restart-adg|restart-xray|backup)$ && "$cbdata" == "confirm:$PENDING" && $(( SECONDS - PENDING_TS )) -le 300 ]]; then
           local act="$PENDING"; PENDING=""
           if [[ "$act" == "backup" ]]; then
             tg_send "$chat" "💾 Готовлю бэкап…"
@@ -1134,6 +1257,13 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
     /subs)    tg_send_kb "$chat" "$(cmd_subs)" "$KB_HIDE" >/dev/null ;;
     /fix)     PENDING="fix"; PENDING_TS=$SECONDS; tg_confirm "fix" "$chat" "Запустить автопочинку (⚡ проверка и починка)?" ;;
     /cancel)  PENDING=""; wiz_reset; tg_send "$chat" "Ок." ;;
+    /err*)
+      local ea eu
+      ea=$(printf '%s' "$text" | awk '{print $2}')
+      [[ -z "$ea" ]] && ea="xui"
+      eu=$(err_unit "$ea") || eu=""
+      if [[ -z "$eu" ]]; then tg_send "$chat" "Не знаю сервис «$(hesc "$ea")». Доступны: xui, nginx, adg, f2b, bot (или /err без аргумента = x-ui)."
+      else tg_send_kb "$chat" "$(err_tail "$eu")" "$KB_HIDE" >/dev/null; fi ;;
     *)        tg_send "$chat" "Используй окно панели или /start." ;;
   esac
 }
