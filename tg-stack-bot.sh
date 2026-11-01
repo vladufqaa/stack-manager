@@ -136,23 +136,13 @@ render_main() {
   printf '🖥 <b>Панель стека</b> › Главное\n🔗 хост: <a href="https://%s%s">%s</a>\n%s x-ui   %s nginx\n👥 клиентов: %s · 📡 Инбаунды: %s\nВыбери раздел:' "$dom" "$pb" "$dom" "$xui" "$ngx" "$nc" "$in_n"
 }
 
-render_clients() {
-  local rows email en up down out="" tot pages idx=0 start pg=""
-  rows=$(sqlite3 -separator '|' "$XUI_DB" \
-    "SELECT COALESCE(c.email,''),CASE c.enable WHEN 1 THEN '✅' ELSE '⛔' END,COALESCE(t.up,0),COALESCE(t.down,0)
-     FROM clients c LEFT JOIN client_traffics t ON t.email=c.email ORDER BY c.id;" 2>/dev/null)
-  [[ -z "$rows" ]] && { CL_PAGE=1; printf '👥 <b>Клиенты</b>\nВ панели нет клиентов.'; return 0; }
-  tot=$(printf '%s\n' "$rows" | wc -l)
+render_clients() { # только заголовок: клиенты — плитки в клавиатуре (kb_clients)
+  local tot pages
+  tot=$(sqlite3 "$XUI_DB" 'SELECT count(*) FROM clients;' 2>/dev/null); tot=${tot:-0}
+  if (( tot == 0 )); then CL_PAGE=1; printf '👥 <b>Клиенты</b>\nВ панели нет клиентов.'; return 0; fi
   pages=$(( (tot + CL_PER - 1) / CL_PER )); (( pages < 1 )) && pages=1
   (( CL_PAGE > pages )) && CL_PAGE=$pages; (( CL_PAGE < 1 )) && CL_PAGE=1
-  start=$(( (CL_PAGE - 1) * CL_PER ))
-  while IFS='|' read -r email en up down; do
-    idx=$((idx+1))
-    (( idx <= start || idx > start + CL_PER )) && continue
-    out+="$en <code>$(hesc "$email")</code> · ↑$(fmt_bytes ${up:-0}) ↓$(fmt_bytes ${down:-0})"$'\n'
-  done <<<"$rows"
-  (( pages > 1 )) && pg="📄 Страница ${CL_PAGE} / ${pages}"$'\n'
-  printf '👥 <b>Клиенты</b> · всего %s\n%s\n%sНажми клиента — откроется карточка (подписка, QR, лимиты, инбаунды).' "$tot" "$out" "$pg"
+  printf '👥 <b>Клиенты</b> · всего %s · стр %s/%s\nНажми плитку — откроется карточка.' "$tot" "$CL_PAGE" "$pages"
 }
 
 render_traffic() {
@@ -236,14 +226,14 @@ kb_clients() { # кнопки клиентов ТЕКУЩЕЙ страницы (
   (( CL_PAGE > pages )) && CL_PAGE=$pages; (( CL_PAGE < 1 )) && CL_PAGE=1
   start=$(( (CL_PAGE - 1) * CL_PER ))
   n=$start
-  while IFS= read -r email; do
+  while IFS='|' read -r email st; do
     n=$((n+1))
-    rowbtns+=("$(jq -n --arg e "$email" --arg n "$n" '{text:("📱 "+$e),callback_data:("copen:"+$n)}')")
+    rowbtns+=("$(jq -n --arg e "$email" --arg st "$st" --arg n "$n" '{text:($st+" "+$e),callback_data:("copen:"+$n)}')")
     if (( ${#rowbtns[@]} == 2 )); then
       rows+="${sep}[$(IFS=,; printf '%s' "${rowbtns[*]}")]"; sep=","
       rowbtns=()
     fi
-  done < <(sqlite3 "$XUI_DB" "SELECT COALESCE(email,'клиент') FROM clients ORDER BY id LIMIT ${CL_PER} OFFSET ${start};" 2>/dev/null)
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT COALESCE(c.email,'клиент'),CASE c.enable WHEN 1 THEN '✅' ELSE '⛔' END FROM clients c ORDER BY c.id LIMIT ${CL_PER} OFFSET ${start};" 2>/dev/null)
   if (( ${#rowbtns[@]} > 0 )); then
     rows+="${sep}[$(IFS=,; printf '%s' "${rowbtns[*]}")]"
   fi
@@ -988,14 +978,15 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
         local n="${cbdata#copen:}" em
         [[ "$n" =~ ^[0-9]+$ ]] || return 0
         em=$(sqlite3 "$XUI_DB" "SELECT COALESCE(email,'') FROM clients ORDER BY id LIMIT 1 OFFSET $(( n - 1 ));" 2>/dev/null)
-        if em_ok "$em"; then
+        # без em_ok: имена клиентов бывают кириллицей/с "+", важен факт существования в БД
+        if [[ -n "$em" ]] && client_exists "$em"; then
           E_EMAIL="$em"; ecard_close "$chat"; show_screen "$chat" "client"
         else
-          tg_send "$chat" "Клиент не найден."
+          tg_send "$chat" "Клиент не найден (в БД нет строки с этим номером)."
         fi ;;
       csub:*)
         local e="${cbdata#csub:}" url
-        if ! em_ok "$e" || ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
+        if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         if url=$(sub_url_for "$e"); then
           tg_send_kb "$chat" "🔗 ${e}"$'\n'"$url" "$KB_HIDE" >/dev/null
         else
@@ -1003,7 +994,7 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
         fi ;;
       cqr:*)
         local e="${cbdata#cqr:}" url
-        if ! em_ok "$e" || ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
+        if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         if url=$(sub_url_for "$e"); then
           send_qr_msg "$chat" "$url"
         else
@@ -1011,7 +1002,7 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
         fi ;;
       cin:*)
         local e="${cbdata#cin:}"
-        if ! em_ok "$e" || ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
+        if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         E_EMAIL="$e"; NEW_STEP=""; E_STEP="in"; E_IN=$(client_in_csv "$e"); show_ecard "$chat" ;;
       cinb:*)
         local rest="${cbdata#cinb:}" e id
@@ -1025,7 +1016,7 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
         E_STEP="in"; show_ecard "$chat" ;;
       cinok:*)
         local e="${cbdata#cinok:}" cur add rem r err=""
-        em_ok "$e" || return 0
+        client_exists "$e" || return 0
         if [[ "$e" != "$E_EMAIL" ]]; then tg_send "$chat" "⚠️ Сессия устарела — открой клиента заново."; return 0; fi
         cur=$(client_in_csv "$e")
         add=$(csv_diff "$E_IN" "$cur"); rem=$(csv_diff "$cur" "$E_IN")
@@ -1038,7 +1029,7 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
         fi ;;
       cgb:*)
         local e="${cbdata#cgb:}"
-        if ! em_ok "$e" || ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
+        if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         E_EMAIL="$e"; NEW_STEP=""; E_STEP="gb"; show_ecard "$chat" ;;
       cgbset:*)
         local rest="${cbdata#cgbset:}" e gb ch r
@@ -1050,11 +1041,11 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
         [[ "$r" == "OK" ]] || tg_send "$chat" "❌ $r" ;;
       cgbtxt:*)
         local e="${cbdata#cgbtxt:}"
-        if ! em_ok "$e" || ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
+        if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         E_EMAIL="$e"; NEW_STEP=""; E_STEP="gb_txt"; show_ecard "$chat" ;;
       cdays:*)
         local e="${cbdata#cdays:}"
-        if ! em_ok "$e" || ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
+        if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         E_EMAIL="$e"; NEW_STEP=""; E_STEP="days"; show_ecard "$chat" ;;
       cdset:*)
         local rest="${cbdata#cdset:}" e d ms ch r
@@ -1067,11 +1058,11 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
         [[ "$r" == "OK" ]] || tg_send "$chat" "❌ $r" ;;
       cdtxt:*)
         local e="${cbdata#cdtxt:}"
-        if ! em_ok "$e" || ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
+        if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         E_EMAIL="$e"; NEW_STEP=""; E_STEP="days_txt"; show_ecard "$chat" ;;
       askdel:*)
         local e="${cbdata#askdel:}"
-        if ! em_ok "$e" || ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
+        if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         PENDING="cdel:$e"; PENDING_TS=$SECONDS
         tg_confirm "cdel:$e" "$chat" "Удалить клиента ${e}? Подписка и QR перестанут работать." ;;
       cback) ecard_client_view "$chat" ;;
