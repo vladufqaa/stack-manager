@@ -27,7 +27,7 @@ OUT_MTIME="0"                             # mtime state-файла: бот по�
 WIZ_STATE="/run/tg-stack-bot-wiz.env"
 WIZ_MID=""; NEW_STEP=""; NEW_IN=""; NEW_GB=-1; NEW_DAYS=0; NEW_EMAIL=""; NEW_SUBID=""
 E_EMAIL=""; E_STEP=""; E_IN=""; E_MID=""   # карточка клиента (просмотр/правка)
-CL_PAGE=1; CL_PER=8   # пагинация списка клиентов (страница / клиентов на странице)
+CL_PAGE=1; CL_PER=10  # пагинация списка клиентов (страница / клиентов на странице)
 
 log() { echo "[$(date '+%F %T')] $*"; }
 set -o errtrace
@@ -136,13 +136,13 @@ render_main() {
   printf '🖥 <b>Панель стека</b> › Главное\n🔗 хост: <a href="https://%s%s">%s</a>\n%s x-ui   %s nginx\n👥 клиентов: %s · 📡 Инбаунды: %s\nВыбери раздел:' "$dom" "$pb" "$dom" "$xui" "$ngx" "$nc" "$in_n"
 }
 
-render_clients() { # только заголовок: клиенты — плитки в клавиатуре (kb_clients)
+render_clients() { # только заголовок: клиенты — кнопки в клавиатуре (kb_clients)
   local tot pages
   tot=$(sqlite3 "$XUI_DB" 'SELECT count(*) FROM clients;' 2>/dev/null); tot=${tot:-0}
   if (( tot == 0 )); then CL_PAGE=1; printf '👥 <b>Клиенты</b>\nВ панели нет клиентов.'; return 0; fi
   pages=$(( (tot + CL_PER - 1) / CL_PER )); (( pages < 1 )) && pages=1
   (( CL_PAGE > pages )) && CL_PAGE=$pages; (( CL_PAGE < 1 )) && CL_PAGE=1
-  printf '👥 <b>Клиенты</b> · всего %s · стр %s/%s\nНажми плитку — откроется карточка.' "$tot" "$CL_PAGE" "$pages"
+  printf '👥 <b>Клиенты</b> · всего %s · стр %s/%s\nНажми клиента — откроется карточка (подписка, QR, лимиты, инбаунды).' "$tot" "$CL_PAGE" "$pages"
 }
 
 render_traffic() {
@@ -213,10 +213,10 @@ kb_sched() { # динамическая клавиатура расписани�
     "$sw" "$o" "$ou" "$xr" "$nd" "$nu" "$c" "$CPU_TH" "$r" "$RAM_TH" "$n2" "$a2" "$d2" "$DISK_TH" "$ce" "$bf" "$l"
 }
 
-kb_clients() { # кнопки клиентов ТЕКУЩЕЙ страницы (по 2 в ряд) + пагинация + действия
+kb_clients() { # кнопки клиентов ТЕКУЩЕЙ страницы (один клиент — один ряд) + пагинация + действия
   # ВАЖНО: ряды кнопок идут верхним уровнем массива rows — вложенный массив в ряду
   # Telegram не рендерит (была кнопка-«…» на весь ряд).
-  local total pages start n email sep="" rows="" rowbtns=()
+  local total pages start n email sep="" rows=""
   total=$(sqlite3 "$XUI_DB" 'SELECT count(*) FROM clients;' 2>/dev/null); total=${total:-0}
   if (( total == 0 )); then
     printf '[[{"text":"➕ Создать","callback_data":"new:start"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]'
@@ -228,15 +228,8 @@ kb_clients() { # кнопки клиентов ТЕКУЩЕЙ страницы (
   n=$start
   while IFS='|' read -r email st; do
     n=$((n+1))
-    rowbtns+=("$(jq -n --arg e "$email" --arg st "$st" --arg n "$n" '{text:($st+" "+$e),callback_data:("copen:"+$n)}')")
-    if (( ${#rowbtns[@]} == 2 )); then
-      rows+="${sep}[$(IFS=,; printf '%s' "${rowbtns[*]}")]"; sep=","
-      rowbtns=()
-    fi
+    rows+="${sep}[$(jq -n --arg e "$email" --arg st "$st" --arg n "$n" '{text:($st+" "+$e),callback_data:("copen:"+$n)}')]"; sep=","
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT COALESCE(c.email,'клиент'),CASE c.enable WHEN 1 THEN '✅' ELSE '⛔' END FROM clients c ORDER BY c.id LIMIT ${CL_PER} OFFSET ${start};" 2>/dev/null)
-  if (( ${#rowbtns[@]} > 0 )); then
-    rows+="${sep}[$(IFS=,; printf '%s' "${rowbtns[*]}")]"
-  fi
   local pg=""
   if (( pages > 1 )); then
     pg="[{\"text\":\"◀️\",\"callback_data\":\"clpage:$((CL_PAGE-1))\"},{\"text\":\"$CL_PAGE / $pages\",\"callback_data\":\"clpage:$CL_PAGE\"},{\"text\":\"▶️\",\"callback_data\":\"clpage:$((CL_PAGE+1))\"}],"
