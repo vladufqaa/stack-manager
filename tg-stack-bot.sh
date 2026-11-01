@@ -27,6 +27,7 @@ OUT_MTIME="0"                             # mtime state-файла: бот по�
 WIZ_STATE="/run/tg-stack-bot-wiz.env"
 WIZ_MID=""; NEW_STEP=""; NEW_IN=""; NEW_GB=-1; NEW_DAYS=0; NEW_EMAIL=""; NEW_SUBID=""
 E_EMAIL=""; E_STEP=""; E_IN=""; E_MID=""   # карточка клиента (просмотр/правка)
+CL_PAGE=1; CL_PER=8   # пагинация списка клиентов (страница / клиентов на странице)
 
 log() { echo "[$(date '+%F %T')] $*"; }
 set -o errtrace
@@ -135,15 +136,22 @@ render_main() {
 }
 
 render_clients() {
-  local rows email en up down out=""
+  local rows email en up down out="" tot pages idx=0 start pg=""
   rows=$(sqlite3 -separator '|' "$XUI_DB" \
     "SELECT COALESCE(c.email,''),CASE c.enable WHEN 1 THEN '✅' ELSE '⛔' END,COALESCE(t.up,0),COALESCE(t.down,0)
      FROM clients c LEFT JOIN client_traffics t ON t.email=c.email ORDER BY c.id;" 2>/dev/null)
-  [[ -z "$rows" ]] && { printf '👥 <b>Клиенты</b>\nВ панели нет клиентов.'; return 0; }
+  [[ -z "$rows" ]] && { CL_PAGE=1; printf '👥 <b>Клиенты</b>\nВ панели нет клиентов.'; return 0; }
+  tot=$(printf '%s\n' "$rows" | wc -l)
+  pages=$(( (tot + CL_PER - 1) / CL_PER )); (( pages < 1 )) && pages=1
+  (( CL_PAGE > pages )) && CL_PAGE=$pages; (( CL_PAGE < 1 )) && CL_PAGE=1
+  start=$(( (CL_PAGE - 1) * CL_PER ))
   while IFS='|' read -r email en up down; do
+    idx=$((idx+1))
+    (( idx <= start || idx > start + CL_PER )) && continue
     out+="$en <code>$(hesc "$email")</code> · ↑$(fmt_bytes ${up:-0}) ↓$(fmt_bytes ${down:-0})"$'\n'
   done <<<"$rows"
-  printf '👥 <b>Клиенты</b>\n%s\nНажми клиента — откроется карточка (подписка, QR, лимиты, инбаунды).' "$out"
+  (( pages > 1 )) && pg="📄 Страница ${CL_PAGE} / ${pages}"$'\n'
+  printf '👥 <b>Клиенты</b> · всего %s\n%s\n%sНажми клиента — откроется карточка (подписка, QR, лимиты, инбаунды).' "$tot" "$out" "$pg"
 }
 
 render_traffic() {
@@ -199,18 +207,35 @@ kb_sched() { # динамическая клавиатура расписани�
     "$sw" "$o" "$ou" "$xr" "$nd" "$nu" "$c" "$CPU_TH" "$r" "$RAM_TH" "$l"
 }
 
-kb_clients() { # кнопки клиентов (до 12) + все ссылки + назад
-  local btn="[" first=1 n=0 email
+kb_clients() { # кнопки клиентов ТЕКУЩЕЙ страницы (по 2 в ряд) + пагинация + действия
+  # ВАЖНО: ряды кнопок идут верхним уровнем массива rows — вложенный массив в ряду
+  # Telegram не рендерит (была кнопка-«…» на весь ряд).
+  local total pages start n email sep="" rows="" rowbtns=()
+  total=$(sqlite3 "$XUI_DB" 'SELECT count(*) FROM clients;' 2>/dev/null); total=${total:-0}
+  if (( total == 0 )); then
+    printf '[[{"text":"➕ Создать","callback_data":"new:start"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]'
+    return 0
+  fi
+  pages=$(( (total + CL_PER - 1) / CL_PER ))
+  (( CL_PAGE > pages )) && CL_PAGE=$pages; (( CL_PAGE < 1 )) && CL_PAGE=1
+  start=$(( (CL_PAGE - 1) * CL_PER ))
+  n=$start
   while IFS= read -r email; do
-    n=$((n+1)); (( n > 12 )) && break
-    [[ $first == 0 ]] && btn+=","
-    btn+=$(jq -n --arg e "$email" --arg n "$n" '{text:("📱 "+$e),callback_data:("copen:"+$n)}')
-    first=0
-  done < <(sqlite3 "$XUI_DB" 'SELECT COALESCE(email,"клиент") FROM clients ORDER BY id;' 2>/dev/null)
-  btn+="]"
-  [[ $first == 1 ]] && btn='[]'
-  printf '[%s[{"text":"➕ Создать","callback_data":"new:start"},{"text":"📋 Все ссылки","callback_data":"subsall"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]' \
-    "$( [[ $first == 1 ]] && printf '' || printf '%s,' "$btn" )"
+    n=$((n+1))
+    rowbtns+=("$(jq -n --arg e "$email" --arg n "$n" '{text:("📱 "+$e),callback_data:("copen:"+$n)}')")
+    if (( ${#rowbtns[@]} == 2 )); then
+      rows+="${sep}[$(IFS=,; printf '%s' "${rowbtns[*]}")]"; sep=","
+      rowbtns=()
+    fi
+  done < <(sqlite3 "$XUI_DB" "SELECT COALESCE(email,'клиент') FROM clients ORDER BY id LIMIT ${CL_PER} OFFSET ${start};" 2>/dev/null)
+  if (( ${#rowbtns[@]} > 0 )); then
+    rows+="${sep}[$(IFS=,; printf '%s' "${rowbtns[*]}")]"
+  fi
+  local pg=""
+  if (( pages > 1 )); then
+    pg="[{\"text\":\"◀️\",\"callback_data\":\"clpage:$((CL_PAGE-1))\"},{\"text\":\"$CL_PAGE / $pages\",\"callback_data\":\"clpage:$CL_PAGE\"},{\"text\":\"▶️\",\"callback_data\":\"clpage:$((CL_PAGE+1))\"}],"
+  fi
+  printf '[%s%s%s[{"text":"➕ Создать","callback_data":"new:start"},{"text":"📋 Все ссылки","callback_data":"subsall"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]' "$pg" "$rows" "${rows:+,}"
 }
 
 screen_text() { # $1=menu → текст экрана (HTML)
@@ -830,6 +855,9 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
     log "DEBUG: cb=$cbdata (step=$NEW_STEP in=$NEW_IN gb=$NEW_GB days=$NEW_DAYS email=$NEW_EMAIL)"
     case "$cbdata" in
       nav:*) show_screen "$chat" "${cbdata#nav:}" ;;
+      clpage:*)
+        local p="${cbdata#clpage:}"
+        if [[ "$p" =~ ^[0-9]+$ ]]; then CL_PAGE=$((10#$p)); show_screen "$chat" "clients"; fi ;;
       hide)
         tg_del "$chat" "$cbmid"
         [[ "$cbmid" == "$WINDOW_MID" ]] && WINDOW_MID=""
