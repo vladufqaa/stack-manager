@@ -890,8 +890,36 @@ ${bad}Перевыпусти через stack-manager › серты."
   mon_save
 }
 
-mon_login_check() { # попытки входа в панель — быстро, каждый проход цикла (вне гейта MON_IV)
+mon_login_check() { # входы в панель: источник истины — журнал x-ui (200 панель шлёт и на неверный пароль!),
+  # фолбэк для старых панелей без этих строк — access.log (как раньше)
   (( MON_ON == 1 )) || return 0
+  local cf="/root/.tg-stack-bot-login.cursor" out line res un ip rsn extra jrc
+  if [[ ! -s "$cf" ]]; then
+    # инициализация: запоминаем «текущую позицию», старую историю не алертим
+    journalctl -q -u x-ui -n 1 --cursor-file="$cf" >/dev/null 2>&1
+    return 0
+  fi
+  out=$(journalctl -q -u x-ui -o cat --cursor-file="$cf" 2>/dev/null); jrc=$?
+  if (( jrc == 0 )); then
+    out=$(grep -aE 'logged in successfully: username=|failed login: username=' <<<"$out" || true)
+    [[ -n "$out" ]] || return 0
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      if [[ "$line" == *"logged in successfully"* ]]; then res="✅ успех"; else res="❌ неудача"; fi
+      un=$(sed -nE 's/.*username="([^"]*)".*/\1/p' <<<"$line")
+      ip=$(sed -nE 's/.*IP="([^"]*)".*/\1/p' <<<"$line")
+      extra=""
+      [[ -n "$un" ]] && extra+=" · ${un}"
+      [[ -n "$ip" && "$ip" != "127.0.0.1" ]] && extra+=" · IP ${ip}"
+      if [[ "$res" == "❌ неудача" ]]; then
+        rsn=$(sed -nE 's/.*reason="([^"]*)".*/\1/p' <<<"$line")
+        [[ -z "$rsn" ]] && rsn="неверный логин или пароль"
+        extra+=" · ${rsn}"
+      fi
+      mon_alert "🔑 <b>Вход в панель</b>: ${res}${extra}"
+    done <<<"$out"
+    return 0
+  fi
   local bp logf="/var/log/nginx/access.log" sz
   bp=$(panel_base)
   sz=$(stat -c %s "$logf" 2>/dev/null || printf 0)
