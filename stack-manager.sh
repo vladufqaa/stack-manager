@@ -11167,6 +11167,16 @@ botout_bot_note() { # бот забирает state сам (mtime); сообща
   fi
 }
 bot_svc_installed() { systemctl cat "$BOT_SVC" >/dev/null 2>&1; }
+bot_unit_migrate() { # старый юнит (Restart=on-failure) → самоисцеляющий (Restart=always); однократно, с бэкапом
+  local uf="/etc/systemd/system/${BOT_SVC}.service" ts
+  grep -q '^Restart=on-failure' "$uf" 2>/dev/null || { log "Юнит $BOT_SVC уже существует — не трогаю"; return 0; }
+  ts=$(date +%Y%m%d-%H%M%S); mkdir -p /root/stack-backups
+  cp -a "$uf" "/root/stack-backups/${BOT_SVC}.unit.pre-always-$ts"
+  sed -i -e 's/^Restart=on-failure/Restart=always/' -e 's/^RestartSec=5/RestartSec=3/' "$uf"
+  grep -q '^StartLimitIntervalSec=' "$uf" || sed -i '/^After=network-online.target/a StartLimitIntervalSec=0' "$uf"
+  systemctl daemon-reload
+  ok "Юнит $BOT_SVC переведён на Restart=always/3с (падение или чистый выход — автоподъём; бэкап: /root/stack-backups/${BOT_SVC}.unit.pre-always-$ts)"
+}
 bot_install() { # установка бота с нуля: скрипт + systemd-юнит + env-заготовка
   local yn="n" have_src=0
   askyn yn "Юнита $BOT_SVC нет на этом сервере. Установить бота? (скрипт с GitHub → systemd-юнит → пустой env; токен затем вводится в п.6)" "y"
@@ -11194,20 +11204,21 @@ bot_install() { # установка бота с нуля: скрипт + system
 [Unit]
 Description=Stack Manager TG bot
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/bin/bash /root/tg-stack-bot.sh
 EnvironmentFile=/root/.tg-stack-bot.env
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 UNIT
     systemctl daemon-reload
-    ok "Юнит /etc/systemd/system/${BOT_SVC}.service создан"
+    ok "Юнит /etc/systemd/system/${BOT_SVC}.service создан (Restart=always)"
   else
-    log "Юнит $BOT_SVC уже существует — не трогаю"
+    bot_unit_migrate
   fi
   if [[ ! -f "$BOT_ENV_FILE" ]]; then
     : > "$BOT_ENV_FILE"
@@ -11240,6 +11251,7 @@ bot_toggle() { # вкл/выкл самого бота: enable --now / disable -
     fi
     askyn yn "Включить бота? (systemctl enable --now $BOT_SVC — старт сейчас + автозапуск при ребуте)" "n"
     [[ "$yn" == "true" ]] || { warn "Отменено — бот остаётся выключенным"; return 1; }
+    bot_unit_migrate
     if ! systemctl enable --now "$BOT_SVC" >/dev/null 2>&1; then
       err "Не удалось запустить $BOT_SVC — последние строки журнала:"
       journalctl -u "$BOT_SVC" -n 10 --no-pager 2>/dev/null | sed 's/^/    /'

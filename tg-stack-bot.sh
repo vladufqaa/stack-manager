@@ -34,12 +34,20 @@ set -o errtrace
 trap '[[ "$BASH_COMMAND" == *jq* ]] && log "DEBUG: jq упал на строке $LINENO: $(awk "NR==$LINENO" "$0" 2>/dev/null | head -c 120)"' ERR
 [[ -n "$BOT_TOKEN" ]] || { log "BOT_TOKEN не задан — выходим"; exit 0; }
 command -v jq >/dev/null || { log "jq не найден"; exit 1; }
+command -v flock >/dev/null || { log "flock не найден (util-linux)"; exit 1; }
+
+# ── отказоустойчивость: один экземпляр + курсор апдейтов ────────────────────
+exec 9>/run/tg-stack-bot.lock   # синглтон: два экземпляра ловят 409 Conflict у Telegram
+flock -n 9 || { log "бот уже запущен (lock /run/tg-stack-bot.lock) — второй экземпляр не нужен"; exit 0; }
+OFFSET_FILE="/run/tg-stack-bot.offset"  # курсор getUpdates переживает рестарт — старые нажатия кнопок не переигрываются
+offset_save() { printf '%s' "$OFFSET" > "${OFFSET_FILE}.tmp" 2>/dev/null && mv -f "${OFFSET_FILE}.tmp" "$OFFSET_FILE" 2>/dev/null; }
 
 # ── базовая отправка ────────────────────────────────────────────────────────
-tg_send() { # $1=chat $2=text
+tg_send() { # $1=chat $2=text — служебное сообщение, всегда с кнопкой «🗑 Скрыть»
   local text="${2:-}" json
   (( ${#text} > 3500 )) && text="…${text: -3500}"
-  json=$(jq -n --arg c "$1" --arg t "$text" '{chat_id:$c,text:$t}')
+  json=$(jq -n --arg c "$1" --arg t "$text" --argjson kb "$KB_HIDE" \
+    '{chat_id:$c,text:$t,reply_markup:{inline_keyboard:$kb}}')
   tgc -s --max-time 40 -X POST "$API/sendMessage" -H 'Content-Type: application/json' -d "$json" >/dev/null
 }
 tg_send_kb() { # $1=chat $2=text $3=inline_keyboard — возвращает message_id (пусто при ошибке)
@@ -234,7 +242,8 @@ kb_clients() { # кнопки клиентов ТЕКУЩЕЙ страницы (
   if (( pages > 1 )); then
     pg="[{\"text\":\"◀️\",\"callback_data\":\"clpage:$((CL_PAGE-1))\"},{\"text\":\"$CL_PAGE / $pages\",\"callback_data\":\"clpage:$CL_PAGE\"},{\"text\":\"▶️\",\"callback_data\":\"clpage:$((CL_PAGE+1))\"}],"
   fi
-  printf '[%s%s%s[{"text":"➕ Создать","callback_data":"new:start"},{"text":"📋 Все ссылки","callback_data":"subsall"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]' "$pg" "$rows" "${rows:+,}"
+  # пагинация — ВНИЗУ списка (после клиентов), действия — в самом низу
+  printf '[%s%s%s[{"text":"➕ Создать","callback_data":"new:start"},{"text":"📋 Все ссылки","callback_data":"subsall"}],[{"text":"⬅️ Меню","callback_data":"nav:main"}]]' "$rows" "${rows:+,}" "$pg"
 }
 
 screen_text() { # $1=menu → текст экрана (HTML)
@@ -751,10 +760,11 @@ EOF
   umask "$um"
 }
 
-mon_alert() { # $1=text (HTML) — алерт в чат админа + лог результата в журнал
+mon_alert() { # $1=text (HTML) — алерт в чат админа (с кнопкой «🗑 Скрыть») + лог результата в журнал
   [[ -n "${ADMIN_CHAT_ID:-}" ]] || return 0
   local json resp
-  json=$(jq -n --arg c "$ADMIN_CHAT_ID" --arg t "$1" '{chat_id:$c,text:$t,parse_mode:"HTML"}')
+  json=$(jq -n --arg c "$ADMIN_CHAT_ID" --arg t "$1" --argjson kb "$KB_HIDE" \
+    '{chat_id:$c,text:$t,parse_mode:"HTML",reply_markup:{inline_keyboard:$kb}}')
   resp=$(tgc -s --max-time 30 -X POST "$API/sendMessage" -H 'Content-Type: application/json' -d "$json")
   log "мониторинг: ok=$(jq -r '.ok // false' <<<"${resp:-}") $(jq -r '.description // ""' <<<"${resp:-}") :: ${1:0:60}"
 }
@@ -1260,10 +1270,8 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
 
   case "$text" in
     /start|/help|/menu)
-      # убрать старую reply-клавиатуру и открыть окно
-      local j; j=$(jq -n --arg c "$chat" --arg t "Панель стека. Управление — кнопками в окне ниже." \
-        '{chat_id:$c,text:$t,reply_markup:{remove_keyboard:true}}')
-      tgc -s --max-time 40 -X POST "$API/sendMessage" -H 'Content-Type: application/json' -d "$j" >/dev/null
+      # заметка перед окном — обычное сообщение, с кнопкой «🗑 Скрыть»
+      tg_send "$chat" "Панель стека. Управление — кнопками в окне ниже."
       WINDOW_MID=""; show_screen "$chat" "main" ;;
     /status)  show_screen "$chat" "server" ;;
     /audit)   tg_send_kb "$chat" "$(run_check)" "$KB_HIDE" >/dev/null ;;
@@ -1286,15 +1294,27 @@ wiz_load
 mon_load
 out_load; tgout_cur_recalc
 OUT_MTIME=$(stat -c %Y "$OUT_FILE" 2>/dev/null || printf '0')
+OFFSET=$(cat "$OFFSET_FILE" 2>/dev/null || true)
+[[ "$OFFSET" =~ ^[0-9]+$ ]] || OFFSET=-1   # -1 = первый опрос: курсор ставим «за последний» апдейт, накопленное не переигрываем
 log "бот запущен (admin=${ADMIN_CHAT_ID:-НЕ задан — режим обучения}; tg-выход=$( [[ -n "$TG_PROXY_CUR" ]] && printf '%s: %s' "$TG_OUT_MODE" "$TG_PROXY_CUR" || printf 'прямой' ))"
+main_loop() {
 while :; do
   out_check_reload
   mon_tick
   mon_login_check
-  resp=$(tgc -s --max-time 40 "$API/getUpdates?timeout=30&offset=${OFFSET}")
-  [[ -z "$resp" ]] && continue
+  resp=$(tgc -s --retry 2 --retry-delay 2 --max-time 40 "$API/getUpdates?timeout=30&offset=${OFFSET}")
+  [[ -z "$resp" ]] && { sleep 3; continue; }   # сеть моргнула — короткая пауза, не горячий цикл
   ok=$(jq -r '.ok // false' <<<"$resp" 2>/dev/null) || ok=false
-  [[ "$ok" != "true" ]] && { log "API: $(head -c 200 <<<"$resp")"; sleep 5; continue; }
+  if [[ "$ok" != "true" ]]; then
+    ec=$(jq -r '.error_code // 0' <<<"$resp" 2>/dev/null)
+    if [[ "$ec" == "409" ]]; then log "409 Conflict — второй экземпляр бота? Жду 15 с"; sleep 15; continue; fi
+    log "API: $(head -c 200 <<<"$resp")"; sleep 5; continue
+  fi
+  if (( OFFSET < 0 )); then   # первый успешный опрос после старта: пропускаем накопленное, не спамим старыми карточками
+    OFFSET=$(jq -r '[.result[]?.update_id] | if length>0 then (max+1) else 0 end' <<<"$resp" 2>/dev/null)
+    [[ "$OFFSET" =~ ^[0-9]+$ ]] || OFFSET=0
+    offset_save; continue
+  fi
   while IFS= read -r upd; do
     [[ -z "$upd" ]] && continue
     uid=$(jq -r '.update_id' <<<"$upd")
@@ -1313,4 +1333,12 @@ while :; do
     fi
     dispatch "$chat" "$text" "$cbdata" "$cbid" "$cbmid"
   done < <(jq -c '.result[]?' <<<"$resp" 2>/dev/null)
+  offset_save
+done
+}
+# ── супервизор: внутренний цикл не должен возвращаться; если вернулся — поднимаем ──
+while :; do
+  main_loop
+  log "главный цикл завершился (неожиданно) — перезапуск через 3 с"
+  sleep 3
 done
