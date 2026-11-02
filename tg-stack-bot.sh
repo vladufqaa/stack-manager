@@ -1181,8 +1181,8 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
           fi
           wiz_reset
         fi ;;
-      new:close) wiz_reset; NEW_STEP=""; WIZ_MID=""; tg_send "$chat" "Мастер закрыт." ;;
-      new:abort) wiz_reset; tg_send "$chat" "Создание клиента отменено." ;;
+      new:close) local wzm=$WIZ_MID; wiz_reset; NEW_STEP=""; [[ -n "$wzm" ]] && tg_del "$chat" "$wzm"; tg_send "$chat" "Мастер закрыт." ;;
+      new:abort) local wzm=$WIZ_MID; wiz_reset; [[ -n "$wzm" ]] && tg_del "$chat" "$wzm"; tg_send "$chat" "Создание клиента отменено." ;;
       askrestart:*)
         local svc="${cbdata#askrestart:}"
         case "$svc" in
