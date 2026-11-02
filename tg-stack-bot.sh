@@ -1103,9 +1103,9 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
         if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         en=$(sqlite3 "$XUI_DB" "SELECT COALESCE(enable,0) FROM clients WHERE email='$e';" 2>/dev/null); en=${en:-0}
         if [[ "$en" == "1" ]]; then
-          r=$(api_client_update "$e" '{"enable":false}'); [[ "$r" == "OK" ]] && tg_send "$chat" "⛔ Клиент ${e} выключен."
+          r=$(api_client_update "$e" '{"enable":false}')
         else
-          r=$(api_client_update "$e" '{"enable":true}'); [[ "$r" == "OK" ]] && tg_send "$chat" "✅ Клиент ${e} включён."
+          r=$(api_client_update "$e" '{"enable":true}')
         fi
         show_screen "$chat" "client"
         [[ "$r" == "OK" ]] || tg_send "$chat" "❌ $r" ;;
@@ -1195,7 +1195,7 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
           wiz_reset
         fi ;;
       new:close) local wzm=$WIZ_MID; wiz_reset; NEW_STEP=""; [[ -n "$wzm" ]] && tg_del "$chat" "$wzm"; tg_send "$chat" "Мастер закрыт." ;;
-      new:abort) local wzm=$WIZ_MID; wiz_reset; [[ -n "$wzm" ]] && tg_del "$chat" "$wzm"; tg_send "$chat" "Создание клиента отменено." ;;
+      new:abort) local wzm=$WIZ_MID; wiz_reset; [[ -n "$wzm" ]] && tg_del "$chat" "$wzm" ;;
       askrestart:*)
         local svc="${cbdata#askrestart:}"
         case "$svc" in
@@ -1309,18 +1309,25 @@ out_load; tgout_cur_recalc
 OUT_MTIME=$(stat -c %Y "$OUT_FILE" 2>/dev/null || printf '0')
 OFFSET=$(cat "$OFFSET_FILE" 2>/dev/null || true)
 [[ "$OFFSET" =~ ^[0-9]+$ ]] || OFFSET=-1   # -1 = первый опрос: курсор ставим «за последний» апдейт, накопленное не переигрываем
+C409LOG=0                                  # счётчик подавленных 409 (лог раз в 10)
 log "бот запущен (admin=${ADMIN_CHAT_ID:-НЕ задан — режим обучения}; tg-выход=$( [[ -n "$TG_PROXY_CUR" ]] && printf '%s: %s' "$TG_OUT_MODE" "$TG_PROXY_CUR" || printf 'прямой' ))"
 main_loop() {
 while :; do
   out_check_reload
   mon_tick
   mon_login_check
-  resp=$(tgc -s --retry 2 --retry-delay 2 --max-time 40 "$API/getUpdates?timeout=30&offset=${OFFSET}")
+  resp=$(tgc -s --retry 2 --retry-delay 2 --max-time 25 "$API/getUpdates?timeout=15&offset=${OFFSET}")
   [[ -z "$resp" ]] && { sleep 3; continue; }   # сеть моргнула — короткая пауза, не горячий цикл
   ok=$(jq -r '.ok // false' <<<"$resp" 2>/dev/null) || ok=false
   if [[ "$ok" != "true" ]]; then
     ec=$(jq -r '.error_code // 0' <<<"$resp" 2>/dev/null)
-    if [[ "$ec" == "409" ]]; then log "409 Conflict — второй экземпляр бота? Жду 15 с"; sleep 15; continue; fi
+    if [[ "$ec" == "409" ]]; then
+      # 409 = слот getUpdates занят другим поллером: спим 1с и тут же перехватываем окно
+      # (долгий сон здесь = бот не получает нажатия, пока соперник держит long-poll)
+      (( C409LOG += 1 ))
+      (( C409LOG % 10 == 1 )) && log "409 Conflict — слот занят другим поллером, перехватываю (подавл. лог $(( C409LOG - 1 )) шт)"
+      sleep 1; continue
+    fi
     log "API: $(head -c 200 <<<"$resp")"; sleep 5; continue
   fi
   if (( OFFSET < 0 )); then   # первый успешный опрос после старта: пропускаем накопленное, не спамим старыми карточками
