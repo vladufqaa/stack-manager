@@ -174,7 +174,15 @@ Run the whole stack from a single Telegram "window": an inline menu with in-wind
 
 Reliability: singleton via `flock` — a second instance cannot cause 409 Conflict; the `getUpdates` cursor is persisted, so after a restart the bot does not replay old button presses; `Restart=always` unit; after a 409 it does a fast 1-second retry to win the update slot back.
 
-**Installation:**
+**Installation — from stack-manager**: menu `7) ⚙️ Panel and AdGuard` → `4) 🤖 TG bot: Telegram egress`.
+
+1. **Item 5 "Enable the bot"** — the unit does not exist yet, so the script offers an install and downloads `tg-stack-bot.sh` from GitHub itself (with a `bash -n` check), creates the systemd unit (`Restart=always/3s`) and an empty env file (600).
+2. **Panel API token** — the only manual step (the bot talks to the panel with the Bearer token from this file): `/usr/local/x-ui/x-ui setting -getApiToken | sed 's/^apiToken: //' > /root/.tg-api-token && chmod 600 /root/.tg-api-token`. Only the token itself goes into the file, without the "apiToken: " prefix; calling the command again regenerates and invalidates the previous token.
+3. **Item 6 "🔑 Bot token and owner ID"** — enter `BOT_TOKEN` and `ADMIN_CHAT_ID`; the script verifies the token via `getMe` over the same route the bot itself uses, restarts the unit and sends a test message to the chat.
+4. **Item 5 "Enable the bot"** again — start now + enable on boot. Items **1–4** of the same menu control the bot's Telegram egress (via an existing outbound / a custom JSON outbound / a SOCKS proxy / direct); the bot picks the mode up on the fly, without a restart.
+
+<details>
+<summary><b>Manual installation (without the menu)</b></summary>
 
 ```bash
 # 1) script
@@ -214,8 +222,10 @@ EOF
 systemctl daemon-reload && systemctl enable --now tg-stack-bot
 ```
 
+</details>
+
 > [!IMPORTANT]
-> One Telegram token = one running bot. Two copies (even on different servers) fight over `getUpdates`, and buttons misfire for both. The bot's Telegram egress is configured from stack-manager (section 7 → "TG egress") and is picked up by the bot on the fly, without a restart.
+> One Telegram token = one running bot. Two copies (even on different servers) fight over `getUpdates`, and buttons misfire for both.
 
 ## 📡 Supported inbounds
 
