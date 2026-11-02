@@ -28,6 +28,7 @@
   <a href="#-возможности">Возможности</a> ·
   <a href="#-быстрый-старт">Установка</a> ·
   <a href="#-меню">Меню</a> ·
+  <a href="#-telegram-бот-tg-stack-bot">TG-бот</a> ·
   <a href="#-диагностика">Диагностика</a> ·
   <a href="#-расположение-файлов">Файлы</a>
 </p>
@@ -152,6 +153,64 @@ curl -4 -fsSL "https://raw.githubusercontent.com/vladufqaa/stack-manager/main/st
 ### ⚡ Проверить всё и починить
 
 Один проход из раздела 6: **read-only аудит → безопасная автопочинка найденного → контрольная проверка** с дельтой «было → осталось». Чинит детерминированное: поднимает упавшие nginx/x-ui, синхронизирует серты/decoy инбаундов, чинит CDN-drift, открывает отсутствующие UDP-правила UFW, пересобирает xray-конфиг для мёртвых сокетов. Квоты Let's Encrypt не тратит и битый nginx-конфиг вслепую не правит — только показывает причину. Перед починкой — явное подтверждение.
+
+## 🤖 Telegram-бот (tg-stack-bot)
+
+Управление сервером из Telegram одним «окном»: inline-меню с навигацией внутри экрана и автообновлением статуса — в стиле новой панели 3x-ui. Живёт отдельным файлом `tg-stack-bot.sh`, к панели обращается через её API, к стеку — через `stack-manager.sh`; конфигурацию панели сам не меняет.
+
+| Экран | Возможности |
+|---|---|
+| 🖥 Сервер | статус x-ui / nginx / Xray / AWG, CPU, RAM, диск, сеть, uptime |
+| 👥 Клиенты | список строками с пагинацией; карточка клиента: QR, ссылка подписки, инбаунды, лимит ГБ, срок, переключатель «⛔ Выключить / ✅ Включить» через панельный API, удаление |
+| ➕ Новый клиент | мастер: инбаунд → имя → срок → лимит |
+| 📊 Трафик | расход и лимиты |
+| 🛠 Обслуживание | перезапуск x-ui / nginx / AdGuard / Xray / AWG, бэкап БД, журналы ошибок, `/audit`, `/subs` |
+| ⏰ Расписание | мониторинг ресурсов с алертами в чат, расписание бэкапа `x-ui.db` (документ в чат) |
+
+Надёжность: singleton через `flock` — второй экземпляр не создаёт 409 Conflict; курсор `getUpdates` сохраняется, после рестарта бот не переигрывает старые нажатия; юнит с `Restart=always`; после 409 — быстрый ретрай (1 с), чтобы вернуть себе слот обновлений.
+
+**Установка:**
+
+```bash
+# 1) скрипт
+curl -4 -fsSL \
+  "https://raw.githubusercontent.com/vladufqaa/stack-manager/main/tg-stack-bot.sh?ts=$(date +%s%N)-$$" \
+  | tr -d '\r' > /root/tg-stack-bot.sh && chmod 700 /root/tg-stack-bot.sh
+
+# 2) env: токен бота и chat_id администратора
+cat > /root/.tg-stack-bot.env <<'EOF'
+BOT_TOKEN="123456:ABC-DEF..."
+ADMIN_CHAT_ID="123456789"
+EOF
+chmod 600 /root/.tg-stack-bot.env
+
+# 3) API-токен панели (в файл — только сам токен, без префикса «apiToken: »;
+#    повторный вызов перегенерирует и инвалидирует предыдущий)
+/usr/local/x-ui/x-ui setting -getApiToken
+chmod 600 /root/.tg-api-token
+
+# 4) systemd-юнит
+cat > /etc/systemd/system/tg-stack-bot.service <<'EOF'
+[Unit]
+Description=Stack Manager TG bot
+After=network-online.target x-ui.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/root/.tg-stack-bot.env
+ExecStart=/usr/bin/env bash /root/tg-stack-bot.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload && systemctl enable --now tg-stack-bot
+```
+
+> [!IMPORTANT]
+> Один TG-токен = один запущенный бот. Две копии (даже на разных серверах) воюют за `getUpdates` — кнопки срабатывают через раз у обоих. Выход бота в Telegram настраивается из stack-manager (п. 7 → «TG-выход») и подхватывается ботом на лету, без рестарта.
 
 ## 📡 Поддерживаемые инбаунды
 

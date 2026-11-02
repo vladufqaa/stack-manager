@@ -28,6 +28,7 @@
   <a href="#-features">Features</a> ·
   <a href="#-quick-start">Install</a> ·
   <a href="#-menu">Menu</a> ·
+  <a href="#-telegram-bot-tg-stack-bot">TG bot</a> ·
   <a href="#-diagnostics">Diagnostics</a> ·
   <a href="#-file-layout">Files</a>
 </p>
@@ -157,6 +158,64 @@ Left column is the actual on-screen text (Russian); right column is the English 
 ### ⚡ Check everything and fix
 
 A single pass from section 6: **read-only audit → safe auto-repair of what was found → verification** with a before → after delta. It fixes deterministic issues: restarts fallen nginx/x-ui, syncs inbound certs/decoys, repairs CDN drift, opens missing UFW rules for UDP inbounds, rebuilds the xray config for dead sockets. It never spends Let's Encrypt rate limits and never blindly edits a broken nginx config — it shows the reason instead. Explicit confirmation is required before any repair.
+
+## 🤖 Telegram bot (tg-stack-bot)
+
+Run the whole stack from a single Telegram "window": an inline menu with in-window navigation and live status refresh, in the style of the new 3x-ui panel. It lives in a separate file, `tg-stack-bot.sh`; it talks to the panel via its API and to the stack via `stack-manager.sh`, and never edits panel configuration on its own.
+
+| Screen | What it does |
+|---|---|
+| 🖥 Server | x-ui / nginx / Xray / AWG status, CPU, RAM, disk, network, uptime |
+| 👥 Clients | per-row client list with pagination; client card: QR, subscription link, inbounds, GB limit, expiry, a "⛔ Disable / ✅ Enable" toggle via the panel API, deletion |
+| ➕ New client | wizard: inbound → name → expiry → limit |
+| 📊 Traffic | usage and limits |
+| 🛠 Maintenance | restart x-ui / nginx / AdGuard / Xray / AWG, DB backup, error logs, `/audit`, `/subs` |
+| ⏰ Schedule | resource monitoring with chat alerts, scheduled `x-ui.db` backup (sent as a document) |
+
+Reliability: singleton via `flock` — a second instance cannot cause 409 Conflict; the `getUpdates` cursor is persisted, so after a restart the bot does not replay old button presses; `Restart=always` unit; after a 409 it does a fast 1-second retry to win the update slot back.
+
+**Installation:**
+
+```bash
+# 1) script
+curl -4 -fsSL \
+  "https://raw.githubusercontent.com/vladufqaa/stack-manager/main/tg-stack-bot.sh?ts=$(date +%s%N)-$$" \
+  | tr -d '\r' > /root/tg-stack-bot.sh && chmod 700 /root/tg-stack-bot.sh
+
+# 2) env: bot token and admin chat id
+cat > /root/.tg-stack-bot.env <<'EOF'
+BOT_TOKEN="123456:ABC-DEF..."
+ADMIN_CHAT_ID="123456789"
+EOF
+chmod 600 /root/.tg-stack-bot.env
+
+# 3) panel API token (write only the token itself, without the "apiToken: " prefix;
+#    calling the command again regenerates and invalidates the previous token)
+/usr/local/x-ui/x-ui setting -getApiToken
+chmod 600 /root/.tg-api-token
+
+# 4) systemd unit
+cat > /etc/systemd/system/tg-stack-bot.service <<'EOF'
+[Unit]
+Description=Stack Manager TG bot
+After=network-online.target x-ui.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/root/.tg-stack-bot.env
+ExecStart=/usr/bin/env bash /root/tg-stack-bot.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload && systemctl enable --now tg-stack-bot
+```
+
+> [!IMPORTANT]
+> One Telegram token = one running bot. Two copies (even on different servers) fight over `getUpdates`, and buttons misfire for both. The bot's Telegram egress is configured from stack-manager (section 7 → "TG egress") and is picked up by the bot on the fly, without a restart.
 
 ## 📡 Supported inbounds
 
