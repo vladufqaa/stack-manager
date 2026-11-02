@@ -561,9 +561,11 @@ client_card_render() { # по E_EMAIL
     "$( [[ $lip -gt 0 ]] && printf '%s IP' "$lip" || printf 'нет' )"
 }
 kb_client_card() {
-  local e="$E_EMAIL"
-  printf '[[{"text":"🔗 Подписка","callback_data":"csub:%s"},{"text":"📱 QR","callback_data":"cqr:%s"}],[{"text":"📡 Инбаунды","callback_data":"cin:%s"},{"text":"📊 Лимит ГБ","callback_data":"cgb:%s"}],[{"text":"⏳ Срок","callback_data":"cdays:%s"},{"text":"🗑 Удалить","callback_data":"askdel:%s"}],[{"text":"⬅️ Клиенты","callback_data":"nav:clients"}]]' \
-    "$e" "$e" "$e" "$e" "$e" "$e"
+  local e="$E_EMAIL" en tog
+  en=$(sqlite3 "$XUI_DB" "SELECT COALESCE(enable,0) FROM clients WHERE email='$e';" 2>/dev/null); en=${en:-0}
+  if [[ "$en" == "1" ]]; then tog='⛔ Выключить'; else tog='✅ Включить'; fi
+  printf '[[{"text":"🔗 Подписка","callback_data":"csub:%s"},{"text":"📱 QR","callback_data":"cqr:%s"}],[{"text":"📡 Инбаунды","callback_data":"cin:%s"},{"text":"📊 Лимит ГБ","callback_data":"cgb:%s"}],[{"text":"⏳ Срок","callback_data":"cdays:%s"},{"text":"🗑 Удалить","callback_data":"askdel:%s"}],[{"text":"%s","callback_data":"ctgl:%s"}],[{"text":"⬅️ Клиенты","callback_data":"nav:clients"}]]' \
+    "$e" "$e" "$e" "$e" "$e" "$e" "$tog" "$e"
 }
 ecard_render() {
   case "$E_STEP" in
@@ -1096,6 +1098,17 @@ dispatch() { # $1=chat $2=text $3=callback_data $4=cb_id $5=cb_message_id
         if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
         PENDING="cdel:$e"; PENDING_TS=$SECONDS
         tg_confirm "cdel:$e" "$chat" "Удалить клиента ${e}? Подписка и QR перестанут работать." ;;
+      ctgl:*)
+        local e="${cbdata#ctgl:}" en r
+        if ! client_exists "$e"; then tg_send "$chat" "Клиент не найден."; return 0; fi
+        en=$(sqlite3 "$XUI_DB" "SELECT COALESCE(enable,0) FROM clients WHERE email='$e';" 2>/dev/null); en=${en:-0}
+        if [[ "$en" == "1" ]]; then
+          r=$(api_client_update "$e" '{"enable":false}'); [[ "$r" == "OK" ]] && tg_send "$chat" "⛔ Клиент ${e} выключен."
+        else
+          r=$(api_client_update "$e" '{"enable":true}'); [[ "$r" == "OK" ]] && tg_send "$chat" "✅ Клиент ${e} включён."
+        fi
+        show_screen "$chat" "client"
+        [[ "$r" == "OK" ]] || tg_send "$chat" "❌ $r" ;;
       cback) ecard_client_view "$chat" ;;
       subsall)  tg_send_kb "$chat" "$(cmd_subs)" "$KB_HIDE" >/dev/null ;;
       doaudit)  tg_send_kb "$chat" "$(run_check)" "$KB_HIDE" >/dev/null ;;
