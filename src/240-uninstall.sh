@@ -1090,9 +1090,10 @@ panel_adguard_menu() {
     echo "  1) Управление LucX/3x-ui"
     echo "  2) Управление AdGuard Home"
     echo "  3) DNS Xray в панели LucX/3x-ui"
+    echo "  4) 🤖 TG-бот: выход в Telegram (аутбаунд/SOCKS/напрямую)"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-3]$'
-    case "$c" in 1) panel_manage; pause ;; 2) adguard_manage; pause ;; 3) xray_dns_menu ;; 0) return 0 ;; esac
+    local c=""; ask c "Выбор" "1" '^[0-4]$'
+    case "$c" in 1) panel_manage; pause ;; 2) adguard_manage; pause ;; 3) xray_dns_menu ;; 4) bot_out_menu ;; 0) return 0 ;; esac
   done
 }
 

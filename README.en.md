@@ -28,6 +28,7 @@
   <a href="#-features">Features</a> ·
   <a href="#-quick-start">Install</a> ·
   <a href="#-menu">Menu</a> ·
+  <a href="#-telegram-bot-embedded-in-stack-manager">TG bot</a> ·
   <a href="#-diagnostics">Diagnostics</a> ·
   <a href="#-file-layout">Files</a>
 </p>
@@ -147,7 +148,8 @@ curl -4 -fsSL "https://raw.githubusercontent.com/vladufqaa/stack-manager/main/st
 7) Panel & AdGuard
 ├─ 1) Управление LucX/3x-ui                  — Manage LucX/3x-ui
 ├─ 2) Управление AdGuard Home                — Manage AdGuard Home
-└─ 3) DNS Xray в панели LucX/3x-ui           — Xray DNS in the LucX/3x-ui panel
+├─ 3) DNS Xray в панели LucX/3x-ui           — Xray DNS in the LucX/3x-ui panel
+└─ 4) 🤖 TG-бот: выход в Telegram             — TG bot: Telegram egress (outbound/SOCKS/direct)
 ```
 
 Left column is the actual on-screen text (Russian); right column is the English meaning.
@@ -157,6 +159,70 @@ Left column is the actual on-screen text (Russian); right column is the English 
 ### ⚡ Check everything and fix
 
 A single pass from section 6: **read-only audit → safe auto-repair of what was found → verification** with a before → after delta. It fixes deterministic issues: restarts fallen nginx/x-ui, syncs inbound certs/decoys, repairs CDN drift, opens missing UFW rules for UDP inbounds, rebuilds the xray config for dead sockets. It never spends Let's Encrypt rate limits and never blindly edits a broken nginx config — it shows the reason instead. Explicit confirmation is required before any repair.
+
+## 🤖 Telegram bot (embedded in stack-manager)
+
+Run the server from Telegram in a single «window»: an inline menu with in-screen navigation and an auto-refreshing status — in the style of the new 3x-ui panel. The bot engine is embedded directly into `stack-manager.sh`: there is no separate `tg-stack-bot.sh` file anymore — the `tg-stack-bot.service` unit runs the script itself in `--bot` mode (`ExecStart=/usr/bin/env bash /root/stack-manager.sh --bot`). The bot talks to the panel via its API and never changes the panel configuration on its own.
+
+| Screen | Features |
+|---|---|
+| 🖥 Сервер | x-ui / nginx / Xray / AWG status, CPU, RAM, disk, network, uptime |
+| 👥 Клиенты | line-based list with pagination; client card: QR, subscription link, inbounds, GB limit, expiry, «⛔ Выключить / ✅ Включить» switch via the panel API, deletion |
+| ➕ Новый клиент | wizard: inbound → name → term → limit |
+| 📊 Трафик | usage and limits |
+| 🛠 Обслуживание | restart x-ui / nginx / AdGuard / Xray / AWG, DB backup, error logs, `/audit`, `/subs` |
+| ⏰ Расписание | resource monitoring with chat alerts, `x-ui.db` backup schedule (document in chat) |
+
+Reliability: singleton via `flock` — a second instance cannot cause 409 Conflict; the `getUpdates` cursor is persisted, so after a restart the bot does not replay old button presses; the unit runs with `Restart=always`; after a 409 it does a fast retry (1 s) to win back the update slot. Bot code updates arrive together with stack-manager updates (item 6) and are picked up by restarting the unit; on servers with the old unit the migration to the embedded mode runs automatically via item 5 / item 7 → 4.
+
+**Install — from stack-manager**: menu `7) ⚙️ Panel & AdGuard` → `4) 🤖 TG-бот: выход в Telegram`.
+
+1. **Item 5 «🟢 Включить бота»** — no unit yet: the script creates the systemd unit (`Restart=always/3s`) and an empty env file (600). Nothing is downloaded.
+2. **Panel API token** — the only manual step (the bot calls the panel with the Bearer token from this file): `/usr/local/x-ui/x-ui setting -getApiToken | sed 's/^apiToken: //' > /root/.tg-api-token && chmod 600 /root/.tg-api-token`. Only the token itself goes into the file, without the «apiToken: » prefix; calling it again regenerates and invalidates the previous token.
+3. **Item 6 «🔑 Токен бота и ID владельца»** — enter `BOT_TOKEN` and `ADMIN_CHAT_ID`; the script verifies the token via `getMe` on the same route the bot itself uses, restarts the unit and sends a test message to the chat.
+4. **Item 5** again — start now + autostart. Items **1–4** of the same menu control the bot's Telegram egress (via an existing outbound / a custom JSON outbound / a SOCKS proxy / direct); the bot picks up the mode on the fly, without a restart.
+
+<details>
+<summary><b>Manual unit setup (without the menu)</b></summary>
+
+The script must already be at `/root/stack-manager.sh` (see «Quick start»).
+
+```bash
+# 1) env: bot token and admin chat_id
+cat > /root/.tg-stack-bot.env <<'EOF'
+BOT_TOKEN="123456:ABC-DEF..."
+ADMIN_CHAT_ID="123456789"
+EOF
+chmod 600 /root/.tg-stack-bot.env
+
+# 2) panel API token (only the token itself goes into the file, without the
+#    «apiToken: » prefix; calling it again invalidates the previous token)
+/usr/local/x-ui/x-ui setting -getApiToken
+chmod 600 /root/.tg-api-token
+
+# 3) systemd unit — runs stack-manager itself in --bot mode
+cat > /etc/systemd/system/tg-stack-bot.service <<'EOF'
+[Unit]
+Description=Stack Manager TG bot (embedded)
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/root/.tg-stack-bot.env
+ExecStart=/usr/bin/env bash /root/stack-manager.sh --bot
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload && systemctl enable --now tg-stack-bot
+```
+
+</details>
+
+> [!IMPORTANT]
+> One TG token = one running bot. Two copies (even on different servers) fight over `getUpdates` — buttons fire erratically for both.
 
 ## 📡 Supported inbounds
 

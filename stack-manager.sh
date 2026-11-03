@@ -11663,7 +11663,7 @@ render_card() {
   dom=$(hostname -f 2>/dev/null); dom=${dom:-$(hostname)}
   tgp="прямой"; [[ -n "$TG_PROXY_CUR" ]] && tgp="прокси <code>$(hesc "$TG_PROXY_CUR")</code>"
   printf '🖥 <b>%s</b> — сервер\n%s x-ui   %s nginx\n⏱ аптайм: %s\n📊 load: <code>%s %s %s</code> (%s ядер)\n🧠 RAM: <code>%s/%s МБ (%s%%)</code>\n💾 Диск: <code>%sM/%sM (%s%%)</code>\n🌐 443: <code>%s</code> активных соединений\n📡 AWG: %s\n📥 RX: <code>%s</code> · 📤 TX: <code>%s</code> (с загрузки)\n📤 TG-выход: %s\n🔄 %s · автообновление 10с' \
-    "$dom" "$xui" "$ngx" "${up:-?}" "${l1:-?}" "${l2:-?}" "${l3:-?}" "$cores" "${ram_u:-?}" "${ram_t:-?}" "$ram_p" "${du:-?}" "${dt:-?}" "$dp" "$conns" "$awg" "$(bot_fmt_bytes ${rx:-0})" "$(bot_fmt_bytes ${tx:-0})" "$tgp" "$(date '+%H:%M:%S')"
+    "$dom" "$xui" "$ngx" "${up:-?}" "${l1:-?}" "${l2:-?}" "${l3:-?}" "$cores" "${ram_u:-?}" "${ram_t:-?}" "$ram_p" "${du:-?}" "${dt:-?}" "$dp" "$conns" "$awg" "$(bot_fmt_bytes "${rx:-0}")" "$(bot_fmt_bytes "${tx:-0}")" "$tgp" "$(date '+%H:%M:%S')"
 }
 
 render_main() {
@@ -11695,13 +11695,13 @@ render_traffic() {
     while IFS='|' read -r email up down tot; do
       sum_u=$((sum_u+up)); sum_d=$((sum_d+down))
       local lim=""
-      (( tot > 0 )) && lim=" / лимит $(bot_fmt_bytes $tot)"
-      out="${out}<code>$(hesc "$email")</code> ↑$(bot_fmt_bytes ${up:-0}) ↓$(bot_fmt_bytes ${down:-0})${lim}"$'\n'
+      (( tot > 0 )) && lim=" / лимит $(bot_fmt_bytes "$tot")"
+      out="${out}<code>$(hesc "$email")</code> ↑$(bot_fmt_bytes "${up:-0}") ↓$(bot_fmt_bytes "${down:-0}")${lim}"$'\n'
     done <<<"$rows"
     out="${out}"$'\n'"Итого по клиентам: ↑$(bot_fmt_bytes $sum_u) ↓$(bot_fmt_bytes $sum_d)"$'\n'
   fi
   printf '🚦 <b>Трафик</b>\n📥 RX: <code>%s</code> · 📤 TX: <code>%s</code> (с загрузки сервера)\n\n%s' \
-    "$(bot_fmt_bytes ${rx:-0})" "$(bot_fmt_bytes ${tx:-0})" "${out:-По клиентам данных нет.}"
+    "$(bot_fmt_bytes "${rx:-0}")" "$(bot_fmt_bytes "${tx:-0}")" "${out:-По клиентам данных нет.}"
 }
 
 render_maint() {
@@ -12082,14 +12082,14 @@ client_card_render() { # по E_EMAIL
   inb=$(sqlite3 "$XUI_DB" "SELECT COALESCE(group_concat(COALESCE(i.remark,'?'),', '),'') FROM client_inbounds ci JOIN inbounds i ON i.id=ci.inbound_id JOIN clients c ON c.id=ci.client_id WHERE c.email='$E_EMAIL';" 2>/dev/null)
   used=$(sqlite3 "$XUI_DB" "SELECT COALESCE(SUM(up+down),0) FROM client_traffics WHERE email='$E_EMAIL';" 2>/dev/null); used=${used:-0}
   st="🔴 OFF"; [[ "$en" == "1" ]] && st="🟢 on"
-  lim="∞ безлимит"; (( tgb > 0 )) && lim="$(bot_fmt_bytes $tgb)"
+  lim="∞ безлимит"; (( tgb > 0 )) && lim="$(bot_fmt_bytes "$tgb")"
   till="∞ бессрочно"
   if (( exp > 0 )); then
     till="до $(date -d "@$(( exp / 1000 ))" '+%d.%m.%Y' 2>/dev/null)"
     (( exp < $(date +%s) * 1000 )) && till+=" (истёк)"
   fi
   printf '👤 <b>%s</b> %s\n📡 Инбаунды: %s\n📊 Трафик: %s из %s\n⏳ Срок: %s\n🔒 IP-лимит: %s' \
-    "$(hesc "$email")" "$st" "${inb:-нет}" "$(bot_fmt_bytes $used)" "$lim" "$till" \
+    "$(hesc "$email")" "$st" "${inb:-нет}" "$(bot_fmt_bytes "$used")" "$lim" "$till" \
     "$( [[ $lip -gt 0 ]] && printf '%s IP' "$lip" || printf 'нет' )"
 }
 kb_client_card() {
@@ -17304,9 +17304,10 @@ panel_adguard_menu() {
     echo "  1) Управление LucX/3x-ui"
     echo "  2) Управление AdGuard Home"
     echo "  3) DNS Xray в панели LucX/3x-ui"
+    echo "  4) 🤖 TG-бот: выход в Telegram (аутбаунд/SOCKS/напрямую)"
     echo "  0) Назад"
-    local c=""; ask c "Выбор" "1" '^[0-3]$'
-    case "$c" in 1) panel_manage; pause ;; 2) adguard_manage; pause ;; 3) xray_dns_menu ;; 0) return 0 ;; esac
+    local c=""; ask c "Выбор" "1" '^[0-4]$'
+    case "$c" in 1) panel_manage; pause ;; 2) adguard_manage; pause ;; 3) xray_dns_menu ;; 4) bot_out_menu ;; 0) return 0 ;; esac
   done
 }
 
