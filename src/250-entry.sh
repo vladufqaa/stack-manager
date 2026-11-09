@@ -352,6 +352,13 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     run_bot
     exit $?
   fi
+  # 🩺 разовая read-only проверка здоровья без меню: bash stack-manager.sh --status
+  # (тот же набор, что в самодиагностике; exit-код 1 — есть проблемы, удобно для cron)
+  if [[ "${1:-}" == "--status" ]]; then
+    detect_env
+    stack_doctor
+    exit $?
+  fi
   # страховка: если «аренда» снятия защиты БД осталась висеть — снять на выходе
   if [[ "${1:-}" == "--check" || "${1:-}" == "--self-test" ]]; then
     detect_env

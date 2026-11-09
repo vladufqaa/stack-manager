@@ -1111,6 +1111,7 @@ run_menu_action() {
     5) backups_rollback_menu ;;
     6) diagnostics_maintenance_menu ;;
     7) panel_adguard_menu ;;
+    8) migrate_menu ;;
     *) warn "Нет такого пункта"; sleep 1 ;;
   esac
 }
@@ -1124,6 +1125,7 @@ print_menu_actions() {
   echo -e "  ${B} 5)${N} 💾 Бэкапы и откат"
   echo -e "  ${B} 6)${N} 🩺 Диагностика и обслуживание"
   echo -e "  ${B} 7)${N} ⚙️  Панель и AdGuard"
+  echo -e "  ${B} 8)${N} 🚚 Переезд на другой сервер"
 }
 
 fast_menu_header() {

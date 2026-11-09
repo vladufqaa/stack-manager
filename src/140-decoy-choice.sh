@@ -271,17 +271,27 @@ stack_ensure() {
 
 # удалить decoy-блок по домену (маркеры # >>> decoy ... domain=X)
 stack_del_decoy() {
-  local dom="$1"
+  local dom="$1" type="${2:-decoy}"   # type: decoy | fallback-plain | all
   [[ -f "$STACK_CONF" ]] || return 0
   local tmp
   tmp=$(mktemp)
-  awk -v dom="$dom" '
-    !skip && index($0, "# >>> decoy ") == 1 {
+  awk -v dom="$dom" -v mode="$type" '
+    BEGIN {
+      want1 = (mode == "decoy" || mode == "all")
+      want2 = (mode == "fallback-plain" || mode == "all")
+    }
+    !skip && want1 && index($0, "# >>> decoy ") == 1 {
       tail = $0
       sub(/^.* domain=/, "", tail)
-      if (tail == dom) { skip = 1; next }
+      if (tail == dom) { skip = 1; kind = 1; next }
     }
-    skip && index($0, "# <<< decoy ") == 1 { skip = 0; next }
+    !skip && want2 && index($0, "# >>> fallback-plain ") == 1 {
+      tail = $0
+      sub(/^.* domain=/, "", tail)
+      if (tail == dom) { skip = 1; kind = 2; next }
+    }
+    skip && kind == 1 && index($0, "# <<< decoy ") == 1 { skip = 0; next }
+    skip && kind == 2 && index($0, "# <<< fallback-plain ") == 1 { skip = 0; next }
     !skip { print }
   ' "$STACK_CONF" > "$tmp" 2>/dev/null && mv "$tmp" "$STACK_CONF"
 }
@@ -292,8 +302,8 @@ stack_del_all_decoy() {
   local tmp
   tmp=$(mktemp)
   awk '
-    index($0, "# >>> decoy ") == 1 { skip = 1; next }
-    skip && index($0, "# <<< decoy ") == 1 { skip = 0; next }
+    index($0, "# >>> decoy ") == 1 || index($0, "# >>> fallback-plain ") == 1 { skip = 1; next }
+    skip && (index($0, "# <<< decoy ") == 1 || index($0, "# <<< fallback-plain ") == 1) { skip = 0; next }
     !skip { print }
   ' "$STACK_CONF" > "$tmp" 2>/dev/null && mv "$tmp" "$STACK_CONF"
 }
@@ -437,7 +447,10 @@ server {
     access_log $DECOY_LOG_ACCESS decoy_ext;
     error_log /var/log/nginx/decoy-error.log;
     location = /robots.txt { return 200 "User-agent: *\\nDisallow: /\\n"; }
-    location / { try_files \\$uri \\$uri/ /index.html; }
+    # Ловушки сканеров — как в ssl-шаблоне decoy (паритет ответов 404)
+    location ~ ^/(admin|wp-admin|wp-login\.php|\.env|\.git|api/debug|phpmyadmin|configuration\.php|actuator)(/|\$|\?) { return 404; }
+    location / { try_files \$uri \$uri/ /index.html; }
+    location = /login { limit_except POST { deny all; } return 401; }
 }
 EOF
     echo "# <<< fallback-plain port=$port domain=$dom"
