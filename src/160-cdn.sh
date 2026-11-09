@@ -488,6 +488,10 @@ stack_check_fix() {
   # 3) CDN-дрейф (SNI-маршрут, http-блок, hosts, путь; сам делает reload);
   #    quiet=1 — без интерактивных вопросов внутри одноразовой починки
   cdn_repair 1 0 || true
+  cdn_repair 1 0 || true
+  # 3b) Reality в подключениях: serverNames локального Reality сверяется с
+  #     доменом хоста (расхождение = битые клиентские ссылки). Внешний — мимо.
+  reality_sni_repair || true
   # 4) UDP-порты без правил UFW
   while IFS='|' read -r id proto port; do
     [[ -n "$id" && "$port" =~ ^[0-9]+$ && "$port" != 0 ]] || continue
@@ -497,7 +501,7 @@ stack_check_fix() {
       log "  UDP/$port открыт в UFW (инбаунд #$id $proto)"
     fi
   done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,protocol,port FROM inbounds WHERE enable=1 AND port>0;" 2>/dev/null || true)
-  if command -v ufw >/dev/null 2>&1; then ufw --force enable >/dev/null 2>&1 || true; fi
+  # ВАЖНО: ufw --force enable здесь УБРАН. Если UFW был выключен, enable
   # 5) Мёртвые сокеты → пересборка xray-конфига (рестарт x-ui), затем перепроверка
   local -a dead=() still=() pending=()
   while IFS='|' read -r id proto port; do

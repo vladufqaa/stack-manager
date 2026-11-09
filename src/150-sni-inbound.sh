@@ -53,6 +53,54 @@ reality_set_dest() {
   return 0
 }
 
+# Самопочинка Reality В ПОДКЛЮЧЕНИЯХ: у локального Reality (dest=127.0.0.1:*)
+# serverNames[0] обязан совпадать с доменом хоста — иначе клиентская ссылка
+# бьётся мимо (SNI клиента не входит в serverNames, xray рвёт handshake).
+# История болезни: dest/decoy починены, а serverNames держит старый/чужой
+# домен — самопочинка это пропускала. Внешний Reality не трогаем.
+reality_sni_repair() {
+  [[ -n "$XUI_DB" && -f "$XUI_DB" ]] || return 0
+  local changed=0 id st dom cur
+  while IFS='|' read -r id st; do
+    [[ -n "$id" ]] || continue
+    grep -Eqi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$st" || continue
+    reality_external_dest "$id" && continue
+    # Канонический домен хоста: SNI hosts-строки → address → текущий serverNames[0]
+    dom=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+      "SELECT COALESCE((SELECT sni FROM hosts WHERE inbound_id=$id AND port=443 AND COALESCE(sni,'')<>'' LIMIT 1),
+                       (SELECT address FROM hosts WHERE inbound_id=$id AND port=443 AND COALESCE(address,'')<>'' LIMIT 1),
+                       json_extract(stream_settings,'\$.realitySettings.serverNames[0]'),'')
+       FROM inbounds WHERE id=$id;" 2>/dev/null | head -1 || true)
+    [[ -n "$dom" && "$dom" != "www.microsoft.com" ]] || continue
+    cur=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.serverNames[0]'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    [[ "$cur" == "$dom" ]] && continue
+    if ! grep -Eq '"serverNames"[[:space:]]*:[[:space:]]*\[' <<<"$st"; then
+      continue   # битый/нестандартный stream — вслепую не правим
+    fi
+    db_protect_suspend
+    local new_stream
+    new_stream=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT json_set(stream_settings,'\$.realitySettings.serverNames',json_array('$dom')) FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+    if [[ -n "$new_stream" && "$new_stream" != "null" ]] && grep -q "\"$dom\"" <<<"$new_stream"; then
+      panel_journal_capture_row inbounds "$id"
+      sqlite3 -cmd ".timeout 3000" "$XUI_DB" "UPDATE inbounds SET stream_settings='$new_stream' WHERE id=$id;" 2>/dev/null || true
+      # контроль: обязано удержаться в БД (анти-«вечная починка»)
+      local _stored=""
+      _stored=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.serverNames[0]'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
+      if [[ "$_stored" == "$dom" ]]; then
+        log "  Reality #$id: serverNames '${cur:-пусто}' → '$dom' (сверка с хостом)"
+        changed=1
+      else
+        warn "  Reality #$id: serverNames не удержались в БД (защитный триггер?)"
+      fi
+    fi
+    db_protect_resume
+  done < <(sqlite3 -separator '|' "$XUI_DB" "SELECT id,COALESCE(stream_settings,'') FROM inbounds WHERE enable=1;" 2>/dev/null || true)
+  if (( changed )); then
+    systemctl restart x-ui 2>/dev/null || true
+  fi
+  return 0
+}
+
 # VLESS/Trojan TCP+TLS fallback → локальный HTTPS-decoy.
 # XHTTP TLS также обслуживается локальным nginx frontend: путь XHTTP уходит
 # в Xray, обычный браузерный запрос — в HTTPS-decoy.
