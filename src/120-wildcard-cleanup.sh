@@ -355,7 +355,8 @@ cert_dedup_0001() {
 # ещё и попадал в SAN линии базы (sync_from_sni) — «один домен в двух линиях».
 # При удалении домена (п.11) предлагаю снести и персональную линию.
 cert_personal_lineage_drop_ask() {   # <domain>
-  local d="$1" pl="/etc/letsencrypt/live/$d"
+  local d="$1"
+  local pl="/etc/letsencrypt/live/$d"
   [[ -n "$d" && -f "$pl/fullchain.pem" ]] || return 0
   local ans=""
   echo "  Найден персональный серт $d (live/$d) — дубль покрытия от прежних версий."
