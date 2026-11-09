@@ -50,6 +50,14 @@ sni_domain_owner() {
            "SELECT COUNT(*) FROM inbounds WHERE id=$__sid;" 2>/dev/null | tr -d '[:space:]') || true
     [[ "$_cnt" == "0" ]] && be=""
   fi
+  # tg web proxy: backend без id в имени (tproxy / tg_backend). Маршрут валиден,
+  # пока есть живой tproxy-инбаунд; иначе запись мёртвая и домен свободен.
+  if [[ ( "$be" == "tproxy" || "$be" == "tg_backend" ) && -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+    local _tcount=""
+    _tcount=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+              "SELECT COUNT(*) FROM inbounds WHERE protocol='tproxy';" 2>/dev/null | tr -d '[:space:]') || true
+    [[ "$_tcount" == "0" ]] && be=""
+  fi
   echo "$be"
 }
 
