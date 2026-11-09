@@ -161,7 +161,8 @@ firewall_menu_legacy() {
     echo "  7) Снимок состояния"
     echo "  8) Восстановить из снимка"
     echo "  9) Свои порты — добавить/убрать (не закрываются политиками)"
-    echo "  10) TUI-обзор: правила UFW × слушающие сокеты"
+    echo "  10) Обзор портов: сокет × правило UFW (быстрый список)"
+    echo "  11) TUI-обзор (полноэкранный, медленный)"
     echo "  0) Назад"
     line
     local c=""
@@ -283,6 +284,7 @@ firewall_menu_legacy() {
         esac
         pause ;;
       10) firewall_apply_menu; pause ;;
+      11) firewall_apply_menu_tui; pause ;;
       0) return 0 ;;
       *) sleep 1 ;;
     esac
@@ -295,7 +297,326 @@ firewall_menu() {
   firewall_menu_legacy
 }
 
+# =====================================================================
+# БЫСТРЫЙ ОБЗОР ПОРТОВ (замена медленного TUI):
+#   — один вызов ufw status, по одному ss на протокол, один запрос udp-портов
+#   — нумерованный список «сокет × правило»; переключение по номеру
+#     применяется СРАЗУ (allow/deny, без ufw reset)
+# =====================================================================
 firewall_apply_menu() {
+  if [[ ! -t 0 ]]; then
+    log "UFW (неинтерактивно): SSH+443+UDP-инбаунды панели"
+    save_firewall_state >/dev/null 2>&1 || true
+    ufw --force reset >/dev/null 2>&1 || true
+    ufw default deny incoming >/dev/null 2>&1 || true
+    ufw default allow outgoing >/dev/null 2>&1 || true
+    if ! ssh_loopback_only; then
+      fw_allow "${SSH_PORT:-22}" tcp "SSH"
+    else
+      ufw delete allow "${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
+    fi
+    fw_allow 443 tcp "HTTPS/SNI"
+    local up
+    for up in $(udp_inbound_ports); do
+      fw_port_locked "$up" && continue
+      fw_allow "$up" udp "udp-инбаунд"
+    done
+    fw_deny_panel_ports
+    ufw --force enable >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local G Y R N
+  if command -v tput >/dev/null 2>&1; then
+    G=$(tput setaf 2); Y=$(tput setaf 3); R=$(tput setaf 1); N=$(tput sgr0)
+  else
+    G=''; Y=''; R=''; N=''
+  fi
+
+  # UDP-порты инбаундов — ОДИН запрос к БД на весь экран
+  local -a UDP_PORTS=()
+  local _u
+  for _u in $(udp_inbound_ports); do UDP_PORTS+=("$_u"); done
+
+  local -A UFW_ALLOW=() UFW_DENY=() SOCK_OUT=() SOCK_LOOP=() SOCK_PID=() LOOPGRP=()
+  local UFW_ACTIVE=0
+
+  # ── Сбор состояния: 1×ufw status + 1×ss tcp + 1×ss udp (парсинг в bash) ──
+  fw_load_state() {
+    UFW_ALLOW=(); UFW_DENY=(); SOCK_OUT=(); SOCK_LOOP=(); SOCK_PID=(); LOOPGRP=()
+    UFW_ACTIVE=0
+    ufw_is_active && UFW_ACTIVE=1
+    local _ln _pt _act
+    if [[ "$UFW_ACTIVE" == 1 ]]; then
+      while IFS= read -r _ln; do
+        read -r _pt _act _ <<<"$_ln"
+        [[ "$_pt" =~ ^[0-9]+/(tcp|udp)$ ]] || continue
+        case "$_act" in
+          ALLOW) UFW_ALLOW["$_pt"]=1 ;;
+          DENY)  UFW_DENY["$_pt"]=1 ;;
+        esac
+      done < <(ufw status 2>/dev/null | awk '$1 ~ /^[0-9]+\/(tcp|udp)$/ && ($2 == "ALLOW" || $2 == "DENY") { print $1, $2 }')
+    fi
+    local _line _st _rq _sq _addr _peer _info _port _proc _pid
+    while IFS= read -r _line; do
+      read -r _st _rq _sq _addr _peer _info <<<"$_line"
+      [[ -n "$_addr" ]] || continue
+      _port="${_addr##*:}"
+      [[ "$_port" =~ ^[0-9]+$ ]] || continue
+      _proc="—"; _pid="—"
+      if [[ "$_info" =~ \"([^\"]+)\".*pid=([0-9]+) ]]; then
+        _proc="${BASH_REMATCH[1]}"; _pid="${BASH_REMATCH[2]}"
+      fi
+      [[ "$_proc" == xray-linux* ]] && _proc="xray"
+      if [[ "$_addr" == 127.* || "$_addr" == \[::1\]:* || "$_addr" == ::1:* ]]; then
+        SOCK_LOOP["${_port}/tcp"]="$_proc"; SOCK_PID["${_port}/tcp"]="$_pid"
+      else
+        SOCK_OUT["${_port}/tcp"]="$_proc"; SOCK_PID["${_port}/tcp"]="$_pid"
+      fi
+    done < <(ss -tlnpH 2>/dev/null)
+    while IFS= read -r _line; do
+      read -r _st _rq _sq _addr _peer _info <<<"$_line"
+      [[ "$_peer" == "*:*" || "$_peer" == "0.0.0.0:*" || "$_peer" == "[::]:*" ]] || continue
+      _port="${_addr##*:}"
+      [[ "$_port" =~ ^[0-9]+$ ]] || continue
+      _proc="—"; _pid="—"
+      if [[ "$_info" =~ \"([^\"]+)\".*pid=([0-9]+) ]]; then
+        _proc="${BASH_REMATCH[1]}"; _pid="${BASH_REMATCH[2]}"
+      fi
+      [[ "$_proc" == xray-linux* ]] && _proc="xray"
+      if [[ "$_addr" == 127.* || "$_addr" == \[::1\]:* || "$_addr" == ::1:* ]]; then
+        SOCK_LOOP["${_port}/udp"]="$_proc"; SOCK_PID["${_port}/udp"]="$_pid"
+      else
+        SOCK_OUT["${_port}/udp"]="$_proc"; SOCK_PID["${_port}/udp"]="$_pid"
+      fi
+    done < <(ss -ulnpH 2>/dev/null)
+  }
+
+  # ── Построение строк списка (быстро: без fork на строку) ──
+  fw_build_items() {
+    # NB: items — переменная вызывающей функции (local items в firewall_apply_menu),
+    # здесь её НЕ шадоунить локальной декларацией, иначе список умрёт на выходе.
+    LOOPGRP=()
+    local seen="" key proto port proc pid state note ex _u2
+    for key in "${!SOCK_LOOP[@]}"; do
+      LOOPGRP[${SOCK_LOOP[$key]}]+=" ${key%/*}/${key#*/}"
+    done
+    # 1) сокеты снаружи
+    for key in "${!SOCK_OUT[@]}"; do
+      proto="${key#*/}"; port="${key%/*}"
+      proc="${SOCK_OUT[$key]}"; pid="${SOCK_PID[$key]:-—}"
+      note=""
+      if [[ "$UFW_ACTIVE" == 1 ]]; then
+        if [[ -n "${UFW_ALLOW[$key]:-}" ]]; then
+          state=1
+        elif [[ -n "${UFW_DENY[$key]:-}" ]]; then
+          state=0; note="DENY (правило UFW)"
+        else
+          state=0; note="UFW блокирует (default deny)"
+        fi
+      else
+        state=1; note="UFW не активен"
+      fi
+      ex=""
+      case "$port" in 22) ex="SSH" ;; 80) ex="ACME" ;; 443) ex="стек (SNI)" ;; esac
+      if [[ "$proto" == "udp" ]]; then
+        for _u2 in "${UDP_PORTS[@]}"; do
+          [[ "$_u2" == "$port" ]] && { ex="${ex:+$ex · }UDP-инбаунд"; break; }
+        done
+      fi
+      [[ -n "$ex" ]] && note="${note:+$note · }$ex"
+      items+=("${proto}|${port}|${pid}|${proc}|${state}|${note}")
+      seen+=" $key"
+    done
+    # 2) правила UFW без слушателя
+    if [[ "$UFW_ACTIVE" == 1 ]]; then
+      for key in "${!UFW_ALLOW[@]}"; do
+        [[ -n "${SOCK_OUT[$key]:-}" || " $seen " == *" $key "* ]] && continue
+        items+=("${key#*/}|${key%/*}|—|—|1|правило UFW, слушателя нет")
+        seen+=" $key"
+      done
+      for key in "${!UFW_DENY[@]}"; do
+        [[ -n "${SOCK_OUT[$key]:-}" || " $seen " == *" $key "* ]] && continue
+        items+=("${key#*/}|${key%/*}|—|—|0|DENY (правило UFW), слушателя нет")
+        seen+=" $key"
+      done
+    fi
+    # 3) SSH-порт проекта, если не попал в сокеты
+    local ssh_port="${SSH_PORT:-22}" has=0 it
+    for it in "${items[@]}"; do
+      [[ "${it#*|}" == "${ssh_port}|"* ]] && has=1
+    done
+    [[ "$has" == 0 ]] && items=("tcp|${ssh_port}|—|sshd (не слушает снаружи)|1|SSH" "${items[@]}")
+    # 4) 443 — обязательный вход стека
+    has=0
+    for it in "${items[@]}"; do
+      [[ "${it#*|}" == "443|"* ]] && has=1
+    done
+    [[ "$has" == 0 ]] && items+=("tcp|443|—|nginx/SNI (обязательный)|1|HTTPS/SNI")
+    # 5) панельные порты, слушающие loopback
+    local _pp _sp _px
+    _pp=$(xui_get webPort 2>/dev/null || true)
+    _sp=$(xui_get subPort 2>/dev/null || true)
+    for _px in "$_pp" "$_sp"; do
+      [[ -z "$_px" || "$_px" == "0" || ! "$_px" =~ ^[0-9]+$ ]] && continue
+      [[ " $seen " == *" ${_px}/tcp "* ]] && continue
+      seen+=" ${_px}/tcp"
+      items+=("tcp|${_px}|—|x-ui (панель, loopback)|0|панель x-ui (127.0.0.1)")
+    done
+    # 11443 наружу не публикуем
+    local _row _rp _rport _rest
+    local -a _flt=()
+    for _row in "${items[@]}"; do
+      IFS='|' read -r _rp _rport _rest <<<"$_row"
+      [[ "$_rport" == "11443" ]] && continue
+      _flt+=("$_row")
+    done
+    items=("${_flt[@]}")
+    # сортировка по порту
+    local -a _srt=()
+    while IFS= read -r _row; do _srt+=("$_row"); done < <(
+      printf '%s\n' "${items[@]}" | awk -F'|' '{printf "%06d %s\n", $2, $0}' | sort -n | cut -d' ' -f2-)
+    items=("${_srt[@]}")
+  }
+
+  # ── Отрисовка простым списком (без cursor-TUI) ──
+  fw_render() {
+    clear
+    line
+    echo -e "${B}   FIREWALL (UFW) — ПОРТЫ: СОКЕТ × ПРАВИЛО${N}"
+    line
+    local st="inactive"
+    [[ "$UFW_ACTIVE" == 1 ]] && st="active"
+    echo "  Статус UFW: $st · переключение по номеру применяется сразу (без ufw reset)"
+    echo
+    printf "   %-3s %-5s %-6s %-22s %s\n" "#" "Прото" "Порт" "Процесс" "Статус · примечание"
+    printf "   %s\n" "──────────────────────────────────────────────────────────────"
+    local i=0 it proto port pid proc state note mark
+    for it in "${items[@]}"; do
+      IFS='|' read -r proto port pid proc state note <<<"$it"
+      if [[ "$state" == 1 ]]; then mark="${G}● открыт${N}"; else mark="${Y}○ закрыт${N}"; fi
+      printf "   %-3s %-5s %-6s %-22s %b%s\n" "$((i+1))" "$proto" "$port" "$proc" "$mark" "${note:+ ← $note}"
+      i=$((i+1))
+    done
+    echo
+    echo -e "${B}▸ Спрятано настройками (UFW не при чём — порты на 127.0.0.1):${N}"
+    if [[ ${#LOOPGRP[@]} -eq 0 ]]; then
+      echo "  —"
+    else
+      local _pr _ports
+      for _pr in x-ui nginx xray csqtt; do
+        [[ -n "${LOOPGRP[$_pr]:-}" ]] || continue
+        _ports=$(printf '%s\n' ${LOOPGRP[$_pr]} | sort -t/ -k1,1n | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+        printf "    %-18s %s\n" "${_pr}:" "$_ports"
+      done
+      for _pr in "${!LOOPGRP[@]}"; do
+        case "$_pr" in x-ui|nginx|xray|csqtt) continue ;; esac
+        _ports=$(printf '%s\n' ${LOOPGRP[$_pr]} | sort -t/ -k1,1n | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+        printf "    %-18s %s\n" "${_pr}:" "$_ports"
+      done
+    fi
+    echo
+    line
+    echo "  N) вкл/выкл порт по номеру · a) добавить свой порт · r) обновить · 0) назад"
+    line
+  }
+
+  # ── Переключение одного порта ──
+  fw_toggle() {
+    local idx="$1" it proto port pid proc state note _a
+    it="${items[$((idx-1))]}"
+    IFS='|' read -r proto port pid proc state note <<<"$it"
+    if [[ "$state" == 1 ]] && fw_port_locked "$port"; then
+      warn "Порт $port закреплён (п.9) — закрывать нельзя"; sleep 1; return
+    fi
+    # панельный loopback-порт: переключаем привязку + правило одной операцией
+    if [[ "${SOCK_LOOP[${port}/${proto}]:-}" == "x-ui" ]]; then
+      echo "  ⚠ x-ui перезапустится — туннели (xray/caddy/…) кратко оборвутся"
+      if [[ "$state" == 1 ]]; then
+        read -rp "  Вернуть панель на 127.0.0.1 и закрыть порт $port? [y/N]: " _a || _a=""
+        [[ "${_a,,}" == "y" ]] || return
+        xui_set_listen "$port" "127.0.0.1" || { err "не удалось сменить привязку"; sleep 1; return; }
+        ufw delete allow "$port/$proto" >/dev/null 2>&1 || true
+        ufw deny "$port/$proto" >/dev/null 2>&1 || true
+      else
+        read -rp "  Открыть панель наружу (0.0.0.0:$port)? [y/N]: " _a || _a=""
+        [[ "${_a,,}" == "y" ]] || return
+        xui_set_listen "$port" "0.0.0.0" || { err "не удалось сменить привязку"; sleep 1; return; }
+        ufw delete deny "$port/$proto" >/dev/null 2>&1 || true
+        fw_allow "$port" "$proto" "x-ui"
+      fi
+    elif [[ "$port" == "${SSH_PORT:-22}" && "$state" == 1 ]]; then
+      echo -e "${R}⚠ Закрытие SSH (${SSH_PORT:-22}) отрежет доступ снаружи.${N}"
+      read -rp "  Для подтверждения введи YES: " _a || _a=""
+      [[ "$_a" == "YES" ]] || { log "Отменено"; sleep 1; return; }
+      ufw delete allow "$port/$proto" >/dev/null 2>&1 || true
+      ufw deny "$port/$proto" >/dev/null 2>&1 || true
+    elif [[ "$port" == "443" || "$port" == "80" ]] && [[ "$state" == 1 ]]; then
+      read -rp "  ⚠ Порт $port — служебный для стека. Закрыть? [y/N]: " _a || _a=""
+      [[ "${_a,,}" == "y" ]] || return
+      ufw delete allow "$port/$proto" >/dev/null 2>&1 || true
+      ufw deny "$port/$proto" >/dev/null 2>&1 || true
+    elif [[ "$state" == 1 ]]; then
+      ufw delete allow "$port/$proto" >/dev/null 2>&1 || true
+      ufw deny "$port/$proto" >/dev/null 2>&1 || true
+      log "Порт $port/$proto закрыт (deny)"
+    else
+      ufw delete deny "$port/$proto" >/dev/null 2>&1 || true
+      fw_allow "$port" "$proto" "ручное открытие"
+      log "Порт $port/$proto открыт (allow)"
+    fi
+  }
+
+  # ── Добавление «своего» порта (п.9) ──
+  fw_add_extra() {
+    local nport="" nproto="tcp" nnum=""
+    read -rp "Новый порт (8090 или 22000/udp): " nport || nport=""
+    nport="${nport// /}"
+    case "$nport" in
+      */tcp) nnum="${nport%/*}" ;;
+      */udp) nnum="${nport%/*}"; nproto="udp" ;;
+      *)     nnum="$nport" ;;
+    esac
+    if [[ "$nnum" =~ ^[0-9]+$ ]] && (( nnum >= 1 && nnum <= 65535 )); then
+      mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+      grep -qxF "${nproto}/${nnum}" "$BACKUP_DIR/fw-extra" 2>/dev/null || \
+        printf '%s/%s\n' "$nproto" "$nnum" >> "$BACKUP_DIR/fw-extra"
+      fw_allow "$nnum" "$nproto" "свой порт"
+      log "Свой порт $nnum/$nproto добавлен и открыт"
+      sleep 1
+    else
+      warn "Некорректный порт: $nport"; sleep 1
+    fi
+  }
+
+  local items=()
+  fw_load_state
+  fw_build_items
+  local c=""
+  while :; do
+    fw_render
+    read -rp "  Выбор: " c || c="0"
+    case "$c" in
+      0|q|Q) return 0 ;;
+      r|R)   fw_load_state; fw_build_items ;;
+      a|A)   fw_add_extra ;;
+      '') ;;
+      *[!0-9]*) warn "Нет такого пункта"; sleep 1 ;;
+      *)
+        if (( c >= 1 && c <= ${#items[@]} )); then
+          fw_toggle "$c"
+          fw_load_state; fw_build_items
+        else
+          warn "Нет такого пункта"; sleep 1
+        fi
+        ;;
+    esac
+  done
+}
+
+# Старый полноэкранный TUI оставлен как запасной вариант (медленный:
+# дублирующие проходы ss, ufw status дважды, sqlite на каждую строку).
+firewall_apply_menu_tui() {
   if [[ ! -t 0 ]]; then
     log "UFW (неинтерактивно): SSH+443+UDP-инбаунды панели"
     save_firewall_state >/dev/null 2>&1 || true
