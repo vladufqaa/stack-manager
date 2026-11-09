@@ -62,6 +62,7 @@ fix_inbound() {
       ;;
   esac
 
+  sni_stale_purge_quiet    # инбаунд могли удалить в панели — чистим хвосты SNI
   sni_used_load 2>/dev/null || true
   local panel_domain="${PANEL_DOMAIN:-}"
   [[ -z "$panel_domain" ]] && panel_domain=$(xui_get subDomain)

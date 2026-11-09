@@ -27,7 +27,60 @@ sni_domain_owner() {
     [[ -n "$be" ]] && SNI_USED["$dom"]="$be"
   fi
   [[ -n "$self" && "$be" == "inb_${self}_backend" ]] && be=""
+  # Мёртвые записи (инбаунд удалён в панели, SNI-маршрут остался) не «занимают»
+  # домен — иначе создание нового инбаунда на тот же домен ложно падало
+  # «Домен X уже занят». БД не ответила (блокировка) — считаем занятым:
+  # перестраховка от ложного «свободно» на пустом ответе sqlite.
+  if [[ "$be" =~ ^inb_([0-9]+)_backend$ && -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+    local _cnt=""
+    _cnt=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+           "SELECT COUNT(*) FROM inbounds WHERE id=${BASH_REMATCH[1]};" 2>/dev/null | tr -d '[:space:]') || true
+    [[ "$_cnt" == "0" ]] && be=""
+  fi
   echo "$be"
+}
+
+# Мёртвые SNI-записи: строки «домен|backend|id», у которых инбаунда id уже нет
+# в БД (удалён в панели, а маршрут остался). Тихо, без вывода и меню;
+# БД не ответила (блокировка) — запись считается живой (перестраховка).
+# Зависимости (sni_map_domains/sni_map_remove/sni_upstream_remove/nginx_reload/
+# stack_del_decoy) определены в других модулях и доступны в рантайме.
+sni_stale_list() {
+  [[ -f "$SNI_CONF" && -n "$XUI_DB" && -f "$XUI_DB" ]] || return 0
+  local dom be iid cnt
+  while IFS='|' read -r dom be iid; do
+    [[ "$iid" =~ ^[0-9]+$ ]] || continue
+    cnt=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+          "SELECT COUNT(*) FROM inbounds WHERE id=$iid;" 2>/dev/null | tr -d '[:space:]') || true
+    [[ "$cnt" == "0" ]] && echo "$dom|$be|$iid"
+  done < <(sni_map_domains)
+}
+
+# Тихая авто-чистка мёртвых SNI-записей (инбаунд удалён в панели):
+# map-строка + осиротевший upstream + decoy-блок + hosts-флаги БД.
+# Вызывается ТОЛЬКО в явных потоках настройки/создания инбаундов — до
+# проверки «домен занят», чтобы хвост удалённого инбаунда не блокировал
+# повторное использование его домена. Идемпотентна; печатает каждое удаление.
+sni_stale_purge_quiet() {
+  local -a dead=()
+  local row dom be iid
+  while IFS= read -r row; do
+    [[ -n "$row" ]] && dead+=("$row")
+  done < <(sni_stale_list)
+  [[ ${#dead[@]} -eq 0 ]] && return 0
+  for row in "${dead[@]}"; do
+    IFS='|' read -r dom be iid <<<"$row"
+    sni_map_remove "$dom"
+    [[ -n "$be" && "$be" != "panel_backend" ]] && sni_upstream_remove "$be"
+    unset "SNI_USED[$dom]" 2>/dev/null || true
+    stack_del_decoy "$dom"
+    sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE inbound_id=$iid AND port=443;" 2>/dev/null || true
+    sqlite3 "$XUI_DB" "DELETE FROM hosts WHERE sni='$dom';" 2>/dev/null || true
+    log "Авто-чистка SNI: \"$dom\" → $be (инбаунда #$iid больше нет — удалён в панели)"
+  done
+  nginx_reload || true
+  sni_used_load 2>/dev/null || true
+  return 0
 }
 
 # Спросить SNI-домен для инбаунда: непустой, синтаксически валидный, не занятый

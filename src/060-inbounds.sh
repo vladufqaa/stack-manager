@@ -379,6 +379,7 @@ create_inbounds_menu() {
   ask choices "Номера (через пробел)" "" '^[0-9 ]+$'
   [[ "$choices" == "0" || -z "$choices" ]] && return 0
 
+  sni_stale_purge_quiet    # инбаунд могли удалить в панели — его SNI-запись мешает
   sni_used_load            # занятые SNI-домены: для проверки ДО создания инбаунда
   local panel_domain=""
   local -a used_ports=()
