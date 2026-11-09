@@ -146,7 +146,7 @@ stack_cdn_upsert() {   # <origin> <cdn> <path> <inb_port> <decoy_port> <cert> <k
   # панели на cdn_frontend (этот блок), поэтому path-локации панели ОБЯЗАНЫ
   # жить здесь. Если их оставить только в panel-блоке 4443, панель станет
   # недостижимой по имени — location / отдаст decoy-заглушку (баг 28.10:
-  # «https://vladufqaa.online/vladufqa/ открылась заглушка»).
+  # «https://example.com/vladufqa/ открылась заглушка»).
   local _panel_locs=""
   if [[ -n "${PANEL_DOMAIN:-}" && "$origin" == "$PANEL_DOMAIN" && -n "${PANEL_PORT:-}" && -n "${PANEL_PATH:-}" ]]; then
     _panel_locs=$(cat <<PLOCEOF

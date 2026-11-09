@@ -51,7 +51,7 @@ cert_lines_load() {
     # Старые установки режима B могли не иметь служебных файлов линий:
     # восстанавливаем их по существующим certbot live-каталогам. Выбор «4»
     # в мастере означает personal+B, а не номер линии — линией является имя
-    # сертификата (например vladufqaa.ru или all.example.net).
+    # сертификата (например example.net или all.example.net).
     local _lf _ln
     for _lf in /etc/letsencrypt/live/*/; do
       [[ -d "$_lf" ]] || continue

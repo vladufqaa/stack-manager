@@ -564,7 +564,7 @@ EOF
 stealth_audit() {
   line; echo -e "${B}   СТЕЛС-АУДИТ (глазами сканера)${N}"; line
   local base="${WILDCARD_DOMAIN:-${PANEL_DOMAIN:-}}"
-  # последние два лейбла: *.vladufqaa.online / vladufqaa.online / panel.vladufqaa.online → vladufqaa.online
+  # последние два лейбла: *.example.com / example.com / panel.example.com → example.com
   local _p
   IFS='.' read -r -a _p <<<"$base"
   local _n=${#_p[@]}

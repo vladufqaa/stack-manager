@@ -4454,7 +4454,7 @@ cert_lines_load() {
     # Старые установки режима B могли не иметь служебных файлов линий:
     # восстанавливаем их по существующим certbot live-каталогам. Выбор «4»
     # в мастере означает personal+B, а не номер линии — линией является имя
-    # сертификата (например vladufqaa.ru или all.example.net).
+    # сертификата (например example.net или all.example.net).
     local _lf _ln
     for _lf in /etc/letsencrypt/live/*/; do
       [[ -d "$_lf" ]] || continue
@@ -7943,7 +7943,7 @@ stack_cdn_upsert() {   # <origin> <cdn> <path> <inb_port> <decoy_port> <cert> <k
   # панели на cdn_frontend (этот блок), поэтому path-локации панели ОБЯЗАНЫ
   # жить здесь. Если их оставить только в panel-блоке 4443, панель станет
   # недостижимой по имени — location / отдаст decoy-заглушку (баг 28.10:
-  # «https://vladufqaa.online/vladufqa/ открылась заглушка»).
+  # «https://example.com/vladufqa/ открылась заглушка»).
   local _panel_locs=""
   if [[ -n "${PANEL_DOMAIN:-}" && "$origin" == "$PANEL_DOMAIN" && -n "${PANEL_PORT:-}" && -n "${PANEL_PATH:-}" ]]; then
     _panel_locs=$(cat <<PLOCEOF
@@ -16428,7 +16428,7 @@ EOF
 stealth_audit() {
   line; echo -e "${B}   СТЕЛС-АУДИТ (глазами сканера)${N}"; line
   local base="${WILDCARD_DOMAIN:-${PANEL_DOMAIN:-}}"
-  # последние два лейбла: *.vladufqaa.online / vladufqaa.online / panel.vladufqaa.online → vladufqaa.online
+  # последние два лейбла: *.example.com / example.com / panel.example.com → example.com
   local _p
   IFS='.' read -r -a _p <<<"$base"
   local _n=${#_p[@]}
