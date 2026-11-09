@@ -363,6 +363,11 @@ remove_inbound() {
   [[ -n "$dom" ]] && has_sni=true
   [[ "$exists" != "0" ]] && has_inb=true
   [[ -n "$(cdn_profile_get "$id" 2>/dev/null)" ]] && has_cdn=true
+  # tproxy (tg web proxy) никогда не бывает в CDN-режиме: не предлагаем
+  # «снять только CDN-режим» и не упоминаем CDN в вопросе/подтверждении
+  local _rm_proto=""
+  _rm_proto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT protocol FROM inbounds WHERE id=$id;" 2>/dev/null | tr -d '[:space:]') || true
+  [[ "$_rm_proto" == "tproxy" ]] && has_cdn=false
 
   echo
   echo "  Что делать с #$id${dom:+ (SNI: $dom)}${has_cdn:+ (CDN-режим)}?"
@@ -478,11 +483,30 @@ sni_map_domains() {
   # парсились → после удаления инбаунда запись в карте оставалась и
   # «Домен X уже занят» блокировал повторное использование домена.
   local _re_h='^[[:space:]]+([A-Za-z0-9.-]+)[[:space:]]+hysteria_([0-9]+)_web;'
+  # tg web proxy: backend называется «tproxy» (п.3 создание) или «tg_backend»
+  # (setup_tproxy_web). Раньше такие строки не парсились → после удаления
+  # tg-инбаунда запись оставалась в nginx-конфе и не удалялась.
+  local _re_tg='^[[:space:]]+([A-Za-z0-9.-]+)[[:space:]]+(tg_backend|tproxy);'
   while IFS= read -r line; do
     if [[ "$line" =~ $_re ]]; then
       echo "${BASH_REMATCH[1]}|inb_${BASH_REMATCH[2]}_backend|${BASH_REMATCH[2]}"
     elif [[ "$line" =~ $_re_h ]]; then
       echo "${BASH_REMATCH[1]}|hysteria_${BASH_REMATCH[2]}_web|${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ $_re_tg ]]; then
+      # ВАЖНО: захватываем группы СРАЗУ — любая проверка вида [[ =~ ]]
+      # между матчем и echo затирает BASH_REMATCH (regex без скобок
+      # оставляет [1]/[2] пустыми), и домен терялся → строка не удалялась.
+      local tdom="${BASH_REMATCH[1]}" tbe="${BASH_REMATCH[2]}"
+      # id привязываем к живому tproxy-инбаунду из БД; «0» — инбаунда нет
+      # (запись считается мёртвой и уходит в очистку); пусто — БД недоступна
+      # (перестраховка: запись не трогаем).
+      local _tid=""
+      if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+        _tid=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+               "SELECT COALESCE((SELECT id FROM inbounds WHERE protocol='tproxy' ORDER BY id LIMIT 1),0);" 2>/dev/null | tr -d '[:space:]') || _tid=""
+      fi
+      [[ "$_tid" =~ ^[0-9]+$ ]] || _tid=""
+      echo "${tdom}|${tbe}|${_tid}"
     fi
   done < "$SNI_CONF"
 }
@@ -530,8 +554,8 @@ sni_cleanup_stale() {
     local tproto=""
     tproto=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
              "SELECT protocol FROM inbounds WHERE id=$iid;" 2>/dev/null | tr -d '[:space:]') || true
-    if [[ "$tproto" == "tproxy" && "$be" != "tg_backend" ]]; then
-      warn "  #$iid tproxy: маршрут «$dom → $be» лишний (tg ведёт tg_backend) — на удаление"
+    if [[ "$tproto" == "tproxy" && "$be" != "tg_backend" && "$be" != "tproxy" ]]; then
+      warn "  #$iid tproxy: маршрут «$dom → $be» лишний (tg ведёт tg_backend/tproxy) — на удаление"
       tg_route_broken=1
       dead_map+=("$dom|$be|$iid")
       continue
@@ -596,8 +620,10 @@ sni_cleanup_stale() {
         echo "  map/upstream: $dom → $be (инбаунда #$iid нет)"
       elif [[ "$be" == "hysteria_${iid}_web" ]]; then
         echo "  map/upstream: $dom → $be (инбаунда #$iid нет)"
+      elif [[ "$be" == "tg_backend" || "$be" == "tproxy" ]]; then
+        echo "  map/upstream: $dom → $be (tg-инбаунда #$iid нет)"
       else
-        echo "  map: $dom → $be (у tproxy #$iid должен использоваться tg_backend)"
+        echo "  map: $dom → $be (у tproxy #$iid должен использоваться tg_backend/tproxy)"
       fi
     else
       echo "  map: $dom → $be (не текущий домен панели${cur_panel:+, сейчас: $cur_panel})"
