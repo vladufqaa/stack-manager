@@ -395,7 +395,8 @@ firewall_apply_menu() {
   # ── Построение строк списка (быстро: без fork на строку) ──
   fw_build_items() {
     # NB: items — переменная вызывающей функции (local items в firewall_apply_menu),
-    # здесь её НЕ шадоунить локальной декларацией, иначе список умрёт на выходе.
+    # локальной декларацией её НЕ затенять, иначе список умрёт на выходе.
+    items=()
     LOOPGRP=()
     local seen="" key proto port proc pid state note ex _u2
     for key in "${!SOCK_LOOP[@]}"; do
@@ -517,7 +518,7 @@ firewall_apply_menu() {
     fi
     echo
     line
-    echo "  N) вкл/выкл порт по номеру · a) добавить свой порт · r) обновить · 0) назад"
+    echo "  N) вкл/выкл: номер СТРОКИ списка или номер ПОРТА · a) свой порт · r) обновить · 0) назад"
     line
   }
 
@@ -603,12 +604,23 @@ firewall_apply_menu() {
       '') ;;
       *[!0-9]*) warn "Нет такого пункта"; sleep 1 ;;
       *)
-        if (( c >= 1 && c <= ${#items[@]} )); then
-          fw_toggle "$c"
-          fw_load_state; fw_build_items
+        # Ввод: номер строки списка (1..N) ИЛИ номер порта (напр. 56000).
+        local _idx=0 _row _hproto _hp _rest2 _match=-1 _count=0
+        for _row in "${items[@]}"; do
+          _idx=$((_idx+1))
+          IFS='|' read -r _hproto _hp _rest2 <<<"$_row"
+          if [[ "$_hp" == "$c" ]]; then _match=$_idx; _count=$((_count+1)); fi
+        done
+        if (( _count == 1 )); then
+          fw_toggle "$_match"            # по порту (однозначно)
+        elif (( _count > 1 )); then
+          warn "Порт $c есть и в tcp, и в udp — введите номер строки (1..${#items[@]})"; sleep 1
+        elif (( c >= 1 && c <= ${#items[@]} )); then
+          fw_toggle "$c"                  # по номеру строки
         else
-          warn "Нет такого пункта"; sleep 1
+          warn "Нет такого пункта (номер строки 1..${#items[@]} или порт)"; sleep 1
         fi
+        fw_load_state; fw_build_items
         ;;
     esac
   done
