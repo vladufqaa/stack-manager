@@ -424,8 +424,10 @@ firewall_apply() {
   ufw --force reset >/dev/null 2>&1 || true
   ufw default deny incoming >/dev/null 2>&1 || true
   ufw default allow outgoing >/dev/null 2>&1 || true
-  # SSH: если sshd слушает только loopback («через туннель») — 22 наружу не открываем
-  if ! ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:22([[:space:]]|$)'; then
+  # SSH: если sshd слушает только loopback («через туннель») — наружу не
+  # открываем. Раньше проверка была на хардкод 22 и на кастомном SSH-порте
+  # ошибочно открывала его наружу.
+  if ! ssh_loopback_only; then
     fw_allow "${SSH_PORT:-22}" tcp "SSH"
   else
     ufw delete allow "${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
@@ -458,8 +460,11 @@ ufw_is_active() {
   ub=$(command -v ufw 2>/dev/null || true)
   [[ -z "$ub" && -x /usr/sbin/ufw ]] && ub=/usr/sbin/ufw
   if [[ -n "$ub" ]]; then
-    LC_ALL=C "$ub" status 2>/dev/null | head -1 | grep -q "Status: active" && return 0
-    return 1
+    # awk читает весь вывод до конца: связка `ufw status | head -1 | grep`
+    # под глобальным pipefail может вернуть 141 (SIGPIPE) на большом выводе
+    # и «активный» UFW ошибочно посчитать неактивным.
+    LC_ALL=C "$ub" status 2>/dev/null | awk 'NR==1 && $0 ~ /^Status:[[:space:]]*active/ {f=1} END {exit f?0:1}'
+    return $?
   fi
   systemctl is-active --quiet ufw 2>/dev/null
 }

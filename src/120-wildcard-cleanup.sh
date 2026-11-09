@@ -60,6 +60,23 @@ cert_paths() {
   return 0
 }
 
+# Ожидаемые пути линии для домена (режим A/B), БЕЗ требования существования.
+# Нужен при отложенном выпуске (CERT_DEFER=1): инбаунд создаётся раньше, чем
+# линия будет выпущена пачкой, а путь live/<линия>/ детерминирован — серт
+# появится там после cert_batch_flush. Возвращает 1, если режим/линия неизвестны.
+cert_line_paths_expect() {
+  local d="$1" ln=""
+  [[ -n "${CERT_MODE:-}" ]] || return 1
+  if [[ "$CERT_MODE" == "A" ]]; then
+    cert_multi_name_resolve >/dev/null 2>&1 || return 1
+    ln="$CERT_MULTI_NAME"
+  else
+    ln=$(cert_line_for "$d" 2>/dev/null || true)
+  fi
+  [[ -n "$ln" ]] || return 1
+  printf '/etc/letsencrypt/live/%s/fullchain.pem /etc/letsencrypt/live/%s/privkey.pem' "$ln" "$ln"
+}
+
 # Строгая проверка сертификата и ключа для конкретного hostname.
 # Возвращает 0 только если сертификат существует, не истёк, покрывает домен
 # и соответствует приватному ключу.
@@ -110,6 +127,39 @@ certs_domain_add_manual() {
   pause
 }
 
+# П.11 удаляет домен из списка SAN, но если домен остаётся в SNI-карте nginx,
+# cert_domains_sync_from_sni (п.9 / перевыпуск) при следующем батче вернёт его
+# в список — «удалённый» домен снова окажется в сертификате. Поэтому при ручном
+# удалении чистим и маршрут (иначе removal не имеет эффекта).
+cert_removed_domain_purge_sni() {   # <domain>
+  local d="$1"
+  [[ -z "$d" || ! -f "$SNI_CONF" ]] && return 0
+  local be=""
+  be=$(awk -v dom="$d" '
+    /^[[:space:]]*map[[:space:]]/ { inmap=1; next }
+    inmap && /^[[:space:]]*}/ { inmap=0; next }
+    inmap && $1 == dom { be=$2; sub(/;$/, "", be); print be; exit }
+  ' "$SNI_CONF" 2>/dev/null || true)
+  [[ -z "$be" ]] && return 0
+  # Служебные маршруты не трогаем: панель/AdGuard нужны сами по себе, а их
+  # домены всё равно вернутся в SAN при перевыпуске — честно предупреждаем.
+  if [[ "$be" == "panel_backend" || "$be" == "agh_backend" ]]; then
+    warn "  $d остаётся в SNI-карте (служебный маршрут $be) — вернётся в SAN при перевыпуске"
+    return 0
+  fi
+  local ans=""
+  echo "  Домен найден в SNI-карте nginx (маршрут: $be)."
+  askyn ans "Удалить и SNI-маршрут $d? (иначе вернётся в SAN при перевыпуске)" "y"
+  if [[ "$ans" == true ]]; then
+    sni_map_remove "$d"
+    nginx_reload || true
+    log "  SNI-маршрут $d удалён из карты"
+  else
+    warn "  Маршрут оставлен: $d вернётся в SAN при следующем перевыпуске (п.9)"
+  fi
+  return 0
+}
+
 # Удалить домен из мультисписка вручную
 certs_domain_remove_manual() {
   cert_mode_load >/dev/null 2>&1 || true
@@ -128,6 +178,8 @@ certs_domain_remove_manual() {
     [[ "$pick" == "0" ]] && return 0
     (( pick < 1 || pick > ${#_all[@]} )) && { err "Нет такого номера"; pause; return 1; }
     local target="${_all[$((pick-1))]}"; cert_line_domains_remove "${target%%|*}" "${target#*|}"
+    cert_removed_domain_purge_sni "${target#*|}"
+    cert_personal_lineage_drop_ask "${target#*|}"
     log "Удалён из линии ${target%%|*}: ${target#*|}"; pause; return 0
   fi
   cert_domains_load
@@ -154,6 +206,8 @@ certs_domain_remove_manual() {
   fi
   cert_domains_remove "$target"
   log "Удалён из мультисписка: $target"
+  cert_removed_domain_purge_sni "$target"
+  cert_personal_lineage_drop_ask "$target"
   local r=""
   askyn r "Перевыпустить мультисерт сейчас (без удалённого домена)?" "y"
   [[ "$r" == true ]] && { CERT_DEFER=0; cert_batch_flush; }
@@ -294,6 +348,154 @@ cert_dedup_0001() {
   done
   [[ $did -eq 0 ]] && log "Ничего не изменено."
   pause
+}
+
+# Персональная линия домена могла остаться от прежних версий: cert_issue до
+# «линейной» логики выпускал персональный серт live/<домен>, а домен при этом
+# ещё и попадал в SAN линии базы (sync_from_sni) — «один домен в двух линиях».
+# При удалении домена (п.11) предлагаю снести и персональную линию.
+cert_personal_lineage_drop_ask() {   # <domain>
+  local d="$1" pl="/etc/letsencrypt/live/$d"
+  [[ -n "$d" && -f "$pl/fullchain.pem" ]] || return 0
+  local ans=""
+  echo "  Найден персональный серт $d (live/$d) — дубль покрытия от прежних версий."
+  askyn ans "Удалить и его? (домен исчезнет из ВСЕХ сертификатов)" "y"
+  if [[ "$ans" == true ]]; then
+    certbot delete --cert-name "$d" --non-interactive 2>&1 | tail -2 | sed 's/^/    /'
+    log "  персональный серт $d удалён"
+  else
+    warn "  персональный серт $d оставлен — он продолжит покрывать домен и продлеваться"
+  fi
+  return 0
+}
+
+# ─── Дубли покрытия: домен в SAN линии + своя персональная линия ─────────────
+# Наследие прежнего cert_issue: домен получал персональную линию live/<домен>
+# И одновременно попадал в SAN линии базы (cert_domains_sync_from_sni при
+# перевыпуске) — «один домен в двух линиях» (типичный случай — tg web proxy).
+# Здесь такие домены ищутся по SAN всех live-линий; персональная линия
+# удаляется (домен остаётся покрыт линией), а все ссылки
+# /etc/letsencrypt/live/<домен>/ перепривязываются на покрывающую линию.
+cert_cover_dedup() {
+  line; echo -e "${B}   ДУБЛИ ПОКРЫТИЯ СЕРТИФИКАТОВ${N}"; line
+  [[ -d /etc/letsencrypt/live ]] || { warn "Нет /etc/letsencrypt/live"; pause; return 0; }
+  local pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
+  local known=""
+  known=$(cert_known_lines 2>/dev/null || true)
+
+  local -a dups=() covers=()
+  local ld name other_ld san2 entry2 base2 other found
+  for ld in /etc/letsencrypt/live/*/; do
+    [[ -d "$ld" ]] || continue
+    name=$(basename "$ld")
+    [[ "$name" =~ -[0-9]{4}$ ]] && continue       # суффиксы -0001 — это п.16
+    [[ "$name" == all.* ]] && continue            # имя линии режима B, не персональный домен
+    cert_domain_valid "$name" || continue         # мусорные имена не трогаем
+    [[ -n "$pd" && "$name" == "$pd" ]] && continue # линия панели — священна
+    grep -qxF "$name" <<<"$known" && continue     # известная линия — не дубль
+    # покрыт ли этот домен ДРУГОЙ линией (точное имя или wildcard её зоны)?
+    other=""
+    for other_ld in /etc/letsencrypt/live/*/; do
+      [[ "${other_ld%/}" == "${ld%/}" ]] && continue
+      [[ -f "${other_ld}fullchain.pem" ]] || continue
+      san2=$(openssl x509 -noout -ext subjectAltName -in "${other_ld}cert.pem" 2>/dev/null | tail -n +2 | tr -d ' ' || true)
+      [[ "$san2" != *DNS:* ]] && continue
+      found=""
+      while IFS= read -r entry2; do
+        entry2="${entry2#DNS:}"
+        [[ -z "$entry2" ]] && continue
+        if [[ "$entry2" == "$name" ]]; then found=1; break; fi
+        if [[ "$entry2" == \** ]]; then
+          base2="${entry2#\*.}"
+          if [[ "$name" == *."$base2" || "$name" == "$base2" ]]; then found=1; break; fi
+        fi
+      done < <(tr ',\n' '\n\n' <<<"$san2")
+      if [[ -n "$found" ]]; then other="${other_ld%/}"; break; fi
+    done
+    [[ -n "$other" ]] || continue
+    dups+=("$name"); covers+=("$other")
+  done
+
+  if [[ ${#dups[@]} -eq 0 ]]; then
+    log "Дублей покрытия не найдено — у каждого домена одна линия"
+    pause; return 0
+  fi
+
+  echo "Домены, покрытые одновременно персональной линией и другой линией:"
+  local i=0 dn cn
+  for dn in "${dups[@]}"; do
+    cn="${covers[$i]}"
+    echo "  ─ $dn"
+    echo "      персональная: live/$dn  SAN: $(openssl x509 -noout -ext subjectAltName -in "/etc/letsencrypt/live/$dn/cert.pem" 2>/dev/null | tail -n +2 | tr -d ' ' | tr '\n' ',' | sed 's/,$//')"
+    echo "      покрыта также линией: $(basename "$cn")  SAN: $(openssl x509 -noout -ext subjectAltName -in "$cn/cert.pem" 2>/dev/null | tail -n +2 | tr -d ' ' | tr '\n' ',' | sed 's/,$//')"
+    i=$((i+1))
+  done
+  echo
+  echo "  1) Удалить персональные линии ВСЕХ найденных доменов (перепривязать ссылки)"
+  echo "  2) Выбирать по одному"
+  echo "  0) Отмена"
+  local c=""
+  read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
+  case "$c" in
+    1|2) ;;
+    *) pause; return 0 ;;
+  esac
+  local i2=0 did=0 sure
+  for dn in "${dups[@]}"; do
+    local cn2="${covers[$i2]}"; i2=$((i2+1))
+    if [[ "$c" == "2" ]]; then
+      askyn sure "Удалить персональную линию «$dn» (покрытие останется: $(basename "$cn2"))?" "y"
+      [[ "$sure" == true ]] || continue
+    fi
+    # 1) перепривязать ссылки ДО удаления (иначе файлы исчезнут из-под ног)
+    local old="/etc/letsencrypt/live/$dn/" new="$cn2/"
+    if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+      systemctl stop x-ui 2>/dev/null || true
+      CERTREBIND_OLD="$old" CERTREBIND_NEW="$new" CERTREBIND_DB="$XUI_DB" python3 - <<'PYRB'
+import sqlite3, os
+old, new, db = os.environ["CERTREBIND_OLD"], os.environ["CERTREBIND_NEW"], os.environ["CERTREBIND_DB"]
+con = sqlite3.connect(db); cur = con.cursor(); n = 0
+for k, v in cur.execute("SELECT key, value FROM settings WHERE value LIKE ?", (f"%{old}%",)).fetchall():
+    cur.execute("UPDATE settings SET value=? WHERE key=?", (v.replace(old, new), k)); n += 1
+for iid, s, st in cur.execute("SELECT id, settings, stream_settings FROM inbounds WHERE settings LIKE ? OR stream_settings LIKE ?", (f"%{old}%", f"%{old}%")).fetchall():
+    cur.execute("UPDATE inbounds SET settings=?, stream_settings=? WHERE id=?",
+                ((s or '').replace(old, new), (st or '').replace(old, new), iid)); n += 1
+con.commit()
+print(f"    перепривязано ссылок в БД: {n}")
+PYRB
+      systemctl start x-ui 2>/dev/null || true
+    fi
+    local nf
+    nf=$(grep -rl "$old" /etc/nginx/ 2>/dev/null | head -10)
+    if [[ -n "$nf" ]]; then
+      grep -rl "$old" /etc/nginx/ 2>/dev/null | while read -r f; do
+        sed -i "s|$old|$new|g" "$f" 2>/dev/null || true
+      done
+      log "    nginx-конфиги перевязаны на линию"
+    fi
+    if [[ -f /opt/AdGuardHome/AdGuardHome.yaml ]] && grep -q "$old" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; then
+      sed -i "s|$old|$new|g" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true
+      systemctl restart AdGuardHome 2>/dev/null || systemctl restart adguardhome 2>/dev/null || true
+      log "    AdGuard перевязан на линию"
+    fi
+    # 2) удалить персональную линию
+    if certbot delete --cert-name "$dn" --non-interactive 2>&1 | tail -2 | sed 's/^/    /'; then
+      log "  удалено: $dn (покрытие — линия $(basename "$cn2"))"
+      did=$((did+1))
+    else
+      warn "  не удалось удалить $dn — ссылки уже перевязаны, снеси вручную: certbot delete --cert-name $dn"
+    fi
+  done
+  if [[ $did -gt 0 ]]; then
+    nginx -t >/dev/null 2>&1 && nginx_reload || true
+    log "Готово: дублей покрытия устранено — $did"
+  else
+    log "Ничего не изменено."
+  fi
+  pause
+  return 0
 }
 
 # Автоочистка сирот: линии в live/, которые не используются.

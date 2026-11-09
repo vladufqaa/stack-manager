@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.38"
+STACK_MANAGER_VERSION="1.0.39"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -702,14 +702,27 @@ sni_domain_owner() {
     [[ -n "$be" ]] && SNI_USED["$dom"]="$be"
   fi
   [[ -n "$self" && "$be" == "inb_${self}_backend" ]] && be=""
+  [[ -n "$self" && "$be" == "hysteria_${self}_web" ]] && be=""
   # Мёртвые записи (инбаунд удалён в панели, SNI-маршрут остался) не «занимают»
   # домен — иначе создание нового инбаунда на тот же домен ложно падало
   # «Домен X уже занят». БД не ответила (блокировка) — считаем занятым:
   # перестраховка от ложного «свободно» на пустом ответе sqlite.
-  if [[ "$be" =~ ^inb_([0-9]+)_backend$ && -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+  #
+  # ВАЖНО: проверка охватывает ОБА вида backend'ов с идентификатором инбаунда:
+  #   • inb_<id>_backend        — vless/trojan/naive/anytls/trusttunnel...
+  #   • hysteria_<id>_web       — Hysteria2. Раньше охватывался только первый,
+  #     и после удаления Hysteria2 маршрут «домен → hysteria_N_web» навсегда
+  #     блокировал повторное использование его домена («уже занят»).
+  local __sid=""
+  if [[ "$be" =~ ^inb_([0-9]+)_backend$ ]]; then
+    __sid="${BASH_REMATCH[1]}"
+  elif [[ "$be" =~ ^hysteria_([0-9]+)_web$ ]]; then
+    __sid="${BASH_REMATCH[1]}"
+  fi
+  if [[ -n "$__sid" && -n "$XUI_DB" && -f "$XUI_DB" ]]; then
     local _cnt=""
     _cnt=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-           "SELECT COUNT(*) FROM inbounds WHERE id=${BASH_REMATCH[1]};" 2>/dev/null | tr -d '[:space:]') || true
+           "SELECT COUNT(*) FROM inbounds WHERE id=$__sid;" 2>/dev/null | tr -d '[:space:]') || true
     [[ "$_cnt" == "0" ]] && be=""
   fi
   echo "$be"
@@ -2407,6 +2420,16 @@ create_inbound_db() {
   if [[ -n "$sn" ]]; then
     local cp_line=""
     cp_line=$(cert_paths "$sn") || true     # wildcard- или персональный сертификат
+    if [[ -z "$cp_line" && "${CERT_DEFER:-0}" == "1" ]]; then
+      # Отложенный выпуск (мастер установки): серт появится в ЛИНИИ после
+      # пачки cert_batch_flush, а путь live/<линия>/ детерминирован — вписываем
+      # его сразу, иначе tunnel-инбаунды создаются с пустыми certFile/keyFile.
+      cp_line=$(cert_line_paths_expect "$sn") || true
+      if [[ -n "$cp_line" ]]; then
+        cert="${cp_line%% *}"; key="${cp_line##* }"
+        warn "  серт $sn ещё не выпущен (пачка в конце установки) — вписан путь линии"
+      fi
+    fi
     [[ -n "$cp_line" ]] && { cert="${cp_line%% *}"; key="${cp_line##* }"; }
   fi
   # xray-hysteria НЕ стартует без TLS ("tls config is nil"). Self-signed убран —
@@ -4430,21 +4453,49 @@ cert_lines_load() {
       _ln="$(basename "${_lf%/}")"
       [[ "$_ln" == "README" ]] && continue
       cert_line_name_valid "$_ln" || continue
+      # Режим B: персональная линия live/<домен> канонизируется в линию
+      # домена (панель/все.<база>) — «домен = линия» плодил дубли.
+      local _dom="$_ln"
+      if [[ "${CERT_MODE:-A}" == "B" && "$_ln" != all.* ]]; then
+        local _canon=""; _canon=$(cert_line_for "$_ln" 2>/dev/null || true)
+        [[ -n "$_canon" && "$_canon" != "$_ln" ]] && _ln="$_canon"
+      fi
       [[ " ${CERT_LINES[*]} " == *" $_ln "* ]] && continue
       CERT_LINES+=("$_ln")
       local _df; _df="$(cert_line_file "$_ln")"
-      [[ -s "$_df" ]] || printf '%s\n' "$_ln" > "$_df"
+      if [[ -s "$_df" ]]; then
+        grep -qxF "$_dom" "$_df" 2>/dev/null || printf '%s\n' "$_dom" >> "$_df"
+      else
+        printf '%s\n' "$_dom" > "$_df"
+      fi
     done
-    # Также подхватываем старый общий список, если certbot-каталоги были
-    # переименованы или очищены после выпуска.
+    # Также подхватываем старый общий список (stack-domains.txt), если
+    # certbot-каталоги были переименованы или очищены. ВАЖНО: домены
+    # распределяются ПО ЛИНИЯМ (режим B — cert_line_for; режим A — главная
+    # линия), а НЕ «домен = отдельная линия», как делала старая миграция —
+    # именно она оставляла «один домен в двух линиях» (rt/rx/tg…).
     if [[ -s "$CERT_DOMAINS_FILE" ]]; then
       local _d _line
       while IFS= read -r _d; do
         _d="$(printf '%s' "$_d" | tr -d '[:space:]')"; [[ -z "$_d" ]] && continue
-        _line="$_d"
+        cert_domain_valid "$_d" || continue
+        if [[ "${CERT_MODE:-A}" == "B" ]]; then
+          _line=$(cert_line_for "$_d" 2>/dev/null || true)
+          [[ -z "$_line" ]] && continue
+        else
+          cert_multi_name_resolve >/dev/null 2>&1 || true
+          _line="${CERT_MULTI_NAME:-}"
+          [[ -z "$_line" ]] && _line="$_d"   # совсем без домена панели — как сумеем
+        fi
         [[ " ${CERT_LINES[*]} " == *" $_line "* ]] || CERT_LINES+=("$_line")
-        local _df2; _df2="$(cert_line_file "$_line")"
-        [[ -s "$_df2" ]] || printf '%s\n' "$_d" > "$_df2"
+        if [[ "${CERT_MODE:-A}" == "B" ]]; then
+          local _df2; _df2="$(cert_line_file "$_line")"
+          if [[ -s "$_df2" ]]; then
+            grep -qxF "$_d" "$_df2" 2>/dev/null || printf '%s\n' "$_d" >> "$_df2"
+          else
+            printf '%s\n' "$_d" > "$_df2"
+          fi
+        fi
       done < "$CERT_DOMAINS_FILE"
     fi
     [[ ${#CERT_LINES[@]} -gt 0 ]] && cert_lines_save
@@ -4651,6 +4702,55 @@ cert_mode_line_base() {   # <domain> → печатает all.<base>
 
 # Миграция: разложить текущий stack-domains.txt по линиям (для B).
 # В режиме A — оставляем как есть.
+
+# Канонизация реестра линий (режим B): линии, названные доменом, который
+# cert_line_for уводит в ДРУГУЮ линию (панель/wildcard-база/all.<база>) —
+# наследие старой миграции «домен = линия» и персональных выпусков cert_issue.
+# Домены такой линии переносятся в каноническую, пустая линия удаляется
+# вместе с её SAN-файлом. Идемпотентно: канонические имена (домен панели,
+# wildcard-база, all.*) не переклассифицируются. СЕРТИФИКАТЫ не трогаются —
+# это правка только реестра; выдачу делает cert_batch_flush.
+cert_lines_canon_migrate() {
+  cert_mode_load >/dev/null 2>&1 || true
+  [[ "${CERT_MODE:-A}" == "B" ]] || return 0
+  cert_lines_load
+  [[ ${#CERT_LINES[@]} -eq 0 ]] && return 0
+  local pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
+  if [[ -z "${WILDCARD_DOMAIN:-}" && -f "$WILDCARD_STATE" ]]; then
+    WILDCARD_DOMAIN=$(head -n 1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]' || true)
+  fi
+  local -a bogus=() targets=()
+  local ln target
+  for ln in "${CERT_LINES[@]}"; do
+    if [[ -n "$pd" && "$ln" == "$pd" ]] \
+       || [[ -n "${WILDCARD_DOMAIN:-}" && "$ln" == "$WILDCARD_DOMAIN" ]] \
+       || [[ "$ln" == all.* ]]; then
+      continue   # каноническое имя — не трогаем
+    fi
+    target=$(cert_line_for "$ln" 2>/dev/null || true)
+    if [[ -z "$target" || "$target" == "$ln" ]]; then
+      continue   # маршрутизация не определилась — оставляем как есть
+    fi
+    bogus+=("$ln"); targets+=("$target")
+  done
+  [[ ${#bogus[@]} -eq 0 ]] && return 0
+  local i d n_moved=0
+  for i in "${!bogus[@]}"; do
+    ln="${bogus[$i]}"; target="${targets[$i]}"
+    cert_line_domains_load "$ln"
+    local -a doms=("${CERT_LINE_DOMAINS[@]}")
+    for d in "${doms[@]}"; do
+      cert_line_domains_add "$target" "$d"
+    done
+    n_moved=$((n_moved + ${#doms[@]}))
+    cert_lines_remove "$ln"
+    log "  канонизация линий: «$ln» → «$target» (${#doms[@]} дм.)"
+  done
+  [[ $n_moved -gt 0 ]] && log "Реестр линий канонизирован: перенесено доменов — $n_moved"
+  return 0
+}
 
 # Показать все линии с их SAN (для аудита/меню)
 
@@ -5190,6 +5290,7 @@ cert_batch_flush() {
   fi
 
   # ── Режим B: обход линий ──
+  cert_lines_canon_migrate   # наследие «домен = линия» → в канонические линии
   local pd=""
   pd=$(xui_get webDomain 2>/dev/null || true)
   [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
@@ -5383,6 +5484,46 @@ cert_issue() {
     fi
   fi
 
+  # --- Режим линий (A/B): домен живёт в ОДНОЙ линии ---------------------------
+  # Раньше cert_issue всегда выпускал персональную линию live/<домен>, даже
+  # когда работала логика линий (выбор «4» в мастере = персональные + режим B).
+  # Домен оказывался в ДВУХ линиях: своя персональная + SAN линии базы, куда
+  # его возвращал cert_domains_sync_from_sni при первом перевыпуске
+  # (классический пример — tg web proxy: live/tg.<база> + tg.<база> в SAN
+  # линии панели). Теперь домен регистрируется в своей линии и выпускается/
+  # обновляется САМА ЛИНИЯ (cert_issue_line идемпотентен). Персональный
+  # выпуск ниже — фолбэк (режим не определён/линия не вычислилась/отказ).
+  cert_mode_load >/dev/null 2>&1 || true
+  local _cline=""
+  if [[ -n "${CERT_MODE:-}" ]]; then
+    if [[ "$CERT_MODE" == "A" ]]; then
+      cert_multi_name_resolve >/dev/null 2>&1 && _cline="$CERT_MULTI_NAME"
+    else
+      _cline=$(cert_line_for "$d" 2>/dev/null || true)
+    fi
+  fi
+  if [[ -n "$_cline" && "$_cline" != "$d" ]]; then
+    if [[ "$CERT_MODE" == "A" ]]; then
+      cert_domains_add "$d"
+    else
+      cert_line_domains_add "$_cline" "$d"
+    fi
+    if [[ "${CERT_DEFER:-0}" == "1" ]]; then
+      log "  cert $d: записан в линию $_cline — выпуск пачкой в конце установки"
+      return 0
+    fi
+    if cert_issue_line "$_cline"; then
+      # не-TTY фильтр cert_issue_line мог исключить неразрешимый домен и
+      # выпустить линию БЕЗ него — тогда успех здесь был бы ложным
+      if cert_san_set_covers "/etc/letsencrypt/live/$_cline/fullchain.pem" "$d"; then
+        return 0
+      fi
+      warn "  cert $d: линия $_cline выпущена без $d (не резолвится?) — фолбэк на персональный"
+    else
+      warn "  cert $d: выпуск линии $_cline не удался — фолбэк на персональный серт"
+    fi
+  fi
+
   # --- выпуск: выбор типа сертификата ---
   # CERT_MODE_CHOICE — выбор запоминается на сессию (1 вопрос на установку,
   # а не на каждый инбаунд). В ans-автоустановках (stdin не TTY) вопрос
@@ -5392,12 +5533,7 @@ cert_issue() {
   [[ "$wbase" != *.* ]] && wbase="$d"   # d — сам базовый домен
   if [[ -n "${CERT_MODE_CHOICE:-}" ]]; then
     mode="$CERT_MODE_CHOICE"
-  elif [[ "$name" == "VLESS XHTTP TLS" ]]; then
-          # Явный TLS-пункт: CDN не спрашиваем и security сохраняем как tls.
-          security="tls"
-          INBOUND_CREATE_MODE="tls"
-          _is_cdn=false
-        elif [[ -t 0 && "${STACK_AUTOPILOT:-0}" != 1 && "$security" != "tls" ]]; then
+  elif [[ -t 0 && "${STACK_AUTOPILOT:-0}" != 1 && "$security" != "tls" ]]; then
     echo "  Какой сертификат выпустить для $d?"
     echo "   1) Wildcard *.$wbase — Cloudflare DNS-01, покроет $wbase и все поддомены"
     echo "   2) Обычный персональный — только $d (HTTP-01)"
@@ -5600,6 +5736,23 @@ cert_paths() {
   return 0
 }
 
+# Ожидаемые пути линии для домена (режим A/B), БЕЗ требования существования.
+# Нужен при отложенном выпуске (CERT_DEFER=1): инбаунд создаётся раньше, чем
+# линия будет выпущена пачкой, а путь live/<линия>/ детерминирован — серт
+# появится там после cert_batch_flush. Возвращает 1, если режим/линия неизвестны.
+cert_line_paths_expect() {
+  local d="$1" ln=""
+  [[ -n "${CERT_MODE:-}" ]] || return 1
+  if [[ "$CERT_MODE" == "A" ]]; then
+    cert_multi_name_resolve >/dev/null 2>&1 || return 1
+    ln="$CERT_MULTI_NAME"
+  else
+    ln=$(cert_line_for "$d" 2>/dev/null || true)
+  fi
+  [[ -n "$ln" ]] || return 1
+  printf '/etc/letsencrypt/live/%s/fullchain.pem /etc/letsencrypt/live/%s/privkey.pem' "$ln" "$ln"
+}
+
 # Строгая проверка сертификата и ключа для конкретного hostname.
 # Возвращает 0 только если сертификат существует, не истёк, покрывает домен
 # и соответствует приватному ключу.
@@ -5650,6 +5803,39 @@ certs_domain_add_manual() {
   pause
 }
 
+# П.11 удаляет домен из списка SAN, но если домен остаётся в SNI-карте nginx,
+# cert_domains_sync_from_sni (п.9 / перевыпуск) при следующем батче вернёт его
+# в список — «удалённый» домен снова окажется в сертификате. Поэтому при ручном
+# удалении чистим и маршрут (иначе removal не имеет эффекта).
+cert_removed_domain_purge_sni() {   # <domain>
+  local d="$1"
+  [[ -z "$d" || ! -f "$SNI_CONF" ]] && return 0
+  local be=""
+  be=$(awk -v dom="$d" '
+    /^[[:space:]]*map[[:space:]]/ { inmap=1; next }
+    inmap && /^[[:space:]]*}/ { inmap=0; next }
+    inmap && $1 == dom { be=$2; sub(/;$/, "", be); print be; exit }
+  ' "$SNI_CONF" 2>/dev/null || true)
+  [[ -z "$be" ]] && return 0
+  # Служебные маршруты не трогаем: панель/AdGuard нужны сами по себе, а их
+  # домены всё равно вернутся в SAN при перевыпуске — честно предупреждаем.
+  if [[ "$be" == "panel_backend" || "$be" == "agh_backend" ]]; then
+    warn "  $d остаётся в SNI-карте (служебный маршрут $be) — вернётся в SAN при перевыпуске"
+    return 0
+  fi
+  local ans=""
+  echo "  Домен найден в SNI-карте nginx (маршрут: $be)."
+  askyn ans "Удалить и SNI-маршрут $d? (иначе вернётся в SAN при перевыпуске)" "y"
+  if [[ "$ans" == true ]]; then
+    sni_map_remove "$d"
+    nginx_reload || true
+    log "  SNI-маршрут $d удалён из карты"
+  else
+    warn "  Маршрут оставлен: $d вернётся в SAN при следующем перевыпуске (п.9)"
+  fi
+  return 0
+}
+
 # Удалить домен из мультисписка вручную
 certs_domain_remove_manual() {
   cert_mode_load >/dev/null 2>&1 || true
@@ -5668,6 +5854,8 @@ certs_domain_remove_manual() {
     [[ "$pick" == "0" ]] && return 0
     (( pick < 1 || pick > ${#_all[@]} )) && { err "Нет такого номера"; pause; return 1; }
     local target="${_all[$((pick-1))]}"; cert_line_domains_remove "${target%%|*}" "${target#*|}"
+    cert_removed_domain_purge_sni "${target#*|}"
+    cert_personal_lineage_drop_ask "${target#*|}"
     log "Удалён из линии ${target%%|*}: ${target#*|}"; pause; return 0
   fi
   cert_domains_load
@@ -5694,6 +5882,8 @@ certs_domain_remove_manual() {
   fi
   cert_domains_remove "$target"
   log "Удалён из мультисписка: $target"
+  cert_removed_domain_purge_sni "$target"
+  cert_personal_lineage_drop_ask "$target"
   local r=""
   askyn r "Перевыпустить мультисерт сейчас (без удалённого домена)?" "y"
   [[ "$r" == true ]] && { CERT_DEFER=0; cert_batch_flush; }
@@ -5834,6 +6024,154 @@ cert_dedup_0001() {
   done
   [[ $did -eq 0 ]] && log "Ничего не изменено."
   pause
+}
+
+# Персональная линия домена могла остаться от прежних версий: cert_issue до
+# «линейной» логики выпускал персональный серт live/<домен>, а домен при этом
+# ещё и попадал в SAN линии базы (sync_from_sni) — «один домен в двух линиях».
+# При удалении домена (п.11) предлагаю снести и персональную линию.
+cert_personal_lineage_drop_ask() {   # <domain>
+  local d="$1" pl="/etc/letsencrypt/live/$d"
+  [[ -n "$d" && -f "$pl/fullchain.pem" ]] || return 0
+  local ans=""
+  echo "  Найден персональный серт $d (live/$d) — дубль покрытия от прежних версий."
+  askyn ans "Удалить и его? (домен исчезнет из ВСЕХ сертификатов)" "y"
+  if [[ "$ans" == true ]]; then
+    certbot delete --cert-name "$d" --non-interactive 2>&1 | tail -2 | sed 's/^/    /'
+    log "  персональный серт $d удалён"
+  else
+    warn "  персональный серт $d оставлен — он продолжит покрывать домен и продлеваться"
+  fi
+  return 0
+}
+
+# ─── Дубли покрытия: домен в SAN линии + своя персональная линия ─────────────
+# Наследие прежнего cert_issue: домен получал персональную линию live/<домен>
+# И одновременно попадал в SAN линии базы (cert_domains_sync_from_sni при
+# перевыпуске) — «один домен в двух линиях» (типичный случай — tg web proxy).
+# Здесь такие домены ищутся по SAN всех live-линий; персональная линия
+# удаляется (домен остаётся покрыт линией), а все ссылки
+# /etc/letsencrypt/live/<домен>/ перепривязываются на покрывающую линию.
+cert_cover_dedup() {
+  line; echo -e "${B}   ДУБЛИ ПОКРЫТИЯ СЕРТИФИКАТОВ${N}"; line
+  [[ -d /etc/letsencrypt/live ]] || { warn "Нет /etc/letsencrypt/live"; pause; return 0; }
+  local pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
+  local known=""
+  known=$(cert_known_lines 2>/dev/null || true)
+
+  local -a dups=() covers=()
+  local ld name other_ld san2 entry2 base2 other found
+  for ld in /etc/letsencrypt/live/*/; do
+    [[ -d "$ld" ]] || continue
+    name=$(basename "$ld")
+    [[ "$name" =~ -[0-9]{4}$ ]] && continue       # суффиксы -0001 — это п.16
+    [[ "$name" == all.* ]] && continue            # имя линии режима B, не персональный домен
+    cert_domain_valid "$name" || continue         # мусорные имена не трогаем
+    [[ -n "$pd" && "$name" == "$pd" ]] && continue # линия панели — священна
+    grep -qxF "$name" <<<"$known" && continue     # известная линия — не дубль
+    # покрыт ли этот домен ДРУГОЙ линией (точное имя или wildcard её зоны)?
+    other=""
+    for other_ld in /etc/letsencrypt/live/*/; do
+      [[ "${other_ld%/}" == "${ld%/}" ]] && continue
+      [[ -f "${other_ld}fullchain.pem" ]] || continue
+      san2=$(openssl x509 -noout -ext subjectAltName -in "${other_ld}cert.pem" 2>/dev/null | tail -n +2 | tr -d ' ' || true)
+      [[ "$san2" != *DNS:* ]] && continue
+      found=""
+      while IFS= read -r entry2; do
+        entry2="${entry2#DNS:}"
+        [[ -z "$entry2" ]] && continue
+        if [[ "$entry2" == "$name" ]]; then found=1; break; fi
+        if [[ "$entry2" == \** ]]; then
+          base2="${entry2#\*.}"
+          if [[ "$name" == *."$base2" || "$name" == "$base2" ]]; then found=1; break; fi
+        fi
+      done < <(tr ',\n' '\n\n' <<<"$san2")
+      if [[ -n "$found" ]]; then other="${other_ld%/}"; break; fi
+    done
+    [[ -n "$other" ]] || continue
+    dups+=("$name"); covers+=("$other")
+  done
+
+  if [[ ${#dups[@]} -eq 0 ]]; then
+    log "Дублей покрытия не найдено — у каждого домена одна линия"
+    pause; return 0
+  fi
+
+  echo "Домены, покрытые одновременно персональной линией и другой линией:"
+  local i=0 dn cn
+  for dn in "${dups[@]}"; do
+    cn="${covers[$i]}"
+    echo "  ─ $dn"
+    echo "      персональная: live/$dn  SAN: $(openssl x509 -noout -ext subjectAltName -in "/etc/letsencrypt/live/$dn/cert.pem" 2>/dev/null | tail -n +2 | tr -d ' ' | tr '\n' ',' | sed 's/,$//')"
+    echo "      покрыта также линией: $(basename "$cn")  SAN: $(openssl x509 -noout -ext subjectAltName -in "$cn/cert.pem" 2>/dev/null | tail -n +2 | tr -d ' ' | tr '\n' ',' | sed 's/,$//')"
+    i=$((i+1))
+  done
+  echo
+  echo "  1) Удалить персональные линии ВСЕХ найденных доменов (перепривязать ссылки)"
+  echo "  2) Выбирать по одному"
+  echo "  0) Отмена"
+  local c=""
+  read -rp "$(echo -e "${B}Выбор:${N} ")" c || c="0"
+  case "$c" in
+    1|2) ;;
+    *) pause; return 0 ;;
+  esac
+  local i2=0 did=0 sure
+  for dn in "${dups[@]}"; do
+    local cn2="${covers[$i2]}"; i2=$((i2+1))
+    if [[ "$c" == "2" ]]; then
+      askyn sure "Удалить персональную линию «$dn» (покрытие останется: $(basename "$cn2"))?" "y"
+      [[ "$sure" == true ]] || continue
+    fi
+    # 1) перепривязать ссылки ДО удаления (иначе файлы исчезнут из-под ног)
+    local old="/etc/letsencrypt/live/$dn/" new="$cn2/"
+    if [[ -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+      systemctl stop x-ui 2>/dev/null || true
+      CERTREBIND_OLD="$old" CERTREBIND_NEW="$new" CERTREBIND_DB="$XUI_DB" python3 - <<'PYRB'
+import sqlite3, os
+old, new, db = os.environ["CERTREBIND_OLD"], os.environ["CERTREBIND_NEW"], os.environ["CERTREBIND_DB"]
+con = sqlite3.connect(db); cur = con.cursor(); n = 0
+for k, v in cur.execute("SELECT key, value FROM settings WHERE value LIKE ?", (f"%{old}%",)).fetchall():
+    cur.execute("UPDATE settings SET value=? WHERE key=?", (v.replace(old, new), k)); n += 1
+for iid, s, st in cur.execute("SELECT id, settings, stream_settings FROM inbounds WHERE settings LIKE ? OR stream_settings LIKE ?", (f"%{old}%", f"%{old}%")).fetchall():
+    cur.execute("UPDATE inbounds SET settings=?, stream_settings=? WHERE id=?",
+                ((s or '').replace(old, new), (st or '').replace(old, new), iid)); n += 1
+con.commit()
+print(f"    перепривязано ссылок в БД: {n}")
+PYRB
+      systemctl start x-ui 2>/dev/null || true
+    fi
+    local nf
+    nf=$(grep -rl "$old" /etc/nginx/ 2>/dev/null | head -10)
+    if [[ -n "$nf" ]]; then
+      grep -rl "$old" /etc/nginx/ 2>/dev/null | while read -r f; do
+        sed -i "s|$old|$new|g" "$f" 2>/dev/null || true
+      done
+      log "    nginx-конфиги перевязаны на линию"
+    fi
+    if [[ -f /opt/AdGuardHome/AdGuardHome.yaml ]] && grep -q "$old" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null; then
+      sed -i "s|$old|$new|g" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true
+      systemctl restart AdGuardHome 2>/dev/null || systemctl restart adguardhome 2>/dev/null || true
+      log "    AdGuard перевязан на линию"
+    fi
+    # 2) удалить персональную линию
+    if certbot delete --cert-name "$dn" --non-interactive 2>&1 | tail -2 | sed 's/^/    /'; then
+      log "  удалено: $dn (покрытие — линия $(basename "$cn2"))"
+      did=$((did+1))
+    else
+      warn "  не удалось удалить $dn — ссылки уже перевязаны, снеси вручную: certbot delete --cert-name $dn"
+    fi
+  done
+  if [[ $did -gt 0 ]]; then
+    nginx -t >/dev/null 2>&1 && nginx_reload || true
+    log "Готово: дублей покрытия устранено — $did"
+  else
+    log "Ничего не изменено."
+  fi
+  pause
+  return 0
 }
 
 # Автоочистка сирот: линии в live/, которые не используются.
@@ -6535,7 +6873,12 @@ nginx_443_check() {   # [quiet]
 # =====================================================================
 save_firewall_state() {
   mkdir -p "$FW_STATE_DIR" 2>/dev/null || true
-  [[ -f "$FW_STATE_DIR/saved" ]] && { log "Снимок уже есть"; return 0; }
+  if [[ -f "$FW_STATE_DIR/saved" ]]; then
+    local _sdt
+    _sdt=$(date -r "$FW_STATE_DIR/saved" '+%d.%m.%Y %H:%M' 2>/dev/null || true)
+    warn "Снимок уже есть (${_sdt:-дата неизвестна}) — хранит исходное состояние «до стека» и не перезаписывается"
+    return 0
+  fi
   {
     if command -v ufw >/dev/null 2>&1; then
       echo 'UFW_WAS_INSTALLED=1'
@@ -6563,7 +6906,11 @@ restore_firewall_state() {
   [[ -f "$FW_STATE_DIR/iptables.v6" ]] && ip6tables-restore < "$FW_STATE_DIR/iptables.v6"  2>/dev/null || true
   if [[ "${UFW_WAS_INSTALLED:-0}" == "1" && -f "$FW_STATE_DIR/ufw-config.tar" ]]; then
     tar -xpf "$FW_STATE_DIR/ufw-config.tar" -C / 2>/dev/null || true
-    [[ "${UFW_WAS_ACTIVE:-0}" == "1" ]] && ufw --force enable >/dev/null 2>&1 || ufw --force disable >/dev/null 2>&1
+    if [[ "${UFW_WAS_ACTIVE:-0}" == "1" ]]; then
+      ufw --force enable >/dev/null 2>&1 || true
+    else
+      ufw --force disable >/dev/null 2>&1 || true
+    fi
   fi
   rm -f "$FW_STATE_DIR/saved"
   log "Восстановлено"; pause
@@ -8806,8 +9153,14 @@ initial_setup() {
   local PLAN_EMAIL_DONE=0 PLAN_CREDS_DONE=0 PLAN_ADG_DONE=0
   if [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]]; then
     if [[ -z "$PANEL_DOMAIN" || "$PANEL_DOMAIN" == "panel.example.com" ]]; then
+      # Переезд на новый сервер: домен обычно уже лежит в бэкапе стека —
+      # предлагаем его по умолчанию (Enter = принять). Спрашиваем только
+      # если бэкапа на сервере нет.
+      local bk_dom=""
+      bk_dom=$(backup_peek_panel_domain) || bk_dom=""
+      [[ -n "$bk_dom" ]] && log "Найден бэкап стека — домен панели из бэкапа: $bk_dom (Enter — принять)"
       local pd0=""
-      ask pd0 "Домен панели (A-запись → этот сервер)" "${PANEL_DOMAIN:-panel.example.com}" '^[a-zA-Z0-9.-]+$'
+      ask pd0 "Домен панели (A-запись → этот сервер)" "${bk_dom:-${PANEL_DOMAIN:-panel.example.com}}" '^[a-zA-Z0-9.-]+$'
       PANEL_DOMAIN="$pd0"
     fi
     askyn PLAN_INSTALL "Ставить панель LucX UI сейчас?" "y"
@@ -8888,8 +9241,11 @@ initial_setup() {
   if [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]]; then
     warn "Панель LucX UI не установлена (x-ui.db не найден)."
     if [[ -z "$PANEL_DOMAIN" || "$PANEL_DOMAIN" == "panel.example.com" ]]; then
+      local bk_dom2=""
+      bk_dom2=$(backup_peek_panel_domain) || bk_dom2=""
+      [[ -n "$bk_dom2" ]] && log "Найден бэкап стека — домен панели из бэкапа: $bk_dom2 (Enter — принять)"
       local pd_ask=""
-      ask pd_ask "Домен панели (A-запись → этот сервер)" "${PANEL_DOMAIN:-panel.example.com}" '^[a-zA-Z0-9.-]+$'
+      ask pd_ask "Домен панели (A-запись → этот сервер)" "${bk_dom2:-${PANEL_DOMAIN:-panel.example.com}}" '^[a-zA-Z0-9.-]+$'
       PANEL_DOMAIN="$pd_ask"
     fi
     install_now=false
@@ -8944,7 +9300,9 @@ initial_setup() {
       PANEL_DOMAIN="$_existing_panel_domain"
       log "Домен панели взят из уже установленной панели: $PANEL_DOMAIN"
     else
-      ask PANEL_DOMAIN "Домен панели" "panel.example.com" '^[a-zA-Z0-9.-]+$'
+      local bk_dom3=""
+      bk_dom3=$(backup_peek_panel_domain) || bk_dom3=""
+      ask PANEL_DOMAIN "Домен панели" "${bk_dom3:-panel.example.com}" '^[a-zA-Z0-9.-]+$'
     fi
   else
     log "Домен панели: $PANEL_DOMAIN (задан ранее)"
@@ -9216,6 +9574,12 @@ initial_setup() {
   xui_set_setting subURI      "$(suburi_build "$PANEL_DOMAIN")"
   log "Серт панели вписан в настройки x-ui (HTTPS-режим): $pc"
 
+  # Серты инбаундов/CDN-ориджинов при режиме линий (A/B) НЕ выпускаем по
+  # одному: cert_issue лишь регистрирует домен в его линии (CERT_DEFER=1),
+  # а выпускает линии одной пачкой cert_batch_flush ниже — иначе каждый
+  # TLS-инбаунд переиспускал бы линию заново (лимит LE 5 сертов/неделю).
+  # Серт панели выше выпущен сразу — он нужен для webCertFile/stack.conf.
+  CERT_DEFER=1
   for id in "${INB_IDS[@]}"; do
     [[ "${HIDE[$id]}" == true ]] || continue
     [[ -z "${DECOY_TPL[$id]}" ]] && continue
@@ -9234,6 +9598,7 @@ initial_setup() {
     [[ -n "$_corigin" ]] || continue
     cert_issue "$_corigin" || warn "  ИТОГ: серт ${_corigin} НЕ выпущен — CDN-ORIGIN #$_cid не поднимется (причина выше)"
   done
+  CERT_DEFER=0
   if (( ${#CDN_PROFILE_IDS[@]} > 0 )); then
     local _cfr=""
     _cfr=$(cdn_front_domains | tr '\n' ' ')
@@ -10338,9 +10703,16 @@ sni_map_domains() {
   [[ -f "$SNI_CONF" ]] || return 0
   local line
   local _re='^[[:space:]]+([A-Za-z0-9.-]+)[[:space:]]+inb_([0-9]+)_backend;'
+  # Hysteria2 SNI-маршрут «домен → hysteria_N_web»: раньше такие строки не
+  # парсились → после удаления инбаунда запись в карте оставалась и
+  # «Домен X уже занят» блокировал повторное использование домена.
+  local _re_h='^[[:space:]]+([A-Za-z0-9.-]+)[[:space:]]+hysteria_([0-9]+)_web;'
   while IFS= read -r line; do
-    [[ "$line" =~ $_re ]] || continue
-    echo "${BASH_REMATCH[1]}|inb_${BASH_REMATCH[2]}_backend|${BASH_REMATCH[2]}"
+    if [[ "$line" =~ $_re ]]; then
+      echo "${BASH_REMATCH[1]}|inb_${BASH_REMATCH[2]}_backend|${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ $_re_h ]]; then
+      echo "${BASH_REMATCH[1]}|hysteria_${BASH_REMATCH[2]}_web|${BASH_REMATCH[2]}"
+    fi
   done < "$SNI_CONF"
 }
 
@@ -10450,6 +10822,8 @@ sni_cleanup_stale() {
     IFS='|' read -r dom be iid <<<"$row"
     if [[ -n "$iid" ]]; then
       if [[ "$be" == "inb_${iid}_backend" ]]; then
+        echo "  map/upstream: $dom → $be (инбаунда #$iid нет)"
+      elif [[ "$be" == "hysteria_${iid}_web" ]]; then
         echo "  map/upstream: $dom → $be (инбаунда #$iid нет)"
       else
         echo "  map: $dom → $be (у tproxy #$iid должен использоваться tg_backend)"
@@ -13224,6 +13598,50 @@ restore_pre_install_snapshot() {
 # =====================================================================
 # БЭКАП
 # =====================================================================
+# Домен панели из последнего бэкапа стека — для переезда на новый сервер.
+# Ищем stack-backup-*.tar.gz в $BACKUP_DIR и /root, достаём из архива x-ui.db
+# и читаем webDomain/subDomain. Печатает домен или пусто (ошибки — молча).
+backup_peek_panel_domain() {
+  local f="" cand
+  for cand in "$BACKUP_DIR"/stack-backup-*.tar.gz /root/stack-backup-*.tar.gz; do
+    [[ -f "$cand" ]] || continue
+    [[ -z "$f" || "$cand" -nt "$f" ]] && f="$cand"
+  done
+  [[ -z "$f" ]] && return 0
+  # ВАЖНО (pipefail): список файлов берём ЦЕЛИКОМ, затем grep по переменной —
+  # `tar | grep -m1` роняет tar по SIGPIPE и затирает результат.
+  local tlist member=""
+  tlist=$(tar tzf "$f" 2>/dev/null) || tlist=""
+  member=$(printf '%s\n' "$tlist" | grep -m1 -E '(^|/)x-ui\.db$') || member=""
+  [[ -z "$member" ]] && return 0
+  local tmp
+  tmp=$(mktemp -d 2>/dev/null) || return 0
+  tar xzf "$f" -C "$tmp" "$member" 2>/dev/null || { rm -rf "$tmp"; return 0; }
+  local dbf="$tmp/$member" d=""
+  if command -v sqlite3 >/dev/null 2>&1; then
+    d=$(sqlite3 "$dbf" "SELECT value FROM settings WHERE key='webDomain';" 2>/dev/null | tr -d '[:space:]')
+    [[ -z "$d" || "$d" == "null" ]] && \
+      d=$(sqlite3 "$dbf" "SELECT value FROM settings WHERE key='subDomain';" 2>/dev/null | tr -d '[:space:]')
+  elif command -v python3 >/dev/null 2>&1; then
+    d=$(python3 - "$dbf" <<'PYBK' 2>/dev/null
+import sqlite3, sys
+try:
+    con = sqlite3.connect(sys.argv[1])
+    for k in ("webDomain", "subDomain"):
+        r = con.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
+        if r and r[0] and str(r[0]).strip() not in ("", "null"):
+            print(str(r[0]).strip()); break
+except Exception:
+    pass
+PYBK
+)
+    d=$(printf '%s' "$d" | tr -d '[:space:]')
+  fi
+  rm -rf "$tmp"
+  [[ "$d" =~ ^[a-zA-Z0-9.-]+$ ]] && printf '%s' "$d"
+  return 0
+}
+
 backup_config() {
   line; echo -e "${B}   БЭКАП${N}"; line
   mkdir -p "$BACKUP_DIR" 2>/dev/null || true
@@ -13288,6 +13706,15 @@ restore_config() {
   systemctl start x-ui 2>/dev/null || true
   [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && systemctl start "$ADG_SERVICE" 2>/dev/null || true
   systemctl restart fail2ban 2>/dev/null || true
+  # Переезд на новый сервер: в бэкапе возятся только renewal-конфиги, самих
+  # сертов (live/) нет — панель осталась бы без TLS. Предлагаем сразу
+  # пересобрать мультисерт из восстановленного домена/SNI-карты.
+  if ! ls /etc/letsencrypt/live/*/fullchain.pem >/dev/null 2>&1; then
+    warn "Сертификаты на этом сервере не выпущены (в бэкапе только renewal-конфиги)"
+    local rcert=""
+    askyn rcert "Пересобрать мультисерт из доменов бэкапа сейчас? (DNS уже должен указывать на этот сервер)" "y"
+    [[ "$rcert" == true ]] && { CERT_DEFER=0; cert_batch_flush; }
+  fi
   pause
 }
 
@@ -13416,6 +13843,7 @@ certs_menu() {
   echo "  15) Очистка сирот (линии, которые нигде не используются)"
   echo "  16) Очистка дублей -0001"
   echo "  17) Аудит линий (SAN файла vs серт)"
+  echo "  18) Убрать дубли покрытия (домен в линии + персональный серт)"
   echo "  0) Назад"
   line
   local action=""
@@ -13439,6 +13867,7 @@ certs_menu() {
     15) cert_lines_cleanup ;;
     16) cert_dedup_0001 ;;
     17) cert_lines_audit ;;
+    18) cert_cover_dedup ;;
     0) return 0 ;;
     *) sleep 1 ;;
   esac
@@ -13966,6 +14395,16 @@ fw_allow() {
   ufw "${args[@]}" "$port/$proto" >/dev/null 2>&1 || true
 }
 
+# SSH «через туннель»: sshd слушает только loopback → порт наружу не открываем.
+# Порт берём из SSH_PORT (sshd мог переехать с 22 — раньше проверки были на
+# хардкод 22 и на кастомном порту ошибочно открывали SSH наружу).
+ssh_loopback_only() {
+  local sp="${SSH_PORT:-22}"
+  ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${sp}([[:space:]]|$)" && return 0
+  ss -tln 2>/dev/null | grep -qE "\[::1\]:${sp}([[:space:]]|$)" && return 0
+  return 1
+}
+
 # Переключение web/sub-портов x-ui между loopback и внешним слушателем.
 # Используется TUI файрвола: изменение привязки и правила UFW выполняются
 # одной операцией, чтобы интерфейс не показывал рассинхронизированное состояние.
@@ -13981,8 +14420,19 @@ xui_set_listen() {
   [[ -f "$db" ]] || { err "x-ui.db не найден"; return 1; }
   systemctl stop x-ui >/dev/null 2>&1 || true
   local ok=1
+  # ВАЖНО: если ключей webListen/subListen в settings ещё нет, UPDATE меняет
+  # 0 строк и «успешно» ничего не делает — при скрытии панель осталась бы на
+  # 0.0.0.0 при рапорте «спрятан». После UPDATE проверяем наличие обоих ключей
+  # и вставляем недостающие (upsert).
   if command -v sqlite3 >/dev/null 2>&1; then
     sqlite3 "$db" "UPDATE settings SET value='$mode' WHERE key IN ('webListen','subListen');" >/dev/null 2>&1 || ok=0
+    if [[ "$ok" == 1 ]]; then
+      local nkeys
+      nkeys=$(sqlite3 "$db" "SELECT count(*) FROM settings WHERE key IN ('webListen','subListen');" 2>/dev/null || echo 0)
+      if [[ "$nkeys" != "2" ]]; then
+        sqlite3 "$db" "INSERT OR REPLACE INTO settings(key,value) VALUES('webListen','$mode'),('subListen','$mode');" >/dev/null 2>&1 || ok=0
+      fi
+    fi
   else
     ok=0
   fi
@@ -13990,7 +14440,12 @@ xui_set_listen() {
     python3 - "$db" "$mode" <<'PYX'
 import sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
-con.execute("UPDATE settings SET value=? WHERE key IN ('webListen','subListen')", (sys.argv[2],))
+cur = con.cursor()
+cur.execute("UPDATE settings SET value=? WHERE key IN ('webListen','subListen')", (sys.argv[2],))
+n = con.execute("SELECT count(*) FROM settings WHERE key IN ('webListen','subListen')").fetchone()[0]
+if n < 2:
+    cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('webListen',?),('subListen',?)",
+                (sys.argv[2], sys.argv[2]))
 con.commit(); con.close()
 PYX
     ok=$?
@@ -14103,7 +14558,7 @@ firewall_menu_legacy() {
           askyn confirm "Применить hide-only? (правила НЕ сбрасываются: панельные/11443 закрываются явно)" "n"
           [[ "$confirm" == true ]] || continue
           save_firewall_state
-          if ! ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:22([[:space:]]|$)'; then
+          if ! ssh_loopback_only; then
             fw_allow "$SSH_PORT" tcp "SSH"
           fi
           systemctl is-active --quiet nginx 2>/dev/null && fw_allow 443 tcp "HTTPS/SNI"
@@ -14129,7 +14584,12 @@ firewall_menu_legacy() {
           ufw --force reset >/dev/null 2>&1 || true
           ufw default deny incoming >/dev/null 2>&1 || true
           ufw default allow outgoing >/dev/null 2>&1 || true
-          fw_allow "$SSH_PORT" tcp "SSH"
+          # SSH-туннель: если sshd слушает только loopback — наружу не открываем
+          if ! ssh_loopback_only; then
+            fw_allow "$SSH_PORT" tcp "SSH"
+          else
+            ufw delete allow "${SSH_PORT}/tcp" >/dev/null 2>&1 || true
+          fi
           for k in "${!REQ[@]}"; do
             local pr="${k%%:*}" pt="${k##*:}"
             [[ "$pr:$pt" == "tcp:$SSH_PORT" ]] && continue
@@ -14228,7 +14688,11 @@ firewall_apply_menu() {
     ufw --force reset >/dev/null 2>&1 || true
     ufw default deny incoming >/dev/null 2>&1 || true
     ufw default allow outgoing >/dev/null 2>&1 || true
-    fw_allow "${SSH_PORT:-22}" tcp "SSH"
+    if ! ssh_loopback_only; then
+      fw_allow "${SSH_PORT:-22}" tcp "SSH"
+    else
+      ufw delete allow "${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
+    fi
     fw_allow 443 tcp "HTTPS/SNI"
     local up
     for up in $(udp_inbound_ports); do
@@ -14502,6 +14966,29 @@ firewall_apply_menu() {
     fi
     items+=("tcp|443|—|nginx/SNI (обязательный)|${sthttps}|${nthttps}")
   fi
+  # 5. Панельные порты (web/sub): x-ui обычно слушает их на 127.0.0.1,
+  # внешнего сокета нет, и без этой строки TUI вообще не давал их
+  # открыть/спрятать (особенно при выключенном UFW или без deny-правила).
+  local _pp="" _sp="" _px
+  _pp=$(xui_get webPort 2>/dev/null || true)
+  _sp=$(xui_get subPort 2>/dev/null || true)
+  for _px in "$_pp" "$_sp"; do
+    [[ -z "$_px" || "$_px" == "0" || ! "$_px" =~ ^[0-9]+$ ]] && continue
+    fw_port_locked "$_px" && continue
+    [[ " $seen " == *" ${_px}/tcp "* ]] && continue
+    seen+=" ${_px}/tcp"
+    local _pst=0 _pnote="← панель x-ui (слушает 127.0.0.1)"
+    if [[ "$ufw_active" == "1" ]]; then
+      if [[ -n "${UFW_ALLOW[${_px}/tcp]:-}" ]]; then
+        _pst=1; _pnote="← панель x-ui (0.0.0.0)"
+      elif [[ -n "${UFW_DENY[${_px}/tcp]:-}" ]]; then
+        _pst=0; _pnote="← панель x-ui (127.0.0.1) · DENY (правило UFW)"
+      else
+        _pst=0; _pnote="← панель x-ui (127.0.0.1) · UFW блокирует"
+      fi
+    fi
+    items+=("tcp|${_px}|—|x-ui (панель, loopback)|${_pst}|${_pnote}")
+  done
   # 11443 никогда не должен появляться как открываемый пользовательский порт.
   local _filtered=() _row _rp _rport
   for _row in "${items[@]}"; do
@@ -14652,14 +15139,26 @@ firewall_apply_menu() {
           echo
           local _xans=""
           if [[ "$state" == "1" ]]; then
+            echo "  ⚠ x-ui перезапустится — туннели (xray/caddy/…) кратко оборвутся"
             read -rp "Вернуть x-ui на 127.0.0.1 и закрыть порт $port? [y/N]: " _xans || _xans=""
             if [[ "${_xans,,}" == "y" ]] && xui_set_listen "$port" "127.0.0.1"; then
               ufw delete allow "$port/tcp" >/dev/null 2>&1 || true
+              # Явный deny вместо полагания на default deny: безопасно и при
+              # любой политике, и статус TUI на следующем входе будет честным.
+              ufw deny "$port/tcp" >/dev/null 2>&1 || true
               state="0"; note="← x-ui спрятан (127.0.0.1)"
             fi
           else
+            echo "  ⚠ x-ui перезапустится — туннели (xray/caddy/…) кратко оборвутся"
             read -rp "Вытащить x-ui наружу на 0.0.0.0:$port? [y/N]: " _xans || _xans=""
             if [[ "${_xans,,}" == "y" ]] && xui_set_listen "$port" "0.0.0.0"; then
+              # ПОРЯДОК ВАЖЕН: ufw применяет первое совпавшее правило. Для
+              # панельного порта deny уже висит в цепочке (fw_deny_panel_ports),
+              # поэтому allow, добавленный ПОСЛЕ него, никогда не сработал —
+              # TUI показывал «открыт», а порт оставался закрыт. Сначала
+              # снимаем deny, только потом добавляем allow.
+              ufw delete deny "$port/tcp" >/dev/null 2>&1 || true
+              ufw delete deny "$port/udp" >/dev/null 2>&1 || true
               fw_allow "$port" tcp "x-ui"
               state="1"; note="← x-ui открыт наружу (0.0.0.0)"
             fi
@@ -14775,6 +15274,35 @@ firewall_apply_menu() {
       ''|$'\r'|$'\n')
         tui_restore
         echo
+        # Защита от само-блокировки: применение конфигурации, в которой SSH
+        # помечен закрытым, отрежет текущую сессию. Требуем явного YES,
+        # иначе возвращаем SSH в открытые.
+        local _ssh_port="${SSH_PORT:-22}" _ssh_closed="" _it5 _i5
+        for _it5 in "${items[@]}"; do
+          [[ "${_it5%%|*}" == "tcp" && "${_it5#*|}" == "${_ssh_port}|"* ]] || continue
+          local _f5=""
+          IFS='|' read -r _ _ _ _ _f5 _ <<<"$_it5"
+          [[ "$_f5" == "0" ]] && { _ssh_closed=1; break; }
+        done
+        if [[ -n "$_ssh_closed" ]]; then
+          echo -e "${R}⚠ В конфигурации закрыт SSH-порт ($_ssh_port) — применением ты отрежешь текущий доступ!${N}"
+          local _yes5=""
+          read -rp "$(echo -e "? Для подтверждения введи ${Y}YES${N}: ")" _yes5 || _yes5=""
+          if [[ "$_yes5" != "YES" ]]; then
+            _i5=0
+            for _it5 in "${items[@]}"; do
+              if [[ "${_it5%%|*}" == "tcp" && "${_it5#*|}" == "${_ssh_port}|"* ]]; then
+                local _p1="" _p2="" _p3="" _p4="" _p6=""
+                IFS='|' read -r _p1 _p2 _p3 _p4 _ _p6 <<<"$_it5"
+                items[$_i5]="${_p1}|${_p2}|${_p3}|${_p4}|1|${_p6}"
+              fi
+              _i5=$((_i5+1))
+            done
+            log "SSH оставлен открытым (для закрытия введи YES при подтверждении)"
+            [[ -n "$old_stty" ]] && stty "$old_stty" </dev/tty 2>/dev/null || true
+            tput civis 2>/dev/null || true
+          fi
+        fi
         echo -e "${B}▸ Итог:${N}"
         local open_list close_list
         open_list=""; close_list=""
@@ -14784,6 +15312,7 @@ firewall_apply_menu() {
         done
         echo "  Откроются:${open_list:- <пусто>}"
         [[ -n "$close_list" ]] && echo "  Закроются:${close_list}"
+        warn "  Внимание: apply делает ufw reset — сторонние правила (docker и т.п.) будут стёрты"
         echo
         local ok=""
         read_safe "? Применить новую конфигурацию UFW? [y/N]: " ok
@@ -14795,13 +15324,21 @@ firewall_apply_menu() {
         ufw --force reset >/dev/null 2>&1 || true
         ufw default deny incoming >/dev/null 2>&1 || true
         ufw default allow outgoing >/dev/null 2>&1 || true
+        local opened_tcp="" _op
         for it in "${items[@]}"; do
           IFS='|' read -r proto port pid proc state note <<<"$it"
           [[ "$state" == "1" ]] || continue
           fw_port_locked "$port" && continue
           fw_allow "$port" "$proto" "kept"
+          [[ "$proto" == "tcp" ]] && opened_tcp+="$port "
         done
         fw_deny_panel_ports
+        # Панельные порты, ЯВНО открытые пользователем в этой сессии:
+        # fw_deny_panel_ports ставит deny следом за allow — пара правил
+        # путает следующие прогоны и status. Снимаем deny у открытых.
+        for _op in $opened_tcp; do
+          ufw delete deny "$_op/tcp" >/dev/null 2>&1 || true
+        done
         # 11443 — внутренний tproxy/HTTP3, наружу не публикуем даже если
         # он случайно попал в список сокетов.
         ufw delete allow 11443/tcp >/dev/null 2>&1 || true
@@ -15376,8 +15913,10 @@ firewall_apply() {
   ufw --force reset >/dev/null 2>&1 || true
   ufw default deny incoming >/dev/null 2>&1 || true
   ufw default allow outgoing >/dev/null 2>&1 || true
-  # SSH: если sshd слушает только loopback («через туннель») — 22 наружу не открываем
-  if ! ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:22([[:space:]]|$)'; then
+  # SSH: если sshd слушает только loopback («через туннель») — наружу не
+  # открываем. Раньше проверка была на хардкод 22 и на кастомном SSH-порте
+  # ошибочно открывала его наружу.
+  if ! ssh_loopback_only; then
     fw_allow "${SSH_PORT:-22}" tcp "SSH"
   else
     ufw delete allow "${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
@@ -15410,8 +15949,11 @@ ufw_is_active() {
   ub=$(command -v ufw 2>/dev/null || true)
   [[ -z "$ub" && -x /usr/sbin/ufw ]] && ub=/usr/sbin/ufw
   if [[ -n "$ub" ]]; then
-    LC_ALL=C "$ub" status 2>/dev/null | head -1 | grep -q "Status: active" && return 0
-    return 1
+    # awk читает весь вывод до конца: связка `ufw status | head -1 | grep`
+    # под глобальным pipefail может вернуть 141 (SIGPIPE) на большом выводе
+    # и «активный» UFW ошибочно посчитать неактивным.
+    LC_ALL=C "$ub" status 2>/dev/null | awk 'NR==1 && $0 ~ /^Status:[[:space:]]*active/ {f=1} END {exit f?0:1}'
+    return $?
   fi
   systemctl is-active --quiet ufw 2>/dev/null
 }
@@ -18279,6 +18821,11 @@ auto_full_setup() {
   #        reality: свой/чужой → (цель | SNI-домен) → порт → заглушка (свой SNI)
   #        VLESS TCP TLS: SNI-домен → серт → порт → выбор decoy-заглушки
   #        VLESS XHTTP TLS: SNI-домен → серт → порт, без decoy
+  # Выпуск сертов ОТКЛАДЫВАЕМ (CERT_DEFER=1): cert_issue лишь регистрирует
+  # домен в его линии, а выпускает линии одной пачкой cert_batch_flush в
+  # initial_setup. Иначе каждый TLS-инбаунд переиспускал бы линию панели
+  # (SAN растёт) и упирался в лимит Let's Encrypt 5 сертов/неделю на домен.
+  CERT_DEFER=1
   log "Создание инбаундов…"
   local -A A_DOM=()
   local -a used_ports=()
@@ -18491,6 +19038,7 @@ auto_full_setup() {
   log "Первичная настройка (автоответы: $ansf)…"
   initial_setup < "$ansf" > >(tee /tmp/stack-initial-setup.log /tmp/auto-setup.log) 2>&1 || warn "initial_setup вернул ошибку — смотри /tmp/stack-initial-setup.log"
   grep -E "\[\+\]|\[!\]|\[x\]" /tmp/stack-initial-setup.log 2>/dev/null | tail -12
+  CERT_DEFER=0   # страховка: отложенный выпуск не должен «протечь» в меню
 
   # --- 2с) Логин/пароль AdGuard, заданные при установке: применяем ВСЕГДА
   #         (даже если у AdGuard уже были пользователи — выбор пользователя важнее)

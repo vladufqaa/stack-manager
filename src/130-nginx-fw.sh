@@ -246,7 +246,12 @@ nginx_443_check() {   # [quiet]
 # =====================================================================
 save_firewall_state() {
   mkdir -p "$FW_STATE_DIR" 2>/dev/null || true
-  [[ -f "$FW_STATE_DIR/saved" ]] && { log "Снимок уже есть"; return 0; }
+  if [[ -f "$FW_STATE_DIR/saved" ]]; then
+    local _sdt
+    _sdt=$(date -r "$FW_STATE_DIR/saved" '+%d.%m.%Y %H:%M' 2>/dev/null || true)
+    warn "Снимок уже есть (${_sdt:-дата неизвестна}) — хранит исходное состояние «до стека» и не перезаписывается"
+    return 0
+  fi
   {
     if command -v ufw >/dev/null 2>&1; then
       echo 'UFW_WAS_INSTALLED=1'
@@ -274,7 +279,11 @@ restore_firewall_state() {
   [[ -f "$FW_STATE_DIR/iptables.v6" ]] && ip6tables-restore < "$FW_STATE_DIR/iptables.v6"  2>/dev/null || true
   if [[ "${UFW_WAS_INSTALLED:-0}" == "1" && -f "$FW_STATE_DIR/ufw-config.tar" ]]; then
     tar -xpf "$FW_STATE_DIR/ufw-config.tar" -C / 2>/dev/null || true
-    [[ "${UFW_WAS_ACTIVE:-0}" == "1" ]] && ufw --force enable >/dev/null 2>&1 || ufw --force disable >/dev/null 2>&1
+    if [[ "${UFW_WAS_ACTIVE:-0}" == "1" ]]; then
+      ufw --force enable >/dev/null 2>&1 || true
+    else
+      ufw --force disable >/dev/null 2>&1 || true
+    fi
   fi
   rm -f "$FW_STATE_DIR/saved"
   log "Восстановлено"; pause

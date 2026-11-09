@@ -58,21 +58,49 @@ cert_lines_load() {
       _ln="$(basename "${_lf%/}")"
       [[ "$_ln" == "README" ]] && continue
       cert_line_name_valid "$_ln" || continue
+      # Режим B: персональная линия live/<домен> канонизируется в линию
+      # домена (панель/все.<база>) — «домен = линия» плодил дубли.
+      local _dom="$_ln"
+      if [[ "${CERT_MODE:-A}" == "B" && "$_ln" != all.* ]]; then
+        local _canon=""; _canon=$(cert_line_for "$_ln" 2>/dev/null || true)
+        [[ -n "$_canon" && "$_canon" != "$_ln" ]] && _ln="$_canon"
+      fi
       [[ " ${CERT_LINES[*]} " == *" $_ln "* ]] && continue
       CERT_LINES+=("$_ln")
       local _df; _df="$(cert_line_file "$_ln")"
-      [[ -s "$_df" ]] || printf '%s\n' "$_ln" > "$_df"
+      if [[ -s "$_df" ]]; then
+        grep -qxF "$_dom" "$_df" 2>/dev/null || printf '%s\n' "$_dom" >> "$_df"
+      else
+        printf '%s\n' "$_dom" > "$_df"
+      fi
     done
-    # Также подхватываем старый общий список, если certbot-каталоги были
-    # переименованы или очищены после выпуска.
+    # Также подхватываем старый общий список (stack-domains.txt), если
+    # certbot-каталоги были переименованы или очищены. ВАЖНО: домены
+    # распределяются ПО ЛИНИЯМ (режим B — cert_line_for; режим A — главная
+    # линия), а НЕ «домен = отдельная линия», как делала старая миграция —
+    # именно она оставляла «один домен в двух линиях» (rt/rx/tg…).
     if [[ -s "$CERT_DOMAINS_FILE" ]]; then
       local _d _line
       while IFS= read -r _d; do
         _d="$(printf '%s' "$_d" | tr -d '[:space:]')"; [[ -z "$_d" ]] && continue
-        _line="$_d"
+        cert_domain_valid "$_d" || continue
+        if [[ "${CERT_MODE:-A}" == "B" ]]; then
+          _line=$(cert_line_for "$_d" 2>/dev/null || true)
+          [[ -z "$_line" ]] && continue
+        else
+          cert_multi_name_resolve >/dev/null 2>&1 || true
+          _line="${CERT_MULTI_NAME:-}"
+          [[ -z "$_line" ]] && _line="$_d"   # совсем без домена панели — как сумеем
+        fi
         [[ " ${CERT_LINES[*]} " == *" $_line "* ]] || CERT_LINES+=("$_line")
-        local _df2; _df2="$(cert_line_file "$_line")"
-        [[ -s "$_df2" ]] || printf '%s\n' "$_d" > "$_df2"
+        if [[ "${CERT_MODE:-A}" == "B" ]]; then
+          local _df2; _df2="$(cert_line_file "$_line")"
+          if [[ -s "$_df2" ]]; then
+            grep -qxF "$_d" "$_df2" 2>/dev/null || printf '%s\n' "$_d" >> "$_df2"
+          else
+            printf '%s\n' "$_d" > "$_df2"
+          fi
+        fi
       done < "$CERT_DOMAINS_FILE"
     fi
     [[ ${#CERT_LINES[@]} -gt 0 ]] && cert_lines_save
@@ -279,6 +307,55 @@ cert_mode_line_base() {   # <domain> → печатает all.<base>
 
 # Миграция: разложить текущий stack-domains.txt по линиям (для B).
 # В режиме A — оставляем как есть.
+
+# Канонизация реестра линий (режим B): линии, названные доменом, который
+# cert_line_for уводит в ДРУГУЮ линию (панель/wildcard-база/all.<база>) —
+# наследие старой миграции «домен = линия» и персональных выпусков cert_issue.
+# Домены такой линии переносятся в каноническую, пустая линия удаляется
+# вместе с её SAN-файлом. Идемпотентно: канонические имена (домен панели,
+# wildcard-база, all.*) не переклассифицируются. СЕРТИФИКАТЫ не трогаются —
+# это правка только реестра; выдачу делает cert_batch_flush.
+cert_lines_canon_migrate() {
+  cert_mode_load >/dev/null 2>&1 || true
+  [[ "${CERT_MODE:-A}" == "B" ]] || return 0
+  cert_lines_load
+  [[ ${#CERT_LINES[@]} -eq 0 ]] && return 0
+  local pd=""
+  pd=$(xui_get webDomain 2>/dev/null || true)
+  [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
+  if [[ -z "${WILDCARD_DOMAIN:-}" && -f "$WILDCARD_STATE" ]]; then
+    WILDCARD_DOMAIN=$(head -n 1 "$WILDCARD_STATE" 2>/dev/null | tr -d '[:space:]' || true)
+  fi
+  local -a bogus=() targets=()
+  local ln target
+  for ln in "${CERT_LINES[@]}"; do
+    if [[ -n "$pd" && "$ln" == "$pd" ]] \
+       || [[ -n "${WILDCARD_DOMAIN:-}" && "$ln" == "$WILDCARD_DOMAIN" ]] \
+       || [[ "$ln" == all.* ]]; then
+      continue   # каноническое имя — не трогаем
+    fi
+    target=$(cert_line_for "$ln" 2>/dev/null || true)
+    if [[ -z "$target" || "$target" == "$ln" ]]; then
+      continue   # маршрутизация не определилась — оставляем как есть
+    fi
+    bogus+=("$ln"); targets+=("$target")
+  done
+  [[ ${#bogus[@]} -eq 0 ]] && return 0
+  local i d n_moved=0
+  for i in "${!bogus[@]}"; do
+    ln="${bogus[$i]}"; target="${targets[$i]}"
+    cert_line_domains_load "$ln"
+    local -a doms=("${CERT_LINE_DOMAINS[@]}")
+    for d in "${doms[@]}"; do
+      cert_line_domains_add "$target" "$d"
+    done
+    n_moved=$((n_moved + ${#doms[@]}))
+    cert_lines_remove "$ln"
+    log "  канонизация линий: «$ln» → «$target» (${#doms[@]} дм.)"
+  done
+  [[ $n_moved -gt 0 ]] && log "Реестр линий канонизирован: перенесено доменов — $n_moved"
+  return 0
+}
 
 # Показать все линии с их SAN (для аудита/меню)
 

@@ -9,6 +9,16 @@ fw_allow() {
   ufw "${args[@]}" "$port/$proto" >/dev/null 2>&1 || true
 }
 
+# SSH «через туннель»: sshd слушает только loopback → порт наружу не открываем.
+# Порт берём из SSH_PORT (sshd мог переехать с 22 — раньше проверки были на
+# хардкод 22 и на кастомном порту ошибочно открывали SSH наружу).
+ssh_loopback_only() {
+  local sp="${SSH_PORT:-22}"
+  ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${sp}([[:space:]]|$)" && return 0
+  ss -tln 2>/dev/null | grep -qE "\[::1\]:${sp}([[:space:]]|$)" && return 0
+  return 1
+}
+
 # Переключение web/sub-портов x-ui между loopback и внешним слушателем.
 # Используется TUI файрвола: изменение привязки и правила UFW выполняются
 # одной операцией, чтобы интерфейс не показывал рассинхронизированное состояние.
@@ -24,8 +34,19 @@ xui_set_listen() {
   [[ -f "$db" ]] || { err "x-ui.db не найден"; return 1; }
   systemctl stop x-ui >/dev/null 2>&1 || true
   local ok=1
+  # ВАЖНО: если ключей webListen/subListen в settings ещё нет, UPDATE меняет
+  # 0 строк и «успешно» ничего не делает — при скрытии панель осталась бы на
+  # 0.0.0.0 при рапорте «спрятан». После UPDATE проверяем наличие обоих ключей
+  # и вставляем недостающие (upsert).
   if command -v sqlite3 >/dev/null 2>&1; then
     sqlite3 "$db" "UPDATE settings SET value='$mode' WHERE key IN ('webListen','subListen');" >/dev/null 2>&1 || ok=0
+    if [[ "$ok" == 1 ]]; then
+      local nkeys
+      nkeys=$(sqlite3 "$db" "SELECT count(*) FROM settings WHERE key IN ('webListen','subListen');" 2>/dev/null || echo 0)
+      if [[ "$nkeys" != "2" ]]; then
+        sqlite3 "$db" "INSERT OR REPLACE INTO settings(key,value) VALUES('webListen','$mode'),('subListen','$mode');" >/dev/null 2>&1 || ok=0
+      fi
+    fi
   else
     ok=0
   fi
@@ -33,7 +54,12 @@ xui_set_listen() {
     python3 - "$db" "$mode" <<'PYX'
 import sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
-con.execute("UPDATE settings SET value=? WHERE key IN ('webListen','subListen')", (sys.argv[2],))
+cur = con.cursor()
+cur.execute("UPDATE settings SET value=? WHERE key IN ('webListen','subListen')", (sys.argv[2],))
+n = con.execute("SELECT count(*) FROM settings WHERE key IN ('webListen','subListen')").fetchone()[0]
+if n < 2:
+    cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('webListen',?),('subListen',?)",
+                (sys.argv[2], sys.argv[2]))
 con.commit(); con.close()
 PYX
     ok=$?
@@ -146,7 +172,7 @@ firewall_menu_legacy() {
           askyn confirm "Применить hide-only? (правила НЕ сбрасываются: панельные/11443 закрываются явно)" "n"
           [[ "$confirm" == true ]] || continue
           save_firewall_state
-          if ! ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:22([[:space:]]|$)'; then
+          if ! ssh_loopback_only; then
             fw_allow "$SSH_PORT" tcp "SSH"
           fi
           systemctl is-active --quiet nginx 2>/dev/null && fw_allow 443 tcp "HTTPS/SNI"
@@ -172,7 +198,12 @@ firewall_menu_legacy() {
           ufw --force reset >/dev/null 2>&1 || true
           ufw default deny incoming >/dev/null 2>&1 || true
           ufw default allow outgoing >/dev/null 2>&1 || true
-          fw_allow "$SSH_PORT" tcp "SSH"
+          # SSH-туннель: если sshd слушает только loopback — наружу не открываем
+          if ! ssh_loopback_only; then
+            fw_allow "$SSH_PORT" tcp "SSH"
+          else
+            ufw delete allow "${SSH_PORT}/tcp" >/dev/null 2>&1 || true
+          fi
           for k in "${!REQ[@]}"; do
             local pr="${k%%:*}" pt="${k##*:}"
             [[ "$pr:$pt" == "tcp:$SSH_PORT" ]] && continue
@@ -271,7 +302,11 @@ firewall_apply_menu() {
     ufw --force reset >/dev/null 2>&1 || true
     ufw default deny incoming >/dev/null 2>&1 || true
     ufw default allow outgoing >/dev/null 2>&1 || true
-    fw_allow "${SSH_PORT:-22}" tcp "SSH"
+    if ! ssh_loopback_only; then
+      fw_allow "${SSH_PORT:-22}" tcp "SSH"
+    else
+      ufw delete allow "${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
+    fi
     fw_allow 443 tcp "HTTPS/SNI"
     local up
     for up in $(udp_inbound_ports); do
@@ -545,6 +580,29 @@ firewall_apply_menu() {
     fi
     items+=("tcp|443|—|nginx/SNI (обязательный)|${sthttps}|${nthttps}")
   fi
+  # 5. Панельные порты (web/sub): x-ui обычно слушает их на 127.0.0.1,
+  # внешнего сокета нет, и без этой строки TUI вообще не давал их
+  # открыть/спрятать (особенно при выключенном UFW или без deny-правила).
+  local _pp="" _sp="" _px
+  _pp=$(xui_get webPort 2>/dev/null || true)
+  _sp=$(xui_get subPort 2>/dev/null || true)
+  for _px in "$_pp" "$_sp"; do
+    [[ -z "$_px" || "$_px" == "0" || ! "$_px" =~ ^[0-9]+$ ]] && continue
+    fw_port_locked "$_px" && continue
+    [[ " $seen " == *" ${_px}/tcp "* ]] && continue
+    seen+=" ${_px}/tcp"
+    local _pst=0 _pnote="← панель x-ui (слушает 127.0.0.1)"
+    if [[ "$ufw_active" == "1" ]]; then
+      if [[ -n "${UFW_ALLOW[${_px}/tcp]:-}" ]]; then
+        _pst=1; _pnote="← панель x-ui (0.0.0.0)"
+      elif [[ -n "${UFW_DENY[${_px}/tcp]:-}" ]]; then
+        _pst=0; _pnote="← панель x-ui (127.0.0.1) · DENY (правило UFW)"
+      else
+        _pst=0; _pnote="← панель x-ui (127.0.0.1) · UFW блокирует"
+      fi
+    fi
+    items+=("tcp|${_px}|—|x-ui (панель, loopback)|${_pst}|${_pnote}")
+  done
   # 11443 никогда не должен появляться как открываемый пользовательский порт.
   local _filtered=() _row _rp _rport
   for _row in "${items[@]}"; do
@@ -695,14 +753,26 @@ firewall_apply_menu() {
           echo
           local _xans=""
           if [[ "$state" == "1" ]]; then
+            echo "  ⚠ x-ui перезапустится — туннели (xray/caddy/…) кратко оборвутся"
             read -rp "Вернуть x-ui на 127.0.0.1 и закрыть порт $port? [y/N]: " _xans || _xans=""
             if [[ "${_xans,,}" == "y" ]] && xui_set_listen "$port" "127.0.0.1"; then
               ufw delete allow "$port/tcp" >/dev/null 2>&1 || true
+              # Явный deny вместо полагания на default deny: безопасно и при
+              # любой политике, и статус TUI на следующем входе будет честным.
+              ufw deny "$port/tcp" >/dev/null 2>&1 || true
               state="0"; note="← x-ui спрятан (127.0.0.1)"
             fi
           else
+            echo "  ⚠ x-ui перезапустится — туннели (xray/caddy/…) кратко оборвутся"
             read -rp "Вытащить x-ui наружу на 0.0.0.0:$port? [y/N]: " _xans || _xans=""
             if [[ "${_xans,,}" == "y" ]] && xui_set_listen "$port" "0.0.0.0"; then
+              # ПОРЯДОК ВАЖЕН: ufw применяет первое совпавшее правило. Для
+              # панельного порта deny уже висит в цепочке (fw_deny_panel_ports),
+              # поэтому allow, добавленный ПОСЛЕ него, никогда не сработал —
+              # TUI показывал «открыт», а порт оставался закрыт. Сначала
+              # снимаем deny, только потом добавляем allow.
+              ufw delete deny "$port/tcp" >/dev/null 2>&1 || true
+              ufw delete deny "$port/udp" >/dev/null 2>&1 || true
               fw_allow "$port" tcp "x-ui"
               state="1"; note="← x-ui открыт наружу (0.0.0.0)"
             fi
@@ -818,6 +888,35 @@ firewall_apply_menu() {
       ''|$'\r'|$'\n')
         tui_restore
         echo
+        # Защита от само-блокировки: применение конфигурации, в которой SSH
+        # помечен закрытым, отрежет текущую сессию. Требуем явного YES,
+        # иначе возвращаем SSH в открытые.
+        local _ssh_port="${SSH_PORT:-22}" _ssh_closed="" _it5 _i5
+        for _it5 in "${items[@]}"; do
+          [[ "${_it5%%|*}" == "tcp" && "${_it5#*|}" == "${_ssh_port}|"* ]] || continue
+          local _f5=""
+          IFS='|' read -r _ _ _ _ _f5 _ <<<"$_it5"
+          [[ "$_f5" == "0" ]] && { _ssh_closed=1; break; }
+        done
+        if [[ -n "$_ssh_closed" ]]; then
+          echo -e "${R}⚠ В конфигурации закрыт SSH-порт ($_ssh_port) — применением ты отрежешь текущий доступ!${N}"
+          local _yes5=""
+          read -rp "$(echo -e "? Для подтверждения введи ${Y}YES${N}: ")" _yes5 || _yes5=""
+          if [[ "$_yes5" != "YES" ]]; then
+            _i5=0
+            for _it5 in "${items[@]}"; do
+              if [[ "${_it5%%|*}" == "tcp" && "${_it5#*|}" == "${_ssh_port}|"* ]]; then
+                local _p1="" _p2="" _p3="" _p4="" _p6=""
+                IFS='|' read -r _p1 _p2 _p3 _p4 _ _p6 <<<"$_it5"
+                items[$_i5]="${_p1}|${_p2}|${_p3}|${_p4}|1|${_p6}"
+              fi
+              _i5=$((_i5+1))
+            done
+            log "SSH оставлен открытым (для закрытия введи YES при подтверждении)"
+            [[ -n "$old_stty" ]] && stty "$old_stty" </dev/tty 2>/dev/null || true
+            tput civis 2>/dev/null || true
+          fi
+        fi
         echo -e "${B}▸ Итог:${N}"
         local open_list close_list
         open_list=""; close_list=""
@@ -827,6 +926,7 @@ firewall_apply_menu() {
         done
         echo "  Откроются:${open_list:- <пусто>}"
         [[ -n "$close_list" ]] && echo "  Закроются:${close_list}"
+        warn "  Внимание: apply делает ufw reset — сторонние правила (docker и т.п.) будут стёрты"
         echo
         local ok=""
         read_safe "? Применить новую конфигурацию UFW? [y/N]: " ok
@@ -838,13 +938,21 @@ firewall_apply_menu() {
         ufw --force reset >/dev/null 2>&1 || true
         ufw default deny incoming >/dev/null 2>&1 || true
         ufw default allow outgoing >/dev/null 2>&1 || true
+        local opened_tcp="" _op
         for it in "${items[@]}"; do
           IFS='|' read -r proto port pid proc state note <<<"$it"
           [[ "$state" == "1" ]] || continue
           fw_port_locked "$port" && continue
           fw_allow "$port" "$proto" "kept"
+          [[ "$proto" == "tcp" ]] && opened_tcp+="$port "
         done
         fw_deny_panel_ports
+        # Панельные порты, ЯВНО открытые пользователем в этой сессии:
+        # fw_deny_panel_ports ставит deny следом за allow — пара правил
+        # путает следующие прогоны и status. Снимаем deny у открытых.
+        for _op in $opened_tcp; do
+          ufw delete deny "$_op/tcp" >/dev/null 2>&1 || true
+        done
         # 11443 — внутренний tproxy/HTTP3, наружу не публикуем даже если
         # он случайно попал в список сокетов.
         ufw delete allow 11443/tcp >/dev/null 2>&1 || true

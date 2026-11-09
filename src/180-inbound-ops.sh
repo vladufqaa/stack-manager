@@ -474,9 +474,16 @@ sni_map_domains() {
   [[ -f "$SNI_CONF" ]] || return 0
   local line
   local _re='^[[:space:]]+([A-Za-z0-9.-]+)[[:space:]]+inb_([0-9]+)_backend;'
+  # Hysteria2 SNI-маршрут «домен → hysteria_N_web»: раньше такие строки не
+  # парсились → после удаления инбаунда запись в карте оставалась и
+  # «Домен X уже занят» блокировал повторное использование домена.
+  local _re_h='^[[:space:]]+([A-Za-z0-9.-]+)[[:space:]]+hysteria_([0-9]+)_web;'
   while IFS= read -r line; do
-    [[ "$line" =~ $_re ]] || continue
-    echo "${BASH_REMATCH[1]}|inb_${BASH_REMATCH[2]}_backend|${BASH_REMATCH[2]}"
+    if [[ "$line" =~ $_re ]]; then
+      echo "${BASH_REMATCH[1]}|inb_${BASH_REMATCH[2]}_backend|${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ $_re_h ]]; then
+      echo "${BASH_REMATCH[1]}|hysteria_${BASH_REMATCH[2]}_web|${BASH_REMATCH[2]}"
+    fi
   done < "$SNI_CONF"
 }
 
@@ -586,6 +593,8 @@ sni_cleanup_stale() {
     IFS='|' read -r dom be iid <<<"$row"
     if [[ -n "$iid" ]]; then
       if [[ "$be" == "inb_${iid}_backend" ]]; then
+        echo "  map/upstream: $dom → $be (инбаунда #$iid нет)"
+      elif [[ "$be" == "hysteria_${iid}_web" ]]; then
         echo "  map/upstream: $dom → $be (инбаунда #$iid нет)"
       else
         echo "  map: $dom → $be (у tproxy #$iid должен использоваться tg_backend)"

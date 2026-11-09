@@ -533,6 +533,7 @@ cert_batch_flush() {
   fi
 
   # ── Режим B: обход линий ──
+  cert_lines_canon_migrate   # наследие «домен = линия» → в канонические линии
   local pd=""
   pd=$(xui_get webDomain 2>/dev/null || true)
   [[ -z "$pd" || "$pd" == "null" ]] && pd="${PANEL_DOMAIN:-}"
@@ -726,6 +727,46 @@ cert_issue() {
     fi
   fi
 
+  # --- Режим линий (A/B): домен живёт в ОДНОЙ линии ---------------------------
+  # Раньше cert_issue всегда выпускал персональную линию live/<домен>, даже
+  # когда работала логика линий (выбор «4» в мастере = персональные + режим B).
+  # Домен оказывался в ДВУХ линиях: своя персональная + SAN линии базы, куда
+  # его возвращал cert_domains_sync_from_sni при первом перевыпуске
+  # (классический пример — tg web proxy: live/tg.<база> + tg.<база> в SAN
+  # линии панели). Теперь домен регистрируется в своей линии и выпускается/
+  # обновляется САМА ЛИНИЯ (cert_issue_line идемпотентен). Персональный
+  # выпуск ниже — фолбэк (режим не определён/линия не вычислилась/отказ).
+  cert_mode_load >/dev/null 2>&1 || true
+  local _cline=""
+  if [[ -n "${CERT_MODE:-}" ]]; then
+    if [[ "$CERT_MODE" == "A" ]]; then
+      cert_multi_name_resolve >/dev/null 2>&1 && _cline="$CERT_MULTI_NAME"
+    else
+      _cline=$(cert_line_for "$d" 2>/dev/null || true)
+    fi
+  fi
+  if [[ -n "$_cline" && "$_cline" != "$d" ]]; then
+    if [[ "$CERT_MODE" == "A" ]]; then
+      cert_domains_add "$d"
+    else
+      cert_line_domains_add "$_cline" "$d"
+    fi
+    if [[ "${CERT_DEFER:-0}" == "1" ]]; then
+      log "  cert $d: записан в линию $_cline — выпуск пачкой в конце установки"
+      return 0
+    fi
+    if cert_issue_line "$_cline"; then
+      # не-TTY фильтр cert_issue_line мог исключить неразрешимый домен и
+      # выпустить линию БЕЗ него — тогда успех здесь был бы ложным
+      if cert_san_set_covers "/etc/letsencrypt/live/$_cline/fullchain.pem" "$d"; then
+        return 0
+      fi
+      warn "  cert $d: линия $_cline выпущена без $d (не резолвится?) — фолбэк на персональный"
+    else
+      warn "  cert $d: выпуск линии $_cline не удался — фолбэк на персональный серт"
+    fi
+  fi
+
   # --- выпуск: выбор типа сертификата ---
   # CERT_MODE_CHOICE — выбор запоминается на сессию (1 вопрос на установку,
   # а не на каждый инбаунд). В ans-автоустановках (stdin не TTY) вопрос
@@ -735,12 +776,7 @@ cert_issue() {
   [[ "$wbase" != *.* ]] && wbase="$d"   # d — сам базовый домен
   if [[ -n "${CERT_MODE_CHOICE:-}" ]]; then
     mode="$CERT_MODE_CHOICE"
-  elif [[ "$name" == "VLESS XHTTP TLS" ]]; then
-          # Явный TLS-пункт: CDN не спрашиваем и security сохраняем как tls.
-          security="tls"
-          INBOUND_CREATE_MODE="tls"
-          _is_cdn=false
-        elif [[ -t 0 && "${STACK_AUTOPILOT:-0}" != 1 && "$security" != "tls" ]]; then
+  elif [[ -t 0 && "${STACK_AUTOPILOT:-0}" != 1 && "$security" != "tls" ]]; then
     echo "  Какой сертификат выпустить для $d?"
     echo "   1) Wildcard *.$wbase — Cloudflare DNS-01, покроет $wbase и все поддомены"
     echo "   2) Обычный персональный — только $d (HTTP-01)"

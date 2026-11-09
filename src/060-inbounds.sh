@@ -15,6 +15,16 @@ create_inbound_db() {
   if [[ -n "$sn" ]]; then
     local cp_line=""
     cp_line=$(cert_paths "$sn") || true     # wildcard- или персональный сертификат
+    if [[ -z "$cp_line" && "${CERT_DEFER:-0}" == "1" ]]; then
+      # Отложенный выпуск (мастер установки): серт появится в ЛИНИИ после
+      # пачки cert_batch_flush, а путь live/<линия>/ детерминирован — вписываем
+      # его сразу, иначе tunnel-инбаунды создаются с пустыми certFile/keyFile.
+      cp_line=$(cert_line_paths_expect "$sn") || true
+      if [[ -n "$cp_line" ]]; then
+        cert="${cp_line%% *}"; key="${cp_line##* }"
+        warn "  серт $sn ещё не выпущен (пачка в конце установки) — вписан путь линии"
+      fi
+    fi
     [[ -n "$cp_line" ]] && { cert="${cp_line%% *}"; key="${cp_line##* }"; }
   fi
   # xray-hysteria НЕ стартует без TLS ("tls config is nil"). Self-signed убран —

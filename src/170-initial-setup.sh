@@ -54,8 +54,14 @@ initial_setup() {
   local PLAN_EMAIL_DONE=0 PLAN_CREDS_DONE=0 PLAN_ADG_DONE=0
   if [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]]; then
     if [[ -z "$PANEL_DOMAIN" || "$PANEL_DOMAIN" == "panel.example.com" ]]; then
+      # Переезд на новый сервер: домен обычно уже лежит в бэкапе стека —
+      # предлагаем его по умолчанию (Enter = принять). Спрашиваем только
+      # если бэкапа на сервере нет.
+      local bk_dom=""
+      bk_dom=$(backup_peek_panel_domain) || bk_dom=""
+      [[ -n "$bk_dom" ]] && log "Найден бэкап стека — домен панели из бэкапа: $bk_dom (Enter — принять)"
       local pd0=""
-      ask pd0 "Домен панели (A-запись → этот сервер)" "${PANEL_DOMAIN:-panel.example.com}" '^[a-zA-Z0-9.-]+$'
+      ask pd0 "Домен панели (A-запись → этот сервер)" "${bk_dom:-${PANEL_DOMAIN:-panel.example.com}}" '^[a-zA-Z0-9.-]+$'
       PANEL_DOMAIN="$pd0"
     fi
     askyn PLAN_INSTALL "Ставить панель LucX UI сейчас?" "y"
@@ -136,8 +142,11 @@ initial_setup() {
   if [[ -z "$XUI_DB" || ! -f "$XUI_DB" ]]; then
     warn "Панель LucX UI не установлена (x-ui.db не найден)."
     if [[ -z "$PANEL_DOMAIN" || "$PANEL_DOMAIN" == "panel.example.com" ]]; then
+      local bk_dom2=""
+      bk_dom2=$(backup_peek_panel_domain) || bk_dom2=""
+      [[ -n "$bk_dom2" ]] && log "Найден бэкап стека — домен панели из бэкапа: $bk_dom2 (Enter — принять)"
       local pd_ask=""
-      ask pd_ask "Домен панели (A-запись → этот сервер)" "${PANEL_DOMAIN:-panel.example.com}" '^[a-zA-Z0-9.-]+$'
+      ask pd_ask "Домен панели (A-запись → этот сервер)" "${bk_dom2:-${PANEL_DOMAIN:-panel.example.com}}" '^[a-zA-Z0-9.-]+$'
       PANEL_DOMAIN="$pd_ask"
     fi
     install_now=false
@@ -192,7 +201,9 @@ initial_setup() {
       PANEL_DOMAIN="$_existing_panel_domain"
       log "Домен панели взят из уже установленной панели: $PANEL_DOMAIN"
     else
-      ask PANEL_DOMAIN "Домен панели" "panel.example.com" '^[a-zA-Z0-9.-]+$'
+      local bk_dom3=""
+      bk_dom3=$(backup_peek_panel_domain) || bk_dom3=""
+      ask PANEL_DOMAIN "Домен панели" "${bk_dom3:-panel.example.com}" '^[a-zA-Z0-9.-]+$'
     fi
   else
     log "Домен панели: $PANEL_DOMAIN (задан ранее)"
@@ -464,6 +475,12 @@ initial_setup() {
   xui_set_setting subURI      "$(suburi_build "$PANEL_DOMAIN")"
   log "Серт панели вписан в настройки x-ui (HTTPS-режим): $pc"
 
+  # Серты инбаундов/CDN-ориджинов при режиме линий (A/B) НЕ выпускаем по
+  # одному: cert_issue лишь регистрирует домен в его линии (CERT_DEFER=1),
+  # а выпускает линии одной пачкой cert_batch_flush ниже — иначе каждый
+  # TLS-инбаунд переиспускал бы линию заново (лимит LE 5 сертов/неделю).
+  # Серт панели выше выпущен сразу — он нужен для webCertFile/stack.conf.
+  CERT_DEFER=1
   for id in "${INB_IDS[@]}"; do
     [[ "${HIDE[$id]}" == true ]] || continue
     [[ -z "${DECOY_TPL[$id]}" ]] && continue
@@ -482,6 +499,7 @@ initial_setup() {
     [[ -n "$_corigin" ]] || continue
     cert_issue "$_corigin" || warn "  ИТОГ: серт ${_corigin} НЕ выпущен — CDN-ORIGIN #$_cid не поднимется (причина выше)"
   done
+  CERT_DEFER=0
   if (( ${#CDN_PROFILE_IDS[@]} > 0 )); then
     local _cfr=""
     _cfr=$(cdn_front_domains | tr '\n' ' ')

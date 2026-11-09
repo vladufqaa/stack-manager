@@ -27,14 +27,27 @@ sni_domain_owner() {
     [[ -n "$be" ]] && SNI_USED["$dom"]="$be"
   fi
   [[ -n "$self" && "$be" == "inb_${self}_backend" ]] && be=""
+  [[ -n "$self" && "$be" == "hysteria_${self}_web" ]] && be=""
   # Мёртвые записи (инбаунд удалён в панели, SNI-маршрут остался) не «занимают»
   # домен — иначе создание нового инбаунда на тот же домен ложно падало
   # «Домен X уже занят». БД не ответила (блокировка) — считаем занятым:
   # перестраховка от ложного «свободно» на пустом ответе sqlite.
-  if [[ "$be" =~ ^inb_([0-9]+)_backend$ && -n "$XUI_DB" && -f "$XUI_DB" ]]; then
+  #
+  # ВАЖНО: проверка охватывает ОБА вида backend'ов с идентификатором инбаунда:
+  #   • inb_<id>_backend        — vless/trojan/naive/anytls/trusttunnel...
+  #   • hysteria_<id>_web       — Hysteria2. Раньше охватывался только первый,
+  #     и после удаления Hysteria2 маршрут «домен → hysteria_N_web» навсегда
+  #     блокировал повторное использование его домена («уже занят»).
+  local __sid=""
+  if [[ "$be" =~ ^inb_([0-9]+)_backend$ ]]; then
+    __sid="${BASH_REMATCH[1]}"
+  elif [[ "$be" =~ ^hysteria_([0-9]+)_web$ ]]; then
+    __sid="${BASH_REMATCH[1]}"
+  fi
+  if [[ -n "$__sid" && -n "$XUI_DB" && -f "$XUI_DB" ]]; then
     local _cnt=""
     _cnt=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-           "SELECT COUNT(*) FROM inbounds WHERE id=${BASH_REMATCH[1]};" 2>/dev/null | tr -d '[:space:]') || true
+           "SELECT COUNT(*) FROM inbounds WHERE id=$__sid;" 2>/dev/null | tr -d '[:space:]') || true
     [[ "$_cnt" == "0" ]] && be=""
   fi
   echo "$be"

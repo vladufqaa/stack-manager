@@ -79,6 +79,11 @@ auto_full_setup() {
   #        reality: свой/чужой → (цель | SNI-домен) → порт → заглушка (свой SNI)
   #        VLESS TCP TLS: SNI-домен → серт → порт → выбор decoy-заглушки
   #        VLESS XHTTP TLS: SNI-домен → серт → порт, без decoy
+  # Выпуск сертов ОТКЛАДЫВАЕМ (CERT_DEFER=1): cert_issue лишь регистрирует
+  # домен в его линии, а выпускает линии одной пачкой cert_batch_flush в
+  # initial_setup. Иначе каждый TLS-инбаунд переиспускал бы линию панели
+  # (SAN растёт) и упирался в лимит Let's Encrypt 5 сертов/неделю на домен.
+  CERT_DEFER=1
   log "Создание инбаундов…"
   local -A A_DOM=()
   local -a used_ports=()
@@ -291,6 +296,7 @@ auto_full_setup() {
   log "Первичная настройка (автоответы: $ansf)…"
   initial_setup < "$ansf" > >(tee /tmp/stack-initial-setup.log /tmp/auto-setup.log) 2>&1 || warn "initial_setup вернул ошибку — смотри /tmp/stack-initial-setup.log"
   grep -E "\[\+\]|\[!\]|\[x\]" /tmp/stack-initial-setup.log 2>/dev/null | tail -12
+  CERT_DEFER=0   # страховка: отложенный выпуск не должен «протечь» в меню
 
   # --- 2с) Логин/пароль AdGuard, заданные при установке: применяем ВСЕГДА
   #         (даже если у AdGuard уже были пользователи — выбор пользователя важнее)

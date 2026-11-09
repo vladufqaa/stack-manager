@@ -256,6 +256,50 @@ restore_pre_install_snapshot() {
 # =====================================================================
 # БЭКАП
 # =====================================================================
+# Домен панели из последнего бэкапа стека — для переезда на новый сервер.
+# Ищем stack-backup-*.tar.gz в $BACKUP_DIR и /root, достаём из архива x-ui.db
+# и читаем webDomain/subDomain. Печатает домен или пусто (ошибки — молча).
+backup_peek_panel_domain() {
+  local f="" cand
+  for cand in "$BACKUP_DIR"/stack-backup-*.tar.gz /root/stack-backup-*.tar.gz; do
+    [[ -f "$cand" ]] || continue
+    [[ -z "$f" || "$cand" -nt "$f" ]] && f="$cand"
+  done
+  [[ -z "$f" ]] && return 0
+  # ВАЖНО (pipefail): список файлов берём ЦЕЛИКОМ, затем grep по переменной —
+  # `tar | grep -m1` роняет tar по SIGPIPE и затирает результат.
+  local tlist member=""
+  tlist=$(tar tzf "$f" 2>/dev/null) || tlist=""
+  member=$(printf '%s\n' "$tlist" | grep -m1 -E '(^|/)x-ui\.db$') || member=""
+  [[ -z "$member" ]] && return 0
+  local tmp
+  tmp=$(mktemp -d 2>/dev/null) || return 0
+  tar xzf "$f" -C "$tmp" "$member" 2>/dev/null || { rm -rf "$tmp"; return 0; }
+  local dbf="$tmp/$member" d=""
+  if command -v sqlite3 >/dev/null 2>&1; then
+    d=$(sqlite3 "$dbf" "SELECT value FROM settings WHERE key='webDomain';" 2>/dev/null | tr -d '[:space:]')
+    [[ -z "$d" || "$d" == "null" ]] && \
+      d=$(sqlite3 "$dbf" "SELECT value FROM settings WHERE key='subDomain';" 2>/dev/null | tr -d '[:space:]')
+  elif command -v python3 >/dev/null 2>&1; then
+    d=$(python3 - "$dbf" <<'PYBK' 2>/dev/null
+import sqlite3, sys
+try:
+    con = sqlite3.connect(sys.argv[1])
+    for k in ("webDomain", "subDomain"):
+        r = con.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
+        if r and r[0] and str(r[0]).strip() not in ("", "null"):
+            print(str(r[0]).strip()); break
+except Exception:
+    pass
+PYBK
+)
+    d=$(printf '%s' "$d" | tr -d '[:space:]')
+  fi
+  rm -rf "$tmp"
+  [[ "$d" =~ ^[a-zA-Z0-9.-]+$ ]] && printf '%s' "$d"
+  return 0
+}
+
 backup_config() {
   line; echo -e "${B}   БЭКАП${N}"; line
   mkdir -p "$BACKUP_DIR" 2>/dev/null || true
@@ -320,6 +364,15 @@ restore_config() {
   systemctl start x-ui 2>/dev/null || true
   [[ "$ADG_PRESENT" == true && -n "$ADG_SERVICE" ]] && systemctl start "$ADG_SERVICE" 2>/dev/null || true
   systemctl restart fail2ban 2>/dev/null || true
+  # Переезд на новый сервер: в бэкапе возятся только renewal-конфиги, самих
+  # сертов (live/) нет — панель осталась бы без TLS. Предлагаем сразу
+  # пересобрать мультисерт из восстановленного домена/SNI-карты.
+  if ! ls /etc/letsencrypt/live/*/fullchain.pem >/dev/null 2>&1; then
+    warn "Сертификаты на этом сервере не выпущены (в бэкапе только renewal-конфиги)"
+    local rcert=""
+    askyn rcert "Пересобрать мультисерт из доменов бэкапа сейчас? (DNS уже должен указывать на этот сервер)" "y"
+    [[ "$rcert" == true ]] && { CERT_DEFER=0; cert_batch_flush; }
+  fi
   pause
 }
 
@@ -448,6 +501,7 @@ certs_menu() {
   echo "  15) Очистка сирот (линии, которые нигде не используются)"
   echo "  16) Очистка дублей -0001"
   echo "  17) Аудит линий (SAN файла vs серт)"
+  echo "  18) Убрать дубли покрытия (домен в линии + персональный серт)"
   echo "  0) Назад"
   line
   local action=""
@@ -471,6 +525,7 @@ certs_menu() {
     15) cert_lines_cleanup ;;
     16) cert_dedup_0001 ;;
     17) cert_lines_audit ;;
+    18) cert_cover_dedup ;;
     0) return 0 ;;
     *) sleep 1 ;;
   esac
