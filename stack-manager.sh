@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.40"
+STACK_MANAGER_VERSION="1.0.41"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -607,9 +607,10 @@ ensure_deps() {  local missing=() t
 load_module /usr/lib/nginx/modules/ngx_stream_module.so;
 user www-data;
 worker_processes auto;
+worker_rlimit_nofile 65535;
 pid /run/nginx.pid;
 error_log /var/log/nginx/error.log;
-events { worker_connections 1024; }
+events { worker_connections 4096; }
 stream { include /etc/nginx/streams-enabled/*.conf; }
 http {
     include /etc/nginx/mime.types;
@@ -635,6 +636,55 @@ NGINXCFG
   if ! nginx_stream_module_enable; then
     warn "nginx: модуль stream не подключился — 443/SNI работать не будет (проверь пакет libnginx-mod-stream)"
   fi
+  nginx_tune_limits
+}
+
+# nginx держит под SNI-роутингом ВСЕ клиентские соединения на 443. Дефолтов
+# Debian/Ubuntu (worker_connections 768, rlimit 1024) не хватает: на пике
+# connections nginx пишет в error.log «768 worker_connections are not enough»,
+# перестаёт принимать новые коннекты и 443 «залипает» до перезапуска xray —
+# ровно тот симптом, когда «после перезапуска инбаунда снова работает».
+# Поднимаем лимиты идемпотентно: правим только когда значение не наше.
+nginx_tune_limits() {
+  local conf=${NGINX_CONF:-/etc/nginx/nginx.conf}
+  [[ -f "$conf" ]] || return 0
+  local want_conn=4096 want_no=65535 cur_conn="" cur_no=""
+  cur_conn=$(sed -nE 's/.*worker_connections[[:space:]]+([0-9]+).*/\1/p' "$conf" | head -1)
+  cur_no=$(sed -nE 's/^[[:space:]]*worker_rlimit_nofile[[:space:]]+([0-9]+).*/\1/p' "$conf" | head -1)
+  if [[ "$cur_conn" == "$want_conn" && "$cur_no" == "$want_no" ]]; then
+    return 0
+  fi
+  local bak
+  bak="${conf}.bak-limits-$(date +%Y%m%d-%H%M%S)"
+  cp -a "$conf" "$bak" 2>/dev/null || true
+  if [[ -z "$cur_no" ]]; then
+    if grep -qE '^[[:space:]]*worker_processes' "$conf"; then
+      sed -i -E "0,/^[[:space:]]*worker_processes[^;]*;/s//worker_rlimit_nofile ${want_no};\n&/" "$conf"
+    elif grep -qE '^[[:space:]]*user[[:space:]]' "$conf"; then
+      sed -i -E "0,/^[[:space:]]*user[^;]*;/s//&\nworker_rlimit_nofile ${want_no};/" "$conf"
+    else
+      sed -i "1i worker_rlimit_nofile ${want_no};" "$conf"
+    fi
+  elif [[ "$cur_no" != "$want_no" ]]; then
+    sed -i -E "s/^([[:space:]]*worker_rlimit_nofile[[:space:]]+)[0-9]+/\1${want_no}/" "$conf"
+  fi
+  if grep -q 'worker_connections' "$conf"; then
+    sed -i -E "s/worker_connections[[:space:]]+[0-9]+/worker_connections ${want_conn}/g" "$conf"
+  elif grep -qE '^[[:space:]]*events[[:space:]]*\{' "$conf"; then
+    sed -i -E "0,/^[[:space:]]*events[[:space:]]*\{/s//events {\n    worker_connections ${want_conn};/" "$conf"
+  else
+    # Блока events нет вовсе — дописываем его в конец файла (уровень main).
+    printf 'events {\n    worker_connections %s;\n}\n' "$want_conn" >> "$conf"
+  fi
+  if ! nginx -t >/dev/null 2>&1; then
+    err "nginx: лимиты соединений не применились (nginx -t) — возвращаю прежний nginx.conf"
+    [[ -f "$bak" ]] && cp -a "$bak" "$conf" 2>/dev/null || true
+    return 0
+  fi
+  log "nginx: лимиты соединений подняты (worker_connections ${want_conn}, worker_rlimit_nofile ${want_no})"
+  nginx_reload >/dev/null 2>&1 || warn "nginx: конфиг с новыми лимитами записан, но reload не удался"
+  rm -f "$bak" 2>/dev/null || true
+  return 0
 }
 
 get_random_port() { echo $(( ((RANDOM<<15)|RANDOM) % 49152 + 10000 )); }
@@ -15916,6 +15966,14 @@ stack_doctor() {
     bad "$SNI_CONF не найден"; hint "п.1 — первичная настройка"
   fi
   if nginx -t >/dev/null 2>&1; then ok "nginx -t: конфиг валиден"; else bad "nginx -t провален:"; nginx -t 2>&1 | tail -3 | sed 's/^/      /'; fi
+  local wconn wno
+  wconn=$(sed -nE 's/.*worker_connections[[:space:]]+([0-9]+).*/\1/p' /etc/nginx/nginx.conf 2>/dev/null | head -1)
+  wno=$(sed -nE 's/^[[:space:]]*worker_rlimit_nofile[[:space:]]+([0-9]+).*/\1/p' /etc/nginx/nginx.conf 2>/dev/null | head -1)
+  if [[ "${wconn:-0}" -ge 2048 ]]; then ok "nginx worker_connections=$wconn${wno:+, open files=$wno}"
+  else warn2 "nginx worker_connections=${wconn:-нет} — мало (дефолт 768 забивается на 443)"; hint "п.1 или самопочинка — поднимет до 4096"; fi
+  if grep -q 'worker_connections are not enough' /var/log/nginx/error.log 2>/dev/null; then
+    warn2 "в error.log есть «worker_connections are not enough» — 443 упирается в лимит соединений"
+  fi
 
   echo -e "${B}— Сертификаты (истекают < 14 дн — [!]) —${N}"
   local ldir crt end_left

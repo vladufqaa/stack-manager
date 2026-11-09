@@ -51,6 +51,14 @@ stack_doctor() {
     bad "$SNI_CONF не найден"; hint "п.1 — первичная настройка"
   fi
   if nginx -t >/dev/null 2>&1; then ok "nginx -t: конфиг валиден"; else bad "nginx -t провален:"; nginx -t 2>&1 | tail -3 | sed 's/^/      /'; fi
+  local wconn wno
+  wconn=$(sed -nE 's/.*worker_connections[[:space:]]+([0-9]+).*/\1/p' /etc/nginx/nginx.conf 2>/dev/null | head -1)
+  wno=$(sed -nE 's/^[[:space:]]*worker_rlimit_nofile[[:space:]]+([0-9]+).*/\1/p' /etc/nginx/nginx.conf 2>/dev/null | head -1)
+  if [[ "${wconn:-0}" -ge 2048 ]]; then ok "nginx worker_connections=$wconn${wno:+, open files=$wno}"
+  else warn2 "nginx worker_connections=${wconn:-нет} — мало (дефолт 768 забивается на 443)"; hint "п.1 или самопочинка — поднимет до 4096"; fi
+  if grep -q 'worker_connections are not enough' /var/log/nginx/error.log 2>/dev/null; then
+    warn2 "в error.log есть «worker_connections are not enough» — 443 упирается в лимит соединений"
+  fi
 
   echo -e "${B}— Сертификаты (истекают < 14 дн — [!]) —${N}"
   local ldir crt end_left
