@@ -284,6 +284,12 @@ sync_inbound_certs() {
       if reality_external_dest "$id"; then
         continue   # внешний Reality — cert/decoy не требуются
       fi
+      # Канонический домен — из SNI-карты nginx (маршрут 443), а не из БД:
+      # serverNames/hosts могут держать общий (панельный) домен, а декой и
+      # serverNames обязаны жить на домене, которым SNI-роутер ведёт сюда.
+      local sni_dom=""
+      sni_dom=$(sni_domain_for_inbound "$id" 2>/dev/null || true)
+      [[ -n "$sni_dom" && "$sni_dom" != "$dom" ]] && dom="$sni_dom"
       local cline2 c_cert c_key want_port droot
       cline2=$(cert_lineage_for "$dom")
       if [[ -z "$cline2" ]]; then

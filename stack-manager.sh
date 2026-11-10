@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.41"
+STACK_MANAGER_VERSION="1.0.42"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -4055,6 +4055,12 @@ sync_inbound_certs() {
       if reality_external_dest "$id"; then
         continue   # внешний Reality — cert/decoy не требуются
       fi
+      # Канонический домен — из SNI-карты nginx (маршрут 443), а не из БД:
+      # serverNames/hosts могут держать общий (панельный) домен, а декой и
+      # serverNames обязаны жить на домене, которым SNI-роутер ведёт сюда.
+      local sni_dom=""
+      sni_dom=$(sni_domain_for_inbound "$id" 2>/dev/null || true)
+      [[ -n "$sni_dom" && "$sni_dom" != "$dom" ]] && dom="$sni_dom"
       local cline2 c_cert c_key want_port droot
       cline2=$(cert_lineage_for "$dom")
       if [[ -z "$cline2" ]]; then
@@ -7452,6 +7458,18 @@ decoy_port_for_id() {   # <inbound_id>
   printf '%s' "$(( 4444 + d ))"
 }
 
+# Канонический домен инбаунда по SNI-карте nginx: строка
+# «domain inb_<id>_backend;» в sni-router.conf. Это единственный источник,
+# отражающий фактическую маршрутизацию 443: hosts.address может держать
+# общий/панельный домен, а serverNames в БД — быть испорчены прошлой починкой.
+sni_domain_for_inbound() {   # <inbound_id>
+  [[ -n "$1" && -f "$SNI_CONF" ]] || return 1
+  local d
+  d=$(grep -E "^[[:space:]]+[^[:space:]]+[[:space:]]+inb_${1}_backend;" "$SNI_CONF" 2>/dev/null | awk '{print $1}' | head -1 || true)
+  [[ -n "$d" ]] || return 1
+  printf '%s' "$d"
+}
+
 # Reality dest → локальный decoy nginx (внутренний IP:порт decoy-конфа)
 # + синхронизация serverNames с выбранным SNI-доменом.
 # Если домен пустой или www.microsoft.com — ничего не меняем (остаётся microsoft).
@@ -7504,12 +7522,18 @@ reality_sni_repair() {
     [[ -n "$id" ]] || continue
     grep -Eqi '"security"[[:space:]]*:[[:space:]]*"reality"' <<<"$st" || continue
     reality_external_dest "$id" && continue
-    # Канонический домен хоста: SNI hosts-строки → address → текущий serverNames[0]
-    dom=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
-      "SELECT COALESCE((SELECT sni FROM hosts WHERE inbound_id=$id AND port=443 AND COALESCE(sni,'')<>'' LIMIT 1),
-                       (SELECT address FROM hosts WHERE inbound_id=$id AND port=443 AND COALESCE(address,'')<>'' LIMIT 1),
-                       json_extract(stream_settings,'\$.realitySettings.serverNames[0]'),'')
-       FROM inbounds WHERE id=$id;" 2>/dev/null | head -1 || true)
+    # Канонический домен хоста: SNI-карта nginx → hosts.sni → hosts.address →
+    # текущий serverNames[0]. SNI-карта — высший приоритет: она отражает
+    # фактический маршрут 443, тогда как hosts.address бывает общий/панельный
+    # домен — прежняя починка перезаписывала serverNames им и ломала ссылки.
+    dom=$(sni_domain_for_inbound "$id" 2>/dev/null || true)
+    if [[ -z "$dom" ]]; then
+      dom=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" \
+        "SELECT COALESCE((SELECT sni FROM hosts WHERE inbound_id=$id AND port=443 AND COALESCE(sni,'')<>'' LIMIT 1),
+                         (SELECT address FROM hosts WHERE inbound_id=$id AND port=443 AND COALESCE(address,'')<>'' LIMIT 1),
+                         json_extract(stream_settings,'\$.realitySettings.serverNames[0]'),'')
+         FROM inbounds WHERE id=$id;" 2>/dev/null | head -1 || true)
+    fi
     [[ -n "$dom" && "$dom" != "www.microsoft.com" ]] || continue
     cur=$(sqlite3 -cmd ".timeout 3000" "$XUI_DB" "SELECT COALESCE(json_extract(stream_settings,'\$.realitySettings.serverNames[0]'),'') FROM inbounds WHERE id=$id;" 2>/dev/null || true)
     [[ "$cur" == "$dom" ]] && continue

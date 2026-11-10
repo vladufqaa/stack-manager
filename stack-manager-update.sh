@@ -52,7 +52,10 @@ update(){
   curl -fsSL --retry 3 -o "$archive" "$url"
   curl -fsSL --retry 3 -o "$archive.sha256" "$sums"
   local expected actual
-  expected=$(awk 'NF {print $1; exit}' "$archive.sha256")
+  # Берём только сам хеш (первое поле): старые релизы писали в .sha256 путь
+  # `dist/stack-manager-X.tar.gz`, и проверка `sha256sum -c` из tmp-каталога
+  # падала на несуществующем пути. CRLF из Windows-сборки тоже срезаем.
+  expected=$(tr -d '\r' < "$archive.sha256" | awk 'NF {print $1; exit}')
   actual=$(sha256sum "$archive" | awk '{print $1}')
   [[ "$expected" =~ ^[0-9a-fA-F]{64}$ && "$actual" == "$expected" ]] || { err 'SHA256 package не совпал'; return 1; }
   tar -xzf "$archive" -C "$tmp"

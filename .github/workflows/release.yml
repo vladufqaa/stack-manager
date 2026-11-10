@@ -33,7 +33,11 @@ jobs:
           cp stack-manager.sh VERSION README.md CHANGELOG.md stack-manager-update.sh "dist/$pkg/"
           cp -r assets "dist/$pkg/"
           tar -czf "dist/$pkg.tar.gz" -C dist "$pkg"
-          sha256sum "dist/$pkg.tar.gz" > "dist/$pkg.tar.gz.sha256"
+          # Имя файла в .sha256 — без каталога dist/: старые версии
+          # stack-manager-update.sh проверяют сумму через `sha256sum -c`
+          # из временного каталога, где архив лежит по базовому имени.
+          # С префиксом dist/ проверка падала («FAILED open or read»).
+          (cd dist && sha256sum "$pkg.tar.gz") > "dist/$pkg.tar.gz.sha256"
       - name: Prepare release notes
         shell: bash
         run: |
