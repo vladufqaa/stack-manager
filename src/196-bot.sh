@@ -781,6 +781,7 @@ mon_tick() { # периодическая проверка (вызывается
   local now=$SECONDS
   (( LAST_MON >= 0 && now - LAST_MON < MON_IV )) && return 0
   LAST_MON=$now
+  mon_load   # общий файл состояния: другой экземпляр мог переключить события/порог — подтягиваем до проверок
   local st cpu_pct mem_pct xr code pct bp logf sz endd left bad cf
   bp=$(panel_base)
 
