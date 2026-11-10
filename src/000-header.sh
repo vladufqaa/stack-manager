@@ -69,6 +69,9 @@ export DEBIAN_FRONTEND=noninteractive
 # «Статус: активен» и ломает парсинг. Собственные RU-сообщения скрипта не страдают.
 # UTF-8 обязателен для корректного Backspace в Bash Readline.
 export LC_ALL=C.UTF-8 LANG=C.UTF-8
+# Просим терминал клиента переключиться в UTF-8 (xterm-совместимые, incl. Windows
+# Terminal): без этого консоль Windows с кодовой страницей 1251/866 показывает кракозябры.
+[[ -t 1 ]] && printf '\033%%G'
 read_safe() {
   local __prompt="$1" __var="$2"
   builtin read -e -r -p "$__prompt" "$__var"
