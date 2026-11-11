@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-STACK_MANAGER_VERSION="1.0.43"
+STACK_MANAGER_VERSION="1.0.44"
 # =====================================================================
 # stack-manager.sh — управление SNI-стеком (3x-ui/LucX + AdGuard)
 #   - Установка AdGuard Home (если не установлен)
@@ -2332,6 +2332,17 @@ setup_panel_cert_domain() {
   cert_issue "$pdomain" || { err "Сертификат $pdomain не выпущен"; return 1; }
   local cp_line="" pc="" pk=""
   cp_line=$(cert_paths "$pdomain") || true
+  if [[ -z "$cp_line" ]]; then
+    # certbot мог выпустить серт под другим именем линии (-0001 / режим линий) —
+    # ищем фактический серт по SAN, иначе после успешного выпуска панель
+    # оставалась без сертификата
+    local _fc=""
+    _fc=$(find_covering_cert "$pdomain") || true
+    if [[ -n "$_fc" ]]; then
+      cp_line="${_fc%%|*}/fullchain.pem ${_fc%%|*}/privkey.pem"
+      warn "cert_paths пуст, серт найден по SAN: ${_fc%%|*} — использую его"
+    fi
+  fi
   [[ -z "$cp_line" ]] && { err "cert_paths пуст для $pdomain"; return 1; }
   pc="${cp_line%% *}"; pk="${cp_line##* }"
   # пути панели — из /etc/letsencrypt/live/ (единое место)
@@ -9690,6 +9701,17 @@ initial_setup() {
       err "Не удалось выпустить cert"; restore_running_services; return 1
     fi
     cp_line=$(cert_paths "$PANEL_DOMAIN") || true
+    if [[ -z "$cp_line" ]]; then
+      # certbot мог выпустить серт под другим именем линии (суффикс -0001,
+      # режим линий A/B) — ищем фактический серт по SAN, иначе после успешного
+      # выпуска панель оставалась без сертификата («выпущен, но не вписан»)
+      local _fc=""
+      _fc=$(find_covering_cert "$PANEL_DOMAIN") || true
+      if [[ -n "$_fc" ]]; then
+        cp_line="${_fc%%|*}/fullchain.pem ${_fc%%|*}/privkey.pem"
+        warn "cert_paths пуст, серт найден по SAN: ${_fc%%|*} — использую его"
+      fi
+    fi
     if [[ -n "$cp_line" ]]; then pc="${cp_line%% *}"; pk="${cp_line##* }"; fi
   fi
   if [[ -z "$pc" || ! -f "$pc" || ! -f "$pk" ]]; then

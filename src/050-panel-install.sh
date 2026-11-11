@@ -266,6 +266,17 @@ setup_panel_cert_domain() {
   cert_issue "$pdomain" || { err "Сертификат $pdomain не выпущен"; return 1; }
   local cp_line="" pc="" pk=""
   cp_line=$(cert_paths "$pdomain") || true
+  if [[ -z "$cp_line" ]]; then
+    # certbot мог выпустить серт под другим именем линии (-0001 / режим линий) —
+    # ищем фактический серт по SAN, иначе после успешного выпуска панель
+    # оставалась без сертификата
+    local _fc=""
+    _fc=$(find_covering_cert "$pdomain") || true
+    if [[ -n "$_fc" ]]; then
+      cp_line="${_fc%%|*}/fullchain.pem ${_fc%%|*}/privkey.pem"
+      warn "cert_paths пуст, серт найден по SAN: ${_fc%%|*} — использую его"
+    fi
+  fi
   [[ -z "$cp_line" ]] && { err "cert_paths пуст для $pdomain"; return 1; }
   pc="${cp_line%% *}"; pk="${cp_line##* }"
   # пути панели — из /etc/letsencrypt/live/ (единое место)

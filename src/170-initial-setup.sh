@@ -453,6 +453,17 @@ initial_setup() {
       err "Не удалось выпустить cert"; restore_running_services; return 1
     fi
     cp_line=$(cert_paths "$PANEL_DOMAIN") || true
+    if [[ -z "$cp_line" ]]; then
+      # certbot мог выпустить серт под другим именем линии (суффикс -0001,
+      # режим линий A/B) — ищем фактический серт по SAN, иначе после успешного
+      # выпуска панель оставалась без сертификата («выпущен, но не вписан»)
+      local _fc=""
+      _fc=$(find_covering_cert "$PANEL_DOMAIN") || true
+      if [[ -n "$_fc" ]]; then
+        cp_line="${_fc%%|*}/fullchain.pem ${_fc%%|*}/privkey.pem"
+        warn "cert_paths пуст, серт найден по SAN: ${_fc%%|*} — использую его"
+      fi
+    fi
     if [[ -n "$cp_line" ]]; then pc="${cp_line%% *}"; pk="${cp_line##* }"; fi
   fi
   if [[ -z "$pc" || ! -f "$pc" || ! -f "$pk" ]]; then
